@@ -537,6 +537,11 @@ try {
   };
   const X3_MERGE = (eq) => unpack(`0,0:${eq}:0 0,1:${eq}:0 1,0:123:0 1,1:123:0 2,0:127:0 2,1:123:3 3,0:123:0 4,0:123:0 4,1:${eq}:0`);
   const SMELT_X3 = '0,0:123:1 0,1:127:1 0,2:123:1 0,3:123:0 1,0:113:0 1,2:123:3 1,3:126:0 2,3:123:0 3,0:123:0 3,2:123:0 3,3:126:0 4,0:123:0 4,1:113:0 4,3:123:0 5,0:123:0 5,3:123:0 6,0:123:0 6,1:123:0 6,2:113:0 7,0:123:0 7,1:123:0';
+  const isLive = () => running && !cfg.dryRun;   // sending live actions: what `busy` reports and what the reserve registry asks
+  const WORKSHOP_V1 = core.floorDesigns.workshopV1;
+  const RIVET_X3 = core.floorDesigns.rivetX3;
+  const FURNITURE_V1 = new Set(['Make Bookshelf', 'Make Table', 'Make Chair']);   // one-input Workshop recipes of the core plan (rate 5)
+  const FURNITURE_RIVET = new Set(['Make Bench', 'Make Desk']);                  // two-input ones (rate 3)
   const FLOOR_LIBRARY = [
     { // proven max on every 5x2 floor with no inputs (26,864 layouts scored)
       name: 'x3 merge', rate: 3,
@@ -551,10 +556,13 @@ try {
     { name: 'Smelt x3', rate: 3, recipes: [R.IRON_SHEET, 10, 11], // Iron, Steel, Aluminum Sheet
       cells: SMELT_X3 + ' 8,0:123:0 8,1:123:0 8,2:123:0 9,0:114:0 9,1:114:0 9,2:114:0' },
     { name: 'Kiln x3', rate: 3, recipes: [13, 14], cells: SMELT_X3 }, // Mix Concrete, Blow Glass
-    { name: 'Frame Timber x5', rate: 5, recipes: [R.FRAME_TIMBER],
-      cells: '0,0:114:0 0,1:114:0 0,2:114:0 0,3:114:0 0,4:114:0 10,1:123:0 10,2:116:2 10,4:123:0 11,0:123:0 11,1:126:0 11,4:123:0 12,0:123:0 12,1:123:0 12,4:123:0 13,0:123:0 13,1:126:0 13,2:123:1 13,3:123:2 13,4:123:0 14,0:123:0 14,1:123:1 14,2:123:0 14,4:123:0 15,0:116:0 15,2:116:0 15,4:123:0 16,4:123:0 17,4:123:0 2,0:123:0 2,1:123:0 2,2:123:0 2,3:123:0 2,4:123:0 3,0:123:0 3,1:123:1 3,2:127:0 3,3:123:3 3,4:123:0 4,0:116:0 4,2:123:0 4,3:116:0 5,2:123:0 6,2:123:0 7,0:123:0 7,1:123:0 7,2:123:3 7,3:123:0 8,0:123:1 8,1:128:0 8,2:123:1 8,3:127:1 8,4:123:0 9,1:123:0 9,3:123:1 9,4:127:0' },
-    { name: 'Rivet x3', rate: 3, recipes: [R.RIVET],
-      cells: '0,0:123:0 0,1:123:1 0,2:123:1 0,3:123:1 0,4:123:0 1,0:123:0 1,4:123:0 10,1:123:0 10,2:123:0 10,4:123:0 11,1:123:0 11,2:123:0 11,4:123:0 12,1:123:0 12,2:116:0 12,4:123:0 13,1:123:0 13,4:123:0 14,1:123:0 14,4:123:0 15,0:116:0 15,2:123:0 15,3:116:0 16,2:123:0 17,2:123:0 2,0:126:0 2,1:123:1 2,2:126:1 2,3:123:0 2,4:123:0 3,0:123:0 3,2:123:0 3,3:114:0 3,4:123:0 4,0:114:0 4,2:114:0 4,4:123:0 5,3:123:0 5,4:123:0 6,0:123:0 6,2:123:0 6,3:127:0 6,4:123:3 7,0:123:1 7,1:123:1 7,2:127:0 7,3:123:3 8,2:123:0 9,1:123:0 9,2:126:0 9,3:123:1 9,4:123:0' },
+    { name: 'Frame Timber x5', rate: 5, recipes: [R.FRAME_TIMBER], cells: WORKSHOP_V1 },
+    // Scored with the game's engine on 2026-11-22: x5 on Make Bookshelf / Table / Chair. Layouts are per recipe, so each gets its own
+    // EditLayout; the live scorer (engineRate) still decides, the library rate is only a fallback when no scorer is reachable.
+    { name: 'Workshop v1 x5', rate: 5, fits: (s, r) => (FURNITURE_V1.has(s.recipe(r)?.name) ? unpack(WORKSHOP_V1) : null) },
+    { name: 'Rivet x3', rate: 3, recipes: [R.RIVET], cells: RIVET_X3 },
+    // Scored x3 on Make Bench and Make Desk (2026-11-22).
+    { name: 'Rivet x3 (two inputs)', rate: 3, fits: (s, r) => (FURNITURE_RIVET.has(s.recipe(r)?.name) ? unpack(RIVET_X3) : null) },
   ];
 
   // Only a frozen set of cells (a library design) can be remembered: the game's own cells may change in place.
@@ -1346,6 +1354,16 @@ try {
   function exportCfg() { return { cfg: persistable() }; }
   function importCfg(o) {
     if (running && !cfg.dryRun) throw new Error('stop the live run first');
+    return applyCfg(o);
+  }
+  // Live-safe, saving setter for other modules (Core plan): the same validation as importCfg, allowed while Autopilot runs,
+  // and neverSell is unioned with what is already there. Settings poked straight onto `cfg` would not be saved.
+  function tune(patch = {}) {
+    const p = { ...patch };
+    if (Array.isArray(p.neverSell)) p.neverSell = [...new Set([...cfg.neverSell, ...p.neverSell])];
+    return applyCfg({ cfg: p });
+  }
+  function applyCfg(o) {
     const applied = [], skipped = [];
     for (const [k, v] of Object.entries(o?.cfg ?? {})) {
       const f = FIELDS[k];
@@ -1869,11 +1887,11 @@ try {
   // ---- load ---------------------------------------------------------------------------
 
   W.earlyGame = {
-    start, stop, plan, status, floors, offline, keepPaused, panel, read, decide, cfg, hold, release, reserve, exportCfg, importCfg, resetCfg,
+    start, stop, plan, status, floors, offline, keepPaused, panel, read, decide, cfg, hold, release, reserve, tune, exportCfg, importCfg, resetCfg,
     get stalled() { return stalled; },
     get running() { return running; },
     get active() { return active; },
-    get busy() { return running && !cfg.dryRun; },   // sending live actions
+    get busy() { return isLive(); },   // sending live actions
     get held() { return heldReason(); },
     // Pure pieces for the offline simulator.
     _core: {
@@ -1882,10 +1900,18 @@ try {
       setClock: (fn) => { nowMs = fn; courierHoldUntil = 0; courierMisses = 0; cooldowns.clear(); successes.clear(); failures.clear(); boosterBad = 0; for (const k in boosterLeft) delete boosterLeft[k]; },
     },
     _unload: () => {
-      unloaded = true; running = false; holds.clear(); dropLock(); core.setBadge('AP', '');
+      unloaded = true; running = false; holds.clear(); dropLock(); core.setBadge('AP', ''); core.reserves?.unregister('earlyGame');
       if (HAS_DOM) unmountUi();
     },
   };
+
+  // Calls go through the exported object so anything wrapping earlyGame.hold / release (tests, other scripts) still sees them.
+  core.reserves?.register('earlyGame', {
+    reserve: () => (W.earlyGame?.reserve ?? reserve)(),
+    busy: () => (W.earlyGame ? W.earlyGame.busy : isLive()),
+    hold: (w) => (W.earlyGame?.hold ?? hold)(w),
+    release: (w) => (W.earlyGame?.release ?? release)(w),
+  });
 
   // Wait for the game to render and connect before mounting or resuming.
   if (HAS_DOM) (async () => {

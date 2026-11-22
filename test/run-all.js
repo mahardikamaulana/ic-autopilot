@@ -28,6 +28,9 @@ for (const s of SH) add('ui:' + s, ['bun', T('ui-harness.js'), 'check', s], [BUI
 for (let k = 0; k < 3; k++) add('toolkit:' + k, ['bun', T('toolkit-test.js'), '--shard=' + k + '/3'], [BUILT, T('toolkit-test.js'), ...BOARD], 4);
 for (const s of ['rich', 'live', 'chaos', 'patched', 'nobooster', 'cdfarm']) add('sim:' + s, ['bun', T('early-game-sim.js'), s, '44'], [BUILT, T('early-game-sim.js'), ...BOARD], 2);
 add('pacer', ['bun', T('pacer-test.js')], ['src/core.js', 'src/pacer.js', T('pacer-test.js')], 1);
+add('sim:coreplan', ['bun', T('core-plan-sim.js')], [BUILT, T('core-plan-sim.js'), T('live-board.json')], 6);
+for (const m of ['cp-buildout', 'cp-retail', 'cp-lab', 'cp-ladder', 'cp-cadence']) add(m, ['bun', T(m + '-test.js')], [BUILT, T(m + '-test.js'), T('cp-fixtures.js'), T('live-board.json'), T('live-stageB.json')], 4);
+add('core-math', ['bun', T('core-math-test.js')], ['src/core-math.js', T('core-math-test.js'), '../scripts/core-plan/my-plan.js', '../scripts/core-plan/state-example.json', '../scripts/core-plan/catalog-2026-11-22.json'], 2);
 add('planner', ['bun', T('planner-test.js')], ['src/core.js', 'src/planner.js', T('planner-test.js'), ...BOARD], 1);
 
 const argv = process.argv.slice(2);

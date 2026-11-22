@@ -1212,6 +1212,78 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
   });
 
 
+  await t('reserves registry: merges providers, holds every one, drops one on unregister', async () => {
+    const { core } = loadBoth();
+    assert.ok(core.reserves.names().includes('earlyGame'), 'Autopilot registers itself');
+    const calls = [], logErr = console.error;
+    console.error = () => {};   // the throwing provider below is logged, not fatal
+    core.reserves.register('a', { reserve: () => ({ moneyFloor: 100, items: { 1: 5 }, nextTech: null, phase: 3 }), busy: () => false, hold: async (w) => { calls.push('hold-a:' + w); }, release: (w) => calls.push('rel-a:' + w) });
+    const offB = core.reserves.register('b', { reserve: () => ({ moneyFloor: 500, items: { 1: 7, 9: Infinity }, nextTech: { cd: 5000, name: 'Retail Store' }, phase: 'x' }), busy: () => true, hold: async (w) => { calls.push('hold-b:' + w); }, release: (w) => calls.push('rel-b:' + w) });
+    core.reserves.register('broken', { reserve: () => { throw new Error('boom'); }, busy: () => { throw new Error('boom'); } });
+    const m = core.reserves.merged();
+    assert.strictEqual(m.moneyFloor, 500, 'the highest floor wins');
+    assert.strictEqual(m.items[1], 12, 'item reserves add up');
+    assert.strictEqual(m.items[9], Infinity, 'Infinity stays Infinity');
+    assert.strictEqual(m.nextTech.cd, 5000);
+    assert.strictEqual(m.phase, 3, 'the first provider with a phase wins');
+    assert.ok(core.reserves.anyBusy());
+    await core.reserves.holdAll('CD Farm');
+    core.reserves.releaseAll('CD Farm');
+    assert.deepStrictEqual(calls.sort(), ['hold-a:CD Farm', 'hold-b:CD Farm', 'rel-a:CD Farm', 'rel-b:CD Farm']);
+    offB();
+    assert.ok(!core.reserves.names().includes('b'));
+    assert.strictEqual(core.reserves.merged().nextTech, null);
+    core.reserves.unregister('a'); core.reserves.unregister('broken');
+    assert.strictEqual(core.reserves.merged(), null, 'no provider has a reserve');
+    assert.ok(!core.reserves.anyBusy());
+    console.error = logErr;
+  });
+
+  await t('Autopilot unregisters its reserve provider when it unloads', () => {
+    const { core, ap } = loadBoth();
+    assert.ok(core.reserves.names().includes('earlyGame'));
+    ap._unload();
+    assert.ok(!core.reserves.names().includes('earlyGame'));
+  });
+
+  await t('earlyGame.tune: saved, validated like importCfg, neverSell is unioned', () => {
+    const disk = {};
+    globalThis.localStorage = { getItem: (k) => disk[k] ?? null, setItem: (k, v) => { disk[k] = String(v); }, removeItem: (k) => { delete disk[k]; } };
+    try {
+      const { ap } = loadBoth();
+      ap.cfg.neverSell = [5];
+      const r = ap.tune({ neverSell: [9, 5, 14, 15], cdBooster: false, workshops: 'lots', nosuchkey: 1, dryRun: false });
+      assert.deepStrictEqual(r.applied.sort(), ['cdBooster', 'neverSell']);
+      assert.deepStrictEqual(r.skipped.sort(), ['dryRun', 'nosuchkey', 'workshops'], 'wrong type, unknown and session-only keys are refused');
+      assert.deepStrictEqual([...ap.cfg.neverSell].sort((a, b) => a - b), [5, 9, 14, 15], 'unioned, not replaced');
+      assert.strictEqual(ap.cfg.cdBooster, false);
+      const saved = JSON.parse(disk['earlyGame.v2']);
+      assert.strictEqual(saved.cfg.cdBooster, false, 'saved: survives a reload');
+      assert.deepStrictEqual([...saved.cfg.neverSell].sort((a, b) => a - b), [5, 9, 14, 15]);
+      ap.tune({ neverSell: [9] });
+      assert.strictEqual(ap.cfg.neverSell.length, 4, 'a second tune does not duplicate');
+    } finally { fresh(); delete globalThis.localStorage; }
+  });
+
+  await t('floor library: furniture recipes get a Workshop design (x5 Bookshelf/Table/Chair, Rivet x3 for Bench/Desk; scored live 2026-11-22)', () => {
+    const { ap } = loadBoth();
+    const k = ap._core, C = k.normalize(board.catalog);
+    const rid = (n) => board.catalog.recipes.find((r) => r.name === n).id;
+    const st = baseState();
+    st.groups = {
+      1: { building: 8, region: 0, count: 2, recipe: rid('Make Bookshelf') }, 2: { building: 8, region: 0, count: 2, recipe: rid('Make Table') },
+      3: { building: 8, region: 0, count: 2, recipe: rid('Make Chair') }, 4: { building: 8, region: 0, count: 1, recipe: rid('Make Bench') }, 5: { building: 8, region: 0, count: 1, recipe: rid('Make Desk') },
+    };
+    const rows = k.floorTable(k.snapshot(st, C, [], [], 0));
+    const by = Object.fromEntries(rows.map((r) => [r.task, r]));
+    for (const n of ['Make Bookshelf', 'Make Table', 'Make Chair']) assert.ok(by[n] && by[n].best === 'x5' && by[n].plan === 'Workshop v1 x5', n + ': ' + JSON.stringify(by[n]));
+    for (const n of ['Make Bench', 'Make Desk']) assert.ok(by[n] && by[n].best === 'x3' && by[n].plan === 'Rivet x3 (two inputs)', n + ': ' + JSON.stringify(by[n]));
+    // Library fallback rates here (no engine in the test); the designs scored x5 / x3 on these recipes in the live game on 2026-11-22.
+    const lib = (n) => rows.find((r) => r.task === n).plan;
+    assert.strictEqual(lib('Make Table'), lib('Make Chair'));
+  });
+
+
   console.log(failed ? '\n' + failed + ' failed' : '\nall passed');
   process.exit(failed ? 1 : 0);
 })();

@@ -201,5 +201,35 @@ t('determinism: same input twice -> same output, inputs untouched', () => {
   assert.ok(a.units.length > 0);
 });
 
+// ---- Core plan: CD Farm Auto against the wiki's Farm ladder (§11.4) and the Wooden Frame guard ------------------
+const ladder = (over = {}) => base({ unlocked: [MINE, id('Quarry')], owned: { [CAMP]: 112, [FARM]: 0, [MINE]: 10, [id('Quarry')]: 4 }, usableAcres: 60,
+  I: 1e12, R: 755000, T: 6, minUnits: 1, maxBatch: 16, maxTypes: 1, stock: { [WF]: 5000 }, ...over });
+const perCdDollars = (r) => r.perCdCents / 100;
+
+t('Auto planner: Stage D ladder picks Farm at the wiki batch costs ($/CD)', () => {
+  for (const [batch, want] of [[8, 27.7], [16, 35.9]]) {
+    const r = P.plan(deepFreeze(ladder({ maxBatch: batch })));
+    assert.deepStrictEqual(unitsOf(r), { [FARM]: batch }, 'batch ' + batch);
+    assert.ok(Math.abs(perCdDollars(r) - want) <= 0.05, 'batch ' + batch + ' costs ' + perCdDollars(r));
+  }
+});
+
+t('Auto planner: with Wooden Frames valued (a Rivet run eats them) the plan stays on Farm, one type', () => {
+  const iv = P.itemValues({ catalog: C, bids: {}, runningInputs: [WF] });
+  assert.ok(iv[WF] > 0);
+  const r = P.plan(deepFreeze(ladder({ itemValue: { [WF]: iv[WF] }, maxTypes: 2 })));
+  assert.deepStrictEqual(unitsOf(r), { [FARM]: 16 });
+});
+
+t('Auto planner: Wooden Frames worth nothing (nothing consumes them) pull in Quarry/Mine unless the item is reserved', () => {
+  // This is the post-Retail behaviour Core plan has to guard: it reserves the frames instead of letting the farm burn them.
+  const loose = P.plan(deepFreeze(ladder({ itemValue: { [WF]: 0 }, maxTypes: 2 })));
+  assert.ok(Object.keys(unitsOf(loose)).some((b) => Number(b) !== FARM), 'frames are free: ' + JSON.stringify(unitsOf(loose)));
+  assert.ok(perCdDollars(loose) < 35.9, 'cheaper per CD only because the frames cost nothing');
+  const guarded = P.plan(deepFreeze(ladder({ itemValue: { [WF]: 0 }, maxTypes: 2, reserve: { [WF]: Infinity } })));
+  assert.deepStrictEqual(unitsOf(guarded), { [FARM]: 16 }, 'reserved frames are not spent');
+  assert.ok(guarded.notes.some((n) => /skipped: item:/.test(n)), guarded.notes.join(' | '));
+});
+
 console.log(failed ? failed + ' failed' : 'all passed');
 if (failed) process.exitCode = 1;

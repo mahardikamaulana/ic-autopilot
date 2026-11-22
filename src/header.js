@@ -17,7 +17,8 @@
 // Generated from src/*.js by build.js: edit those, then run
 //   bun build.js            (bun build.js --bump  raises @version first: Tampermonkey only updates when it goes up)
 //
-// Six parts in one file. CD Farm and Autopilot talk through window.cdFarm and window.earlyGame,
+// Parts in one file; Core plan (window.corePlan, console only for now) reads the stage of the core game plan and sends its unlocks and early land.
+// CD Farm and Autopilot talk through window.cdFarm and window.earlyGame,
 // all of them use the shared core, and each part is wrapped separately.
 //   0. Core      (window.idleCore)  one cached read of the game state, one socket listener, confirm
 //                                   waiting, activity log, alerts, Alt+Shift+X stops everything,

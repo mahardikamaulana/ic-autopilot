@@ -504,7 +504,14 @@ try {
     }
   }
 
-  const autopilotInfo = () => { try { return window.earlyGame?.reserve?.() ?? null; } catch { return null; } };
+  // Other modules that spend (Autopilot, Core plan) register with core.reserves; without any registered, fall back to Autopilot alone.
+  const rsv = () => core.reserves;
+  const hasProviders = () => (rsv()?.names().length ?? 0) > 0;
+  const othersBusy = () => (hasProviders() ? rsv().anyBusy() : !!window.earlyGame?.busy);
+  const canHold = () => hasProviders() || !!window.earlyGame?.hold;
+  const holdOthers = async (who) => { if (hasProviders()) await rsv().holdAll(who); else if (window.earlyGame?.hold) await window.earlyGame.hold(who); };
+  const releaseOthers = (who) => { if (hasProviders()) rsv().releaseAll(who); else window.earlyGame?.release?.(who); };
+  const autopilotInfo = () => { try { return (hasProviders() ? rsv().merged() : window.earlyGame?.reserve?.()) ?? null; } catch { return null; } };
 
   // One look at the world: the gates, then the plan, then land. Pure apart from sampling and log lines.
   function evaluateAuto(fresh = false) {
@@ -519,7 +526,7 @@ try {
     const next = userTarget == null ? ap?.nextTech : null;
     const need = userTarget ?? next?.cd ?? null;
     const base = { c, ap, sig, need, pace };
-    if (userTarget == null && !window.earlyGame?.busy) return { ...base, idle: true, gate: 'G0', reason: 'waiting for Autopilot to run live (or set a Target CD)' };
+    if (userTarget == null && !othersBusy()) return { ...base, idle: true, gate: 'G0', reason: 'waiting for Autopilot or Core plan to run live (or set a Target CD)' };
     const g = PL().gates({ need: need ?? 0, cd: c.cd, prereqsMet: next ? next.prereqsMet !== false : true, prereqNote: next?.note || 'its prerequisites', organicCdPerHour: hist.slopes.cd ?? null, maxHours: pace.maxHours });
     if (!g.run) return { ...base, idle: true, gate: g.gate, reason: g.reason };
 
@@ -829,12 +836,12 @@ try {
 
     active = true;
     running = true; stopReason = '';
-    phase = window.earlyGame?.hold ? 'waiting for Autopilot to finish its step' : (resume ? 'resuming' : 'running');
+    phase = canHold() ? 'waiting for Autopilot to finish its step' : (resume ? 'resuming' : 'running');
     let began = false;
     try {
       // Autopilot must not send anything between our baseline and the end of the run
       // (a camp it builds would look like ours). hold() resolves once its current step is done.
-      if (window.earlyGame?.hold) { await window.earlyGame.hold('CD Farm'); r = mustRead(); }
+      if (canHold()) { await holdOthers('CD Farm'); r = mustRead(); }
       if (!running) throw new Error(STOPPED_EARLY);
       phase = resume ? 'resuming' : 'running';
       getPacer().resetBreaker(); getPacer().clearTrips();
@@ -895,7 +902,7 @@ try {
         } else if (stats.cycles > 0) errStreak = 0;
       }
       if (restoreCfg) { Object.assign(cfg, restoreCfg); restoreCfg = null; }
-      window.earlyGame?.release?.('CD Farm');
+      releaseOthers('CD Farm');
     }
     save();
     console.log(`[cdFarm] stopped: ${stopReason}`);
