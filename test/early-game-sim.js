@@ -1,4 +1,4 @@
-// Offline check that the Autopilot module of ic-autopilot.user.js plays wiki/early-game-plan.md from a brand-new corp.
+// Offline check that the Autopilot module of ic-autopilot.user.js plays wiki/guides/early-game-plan.md from a brand-new corp.
 //
 //   bun test/early-game-sim.js                 # rich: live board + asks for every kit part
 //   bun test/early-game-sim.js live 16         # only the sellers on the saved live board
@@ -10,7 +10,7 @@
 //   bun test/early-game-sim.js all 44          # every scenario, summary only
 //
 // Uses the real catalog and deal board saved from the page (live-board.json) and the script's
-// own snapshot()/decide()/report(). The engine models wiki/formulas.md: building cost, CD on
+// own snapshot()/decide()/report(). The engine models wiki/mechanics/formulas.md: building cost, CD on
 // build, default floor kits (no free kits), research time, courier (10 s turnaround, 2 min
 // transit, 10,000 CU, 1 Logistics Data per full load), $10/MW per 10 min bills (unpaid →
 // powered groups pause, service drops), 1 run per building per recipe time.

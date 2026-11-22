@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IC Autopilot
 // @namespace    idlecorp-toolkit
-// @version      2.8.0
+// @version      2.8.2
 // @author       XPARAD0X
 // @description  Early-game Autopilot, CD Farm (Construction Data by building and demolishing buildings; Auto picks the cheapest source itself), Lab runner (keeps the Manufacturing Labs researching), Auto ship (an "Auto ship" button on every distributor bid) and Auto utilities (an "Auto" switch that keeps the power and water subscriptions at what the groups need) for IdleCorp, each with a panel, menu or switch in the game UI.
 // @homepageURL  https://github.com/mahardikamaulana/ic-autopilot
@@ -1216,10 +1216,11 @@ try {
 // ============================================================================
 // CORE MATH (window.idleCore.coreMath)
 // ============================================================================
-// Pure fixed-point model of the Core Game Plan (scripts/core-plan/my-plan.js, wiki/core-game-plan.md 4.2, 4.3, 4.6, 11.4):
+// Pure fixed-point model of the Core Game Plan (scripts/core-plan/my-plan.js, wiki/guides/core-game-plan.md 4.2, 4.3, 4.6, 11.4):
 // the Farm/Camp/Dock/Pasture CD ladder, the engine constants from the live catalog, and the land rule
 // (income -> T_wall -> last acre inside the rule -> engine acres -> income). No DOM, sockets or timers.
 // Money is in dollars (like the spec script). opts.cyclesPerHour overrides the state's CD rate (a measured CD-farm rate).
+// opts.planksCap (planks per hour, a failed retail checkpoint): the engine, its Camps / Sawmills and the last acre stop at those planks.
 // @@MODULE core-math
 try {
 (() => {
@@ -1300,13 +1301,14 @@ try {
     return c;
   };
 
-  // The engine target and land rule as data. state: acres, acrePrice, camps, sawmills, workshops, fixedAcres, cyclesPerHour, cdBufferAcres.
+  // The engine target and land rule as data. state: acres, acrePrice, camps, sawmills, workshops, fixedAcres, fixedExtra (acres of the Retail Store / Assembly Plant not built yet, default 8), cyclesPerHour, cdBufferAcres.
   function landRule(state, catalog, opts = {}) {
     const m = engineModel(catalog);
     const st = state;
     const cycles = opts.cyclesPerHour ?? st.cyclesPerHour ?? 600;
-    const fixed = (st.fixedAcres ?? 0) + FIXED_EXTRA, buffer = st.cdBufferAcres ?? 16;
-    let E = 150, rule = null;
+    const fixed = (st.fixedAcres ?? 0) + (st.fixedExtra ?? FIXED_EXTRA), buffer = st.cdBufferAcres ?? 16;
+    const Ecap = opts.planksCap != null ? m.acresOf(Math.max(0, opts.planksCap)) : Infinity;   // engine acres the capped planks need
+    let E = Math.min(150, Ecap), rule = null;
     for (let it = 0; it < 40; it++) {
       const planks = m.planksFor(E), income = planks * m.perPlank;
       const b = bestBatch('farm', 0, income, cycles), tWall = WALL_CD / b.cdH;
@@ -1317,10 +1319,11 @@ try {
         price = Math.floor(price * 100 * 41 / 40) / 100;
       }
       rule = { planks, income, b, tWall, last };
-      const Enew = Math.max(0, Math.max(last, st.acres) - fixed - buffer);
+      const Enew = Math.min(Ecap, Math.max(0, Math.max(last, st.acres) - fixed - buffer));
       if (Math.abs(Enew - E) < 0.5) { E = Enew; break; }
       E = (E + Enew) / 2;
     }
+    if (Ecap < Infinity) rule.last = Math.min(rule.last, Math.max(st.acres, Math.ceil(Ecap + fixed + buffer)));   // no acre the capped engine cannot fill
     const acreN = Math.max(rule.last, st.acres);
     const planks = m.planksFor(E);
     const camps = Math.ceil(planks * m.woodPerPlank / m.campWoodH), saws = Math.ceil(planks / m.smPlanksH);
@@ -1344,8 +1347,7 @@ try {
   core.coreMath = { TYPES, batchCost, bestBatch, acrePrice, engineModel, landRule };
 })();
 } catch (e) { console.error('[IdleCorp] core-math failed to load:', e); }
-// @@END core-math
-// ============================================================================
+// @@END core-math// ============================================================================
 // 1. CD FARM
 // ============================================================================
 // Open "CD Farm" in the game's sidebar (or click the CD chip in the top bar).
@@ -3811,14 +3813,16 @@ try {
 //   - hire must be null, as the game's Sell dialog sends it: the server silently ignores hire:false
 //   - one FillDeal per courier run: min(stock above "keep", one free courier load, what is left to sell, the lot)
 //   - nothing is sent while the courier is busy, the stock is short, or the game's own auto-ship runs on that bid
-//   - the job ends when the target is reached, or the bid is gone (filled, withdrawn, expired); a bid board that is
-//     not loaded (Market page not open) never ends a job, it only waits
+//   - the job ends when the target is reached, or after 24 h with no bid that qualifies. When its bid is gone (filled,
+//     withdrawn, expired) it moves to the best open bid for the same item in the same region (highest unit price, never
+//     below the item's est. cost per unit, not one another job holds); with none it waits. A bid board that is not
+//     loaded (Market page not open) never ends a job, it only waits
 //   - every send must be confirmed by the server (next_shipment_id goes up); 5 unconfirmed sends in a row pause the job
 // Profit: every job shows an estimated profit (what it makes if it runs to its target or until the bid is used up) and the
 // actual profit so far. Cost of a unit = the inputs of the recipe that makes it, at catalog base value (cheapest recipe if
 // several make it; raw materials cost nothing to extract, so they are pure profit). Actual profit = what the shipments
 // sent so far are worth minus that cost; it is booked when a shipment is sent (the money lands with the shipment).
-// Jobs are saved in this browser and resume after a reload while the bid still exists. Autopilot is not touched: if it
+// Jobs are saved in this browser and resume after a reload (a job whose bid is gone moves on). Autopilot is not touched: if it
 // sells the same item, pick "Keep in stock" so both leave enough. Alt+Shift+X stops every job.
 // @@MODULE autosell
 try {
@@ -3839,7 +3843,7 @@ try {
   const REGION_NAMES = ['Heartland', 'Industrial Basin', 'Coastal Cities', 'Frontier'];
   const regionName = (r) => REGION_NAMES[r] ?? 'Region ' + r;
   const MAX_FAILS = 5;
-  const cfg = { cycleMs: 1000, confirmMs: 10000, jitterMs: 450, backoffMs: 5000 };   // timings; the tests shorten them
+  const cfg = { cycleMs: 1000, confirmMs: 10000, jitterMs: 450, backoffMs: 5000, bidWaitMs: 24 * 3600 * 1000 };   // timings; the tests shorten them
   const usd = (c) => '$' + (c / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const num = (n) => Math.round(n).toLocaleString('en-US');
   const profitTxt = (c) => (c < 0 ? '−' : '') + usd(Math.abs(c));
@@ -3877,7 +3881,8 @@ try {
   // ---- jobs --------------------------------------------------------------------------------------
   // job: { deal, item, region, unit (cents per unit), left (units still to sell, null = until stopped),
   //        sold, revenue + cogs (cents: what the sent units are worth, what they cost), lot (units the bid still wants, last seen),
-  //        keep, fullLoads, expiresAt (tick), fails, retryAt, status, tone, last (ms of the last send) }
+  //        keep, fullLoads, expiresAt (tick), fails, retryAt, status, tone, last (ms of the last send),
+//        from (the bid it moved from, or null), waitSince (ms since no bid qualified, 0 = not waiting for one) }
   const jobs = new Map();
   const toInt = (v, min, max, dflt) => { const n = Math.floor(Number(v)); return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : dflt; };
   function clean(j) {
@@ -3887,11 +3892,12 @@ try {
       left: j.left == null ? null : toInt(j.left, 1, 1e9, null), sold: toInt(j.sold, 0, 1e12, 0), keep: toInt(j.keep, 0, 1e12, 0),
       fullLoads: !!j.fullLoads, expiresAt: Number.isFinite(+j.expiresAt) ? +j.expiresAt : 0,
       revenue: toInt(j.revenue, 0, 1e15, 0), cogs: toInt(j.cogs, 0, 1e15, 0), lot: toInt(j.lot, 0, 1e12, 0),
+      from: Number.isFinite(j.from) ? j.from : null, waitSince: toInt(j.waitSince, 0, 1e15, 0),
       fails: 0, retryAt: 0, status: 'Starting', tone: '', last: 0,
     };
   }
   function save() {
-    try { store?.setItem(KEY, JSON.stringify({ jobs: [...jobs.values()].map(({ deal, item, region, unit, left, sold, revenue, cogs, lot, keep, fullLoads, expiresAt }) => ({ deal, item, region, unit, left, sold, revenue, cogs, lot, keep, fullLoads, expiresAt })) })); } catch {}
+    try { store?.setItem(KEY, JSON.stringify({ jobs: [...jobs.values()].map(({ deal, item, region, unit, left, sold, revenue, cogs, lot, keep, fullLoads, expiresAt, from, waitSince }) => ({ deal, item, region, unit, left, sold, revenue, cogs, lot, keep, fullLoads, expiresAt, from, waitSince })) })); } catch {}
   }
   function restore() {
     try {
@@ -3919,16 +3925,30 @@ try {
 
   // ---- the decision (pure: no I/O) -------------------------------------------------------------------
   // r: { st, catalog, deals (array | null = board not loaded), tick, now }. Returns
-  //   { kind: 'send', n, deal } | { kind: 'wait', why, tone? } | { kind: 'end', why }
+  //   { kind: 'send', n, deal } | { kind: 'switch', deal } | { kind: 'wait', why, tone?, noBid? } | { kind: 'end', why }
+  // r.taken (optional): ids of the bids other jobs hold. A 'switch' deal is the bid the job moves to.
   function decide(job, r) {
+    if (job.left != null && job.left < 1) return { kind: 'end', why: 'target reached' };
     const tick = r.tick || 0;
+    const floor = unitCost(r.catalog, job.item), name = nameOf(r, job.item);
+    // No qualifying bid: wait, and give up once the job has waited cfg.bidWaitMs (cycle() keeps job.waitSince).
+    const noBid = (why) => job.waitSince && r.now != null && r.now - job.waitSince >= cfg.bidWaitMs
+      ? { kind: 'end', why: 'no ' + name + ' bid at ≥ ' + usd(floor) + ' for 24 h' }
+      : { kind: 'wait', why, tone: 'muted', noBid: true };
     if (!Array.isArray(r.deals)) {
-      if (tick && job.expiresAt && tick > job.expiresAt + 4) return { kind: 'end', why: 'bid expired' };
+      if (tick && job.expiresAt && tick > job.expiresAt + 4) return noBid('bid expired: open the Market page so it can pick another bid');
       return { kind: 'wait', why: 'Market board not loaded (open the Market page once)' };
     }
     const deal = r.deals.find((d) => d.id === job.deal);
-    if (!deal || deal.side !== 'Sell') return { kind: 'end', why: 'bid is gone (filled, withdrawn or expired)' };
-    if (job.left != null && job.left < 1) return { kind: 'end', why: 'target reached' };
+    if (!deal || deal.side !== 'Sell') {
+      let best = null;
+      for (const d of r.deals) {
+        if (d.side !== 'Sell' || d.item !== job.item || d.region !== job.region || r.taken?.has(d.id) || r.st.standing_fills?.[d.id]) continue;
+        if (!(d.amount > 0) || (tick && d.expires_at && d.expires_at <= tick) || d.price / d.amount < floor) continue;
+        if (!best || d.price / d.amount > best.price / best.amount) best = d;
+      }
+      return best ? { kind: 'switch', deal: best } : noBid('waiting for a ' + name + ' bid at ≥ ' + usd(floor) + ' in ' + regionName(job.region));
+    }
     if (r.st.standing_fills?.[job.deal]) return { kind: 'wait', why: "the game's own auto-ship is running on this bid" };
     const it = itemOf(r.catalog, deal.item);
     const load = loadOf(it);
@@ -3955,6 +3975,19 @@ try {
     const name = nameOf(read(), job.item);
     core.ledger.add(TAG, kind, 'auto ship ' + name + ' ended: ' + why + ' (' + num(job.sold) + ' sold)' + (job.sold ? ', profit ' + profitTxt(profitOf(job)) : ''));
     core.toast('Auto ship ' + name + ' ended: ' + why, kind === 'fail' ? 'error' : 'info');
+    renderAll();
+  }
+
+  // The job's bid is gone: the same job (sold, left, profit carry over) continues on bid d.
+  function moveJob(job, d, r) {
+    const old = job.deal, oldUnit = job.unit, name = nameOf(r, job.item);
+    jobs.delete(old);
+    Object.assign(job, { from: old, deal: d.id, unit: d.price / d.amount, lot: d.amount, expiresAt: d.expires_at, region: d.region, fails: 0, retryAt: 0, waitSince: 0 });
+    jobs.set(d.id, job);
+    save();
+    core.ledger.add(TAG, 'info', 'auto ship ' + name + ' moved: bid #' + old + ' @ ' + usd(oldUnit) + ' → #' + d.id + ' @ ' + usd(job.unit));
+    core.toast('Auto ship ' + name + ': moved to a bid at ' + usd(job.unit), 'info');
+    if (modal && (modal.deal === old || modal.deal === d.id)) closeMenu(false);   // its Update / Stop / Start would act on the wrong job
     renderAll();
   }
 
@@ -4003,7 +4036,12 @@ try {
       if (unloaded || !jobs.has(job.deal)) continue;
       const live = Array.isArray(r.deals) ? r.deals.find((d) => d.id === job.deal) : null;
       if (live?.side === 'Sell') job.lot = live.amount;
+      r.taken = new Set([...jobs.keys()].filter((id) => id !== job.deal));
       const v = decide(job, r);
+      const was = job.waitSince;
+      job.waitSince = v.noBid ? (job.waitSince || r.now) : 0;
+      if (!was !== !job.waitSince) save();   // so a reload does not restart the give-up clock
+      if (v.kind === 'switch') { moveJob(job, v.deal, r); continue; }
       if (v.kind === 'end') { endJob(job, v.why); continue; }
       if (v.kind === 'wait') { job.status = v.why.charAt(0).toUpperCase() + v.why.slice(1); job.tone = v.tone || 'muted'; continue; }
       if (sent) { job.status = 'Waiting for the courier'; job.tone = 'good'; continue; }
@@ -4063,7 +4101,7 @@ try {
     for (const j of list) endJob(j, 'stopped');
     return list.length;
   }
-  const publicJob = (j, r) => ({ deal: j.deal, item: j.item, region: j.region, unit: j.unit, left: j.left, sold: j.sold, keep: j.keep, fullLoads: j.fullLoads, status: j.status,
+  const publicJob = (j, r) => ({ deal: j.deal, from: j.from ?? null, item: j.item, region: j.region, unit: j.unit, left: j.left, sold: j.sold, keep: j.keep, fullLoads: j.fullLoads, status: j.status,
     revenue: j.revenue, cost: j.cogs, profit: profitOf(j), estProfit: estProfitOf(j, r) });   // cents
   const listJobs = () => { const r = read(); return [...jobs.values()].map((j) => publicJob(j, r)); };
   const status = () => listJobs().map((j) => nameOf(read(), j.item) + ' #' + j.deal + ': ' + num(j.sold) + ' sold, ' + (j.left == null ? 'until stopped' : num(j.left) + ' left') + ', profit ' + profitTxt(j.profit) + ' (est. ' + profitTxt(j.estProfit) + ') - ' + j.status).join('\n') || 'no jobs';
@@ -4230,7 +4268,7 @@ try {
           totalRow,
           h('div', { class: 'field check-row' },
             h('label', { class: 'inline-check' }, untilStopped, h('span', {}, 'Until stopped')),
-            h('span', { class: 'hint' }, 'Ships again each time the courier is free. Waits for more when you run out of ' + name + '.')),
+            h('span', { class: 'hint' }, 'Ships again each time the courier is free. Waits for more when you run out of ' + name + '. Moves to the best bid for the same item in this region when this one is gone, and stops after 24 h with no bid.')),
           h('div', { class: 'field' }, h('label', {}, 'Keep in stock'), keep,
             h('div', { class: 'hint as-note' }, 'Never ships the last units of ' + name + ': they stay in stock.')),
           h('div', { class: 'field check-row' },
@@ -4250,7 +4288,7 @@ try {
     el.addEventListener('mousedown', (e) => { if (e.target === el) closeMenu(); });
     const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); closeMenu(); } };
     addEventListener('keydown', onKey, true);
-    modal = { el, from, onKey };
+    modal = { el, from, onKey, deal: dealId };
     document.body.append(el);
     sync();
     (untilStopped.checked ? keep : total).focus();
@@ -4680,17 +4718,19 @@ try {
 // @@END utilities// ============================================================================
 // 3d. CORE PLAN (window.corePlan)
 // ============================================================================
-// Coordinator for wiki/core-game-plan.md: reads the game, says which stage (A-D) the Corporation is in and which of the start
+// Coordinator for wiki/guides/core-game-plan.md: reads the game, says which stage (A-D) the Corporation is in and which of the start
 // conditions S1-S7 and end conditions E1-E5 hold (with the reason for each that does not), and sends the few purchases it owns.
 //   corePlan.status() / corePlan.plan()        // what it sees and would do now (nothing is sent)
 //   corePlan.start({ dryRun: false })          // dry run unless told otherwise; Live resumes after a page reload (60 s to cancel)
 //   corePlan.stop() / hold(who) / release(who) // like earlyGame; CD Farm holds every registered module while it buys
 //   corePlan.duties()                          // what Autopilot still does that Core plan has not taken over
 // What it sends today (everything else is read-out only):
-//   - Hand-off at Plan done: the engine items go onto Autopilot's neverSell list and its CD booster is switched off (earlyGame.tune).
+//   - Hand-off at Plan done: the engine items go onto Autopilot's neverSell list and its CD booster is switched off (earlyGame.tune);
+//     then Autopilot is stopped once (earlyGame.stop), as Core plan resumes bill-paused groups itself (plan D-4, D7).
 //   - Unlock director: StartTech for Assembly Plant, then Retail Store, then Oil Rig, only when the research slot is idle, the previous
 //     unlock is in, the CD and the prototype items are in stock, and (Oil Rig) the retail checkpoint has passed.
 //   - Land, Stage A-B: an acre plus a Cotton Farm while (acre + Farm) / Cotton Farm income <= 20 h. Autopilot is held around it.
+//     Not while CD alone holds up the next unlock (Stage A, wiki 11.1), nor while buildout has a block to buy (Stage B, plan D-1).
 //   Stage C-D land and the engine build-out are shown (landRule) but not bought yet.
 // The pure part (corePlan._view / _decide) has no DOM, sockets or timers; the tests drive it with saved boards.
 // @@MODULE core-plan
@@ -4717,17 +4757,19 @@ try {
     cottonFarmHourly: 790,        // dollars per hour one Cotton Farm earns (wiki 4.6)
     landPaybackFraction: 1 / 3,   // Stage C-D: payback <= T_wall x this
     cashReserve: 0,               // cents kept on top of the other modules' money floors
-    ifReserve: 44,                // Iron Frames kept back for the prototypes (wiki 9)
+    ifReserve: 44,                // upper cap on the Iron Frames kept back for the prototypes and first builds (ifNeed counts what is still needed)
     bufferAcres: 16,              // acres kept free for the CD farm (my-plan.js cdBufferAcres)
     cyclesPerHour: 600,           // the CD rate the land rule assumes until a measured one exists
     handoff: true,                // at Plan done: engine items to Autopilot's neverSell, its CD booster off
+    handoffStopAutopilot: true,   // ... then stop Autopilot once (Core plan resumes bill-paused groups); a user restart is left alone
     unlocks: true, land: true,    // the two directors that send
     liveResume: true,             // after a reload Live resumes (60 s countdown); off = it comes back as a dry run
     resumeSeconds: 60,
   };
   const SESSION_ONLY = ['dryRun'];
   const cfg = { ...DEFAULTS };
-  const ENGINE_ITEMS = ['Wood', 'Planks', 'Iron Sheet', 'Concrete', 'Glass', 'Bookshelf', 'Table', 'Chair', 'Bench', 'Wooden Frame', 'Iron Frame'];
+  const ENGINE_ITEMS = ['Wood', 'Planks', 'Iron Sheet', 'Concrete', 'Glass', 'Bookshelf', 'Table', 'Chair', 'Bench', 'Wooden Frame', 'Iron Frame',
+    'Iron Ore', 'Coal', 'Limestone', 'Sand', 'Copper Ore', 'Copper Wire', 'Wired Frame'];   // cp-cadence NEVER plus the ores the kits use
   const UNLOCKS = ['Assembly Plant', 'Retail Store', 'Oil Rig'];   // in this order (wiki 9)
   const S2_NEEDS = ['Mine', 'Quarry', 'Sawmill', 'Smelter', 'Workshop', 'Kiln', 'Factory', 'Paper Mill', 'Manufacturing Lab'];
 
@@ -4806,7 +4848,25 @@ try {
   function landInput(v, ctx) {
     const o = (n) => v.owned(n);
     return { acres: v.acresOwned, acrePrice: v.nextAcreCents / 100, camps: o('Lumber Camp'), farms: o('Farm'), sawmills: o('Sawmill'), workshops: o('Workshop'),
-      docks: 0, pastures: 0, fixedAcres: v.fixedAcres, cyclesPerHour: ctx.cyclesPerHour ?? cfg.cyclesPerHour, cdBufferAcres: cfg.bufferAcres };
+      docks: 0, pastures: 0, fixedAcres: v.fixedAcres,
+      // v.fixedAcres already holds a built Retail Store (3 acres) and Assembly Plant (5): only the unbuilt ones are extra
+      fixedExtra: (v.owned('Retail Store') ? 0 : 3) + (v.owned('Assembly Plant') ? 0 : 5), cyclesPerHour: ctx.cyclesPerHour ?? cfg.cyclesPerHour, cdBufferAcres: cfg.bufferAcres };
+  }
+  // Iron Frames (or `item`) the three unlocks still need (wiki 9): the prototype until its research starts, the first build until the building
+  // stands. `except` is the building being bought now: its own first build is not kept back from itself.
+  function ifNeed(v, except, item = 'Iron Frame') {
+    const ifId = v.idI(item);
+    if (ifId == null) return 0;
+    const queued = (v.st.research_queue ?? []).map((q) => q.building);
+    let n = 0;
+    for (const name of UNLOCKS) {
+      const b = v.idB(name);
+      if (b == null) continue;
+      const per = (v.bld(b).build_items ?? []).find((i) => i.item === ifId)?.amount ?? 0;
+      if (!v.unlocked(name) && v.research?.building !== b && !queued.includes(b)) n += per;
+      if (v.owned(name) === 0 && name !== except) n += per;
+    }
+    return n;
   }
   function endConditions(v, rule, ctx) {
     const retail = v.owned('Retail Store') >= 1;
@@ -4839,7 +4899,7 @@ try {
   function unlockAction(v, ctx, nx) {
     if (!nx) return { wait: 'all three unlocks are in' };
     const why = 'unlock ' + nx.name;
-    if (nx.name === 'Oil Rig' && ctx.retailOk !== true && ctx.retailDecided !== true) return { wait: why + ': waits for the retail checkpoint' };   // a failed checkpoint caps the engine, the plan carries on
+    if (nx.name === 'Oil Rig' && ctx.retailOk !== true) return { wait: why + ': waits for the retail checkpoint' + (ctx.retailOk === false ? ' (failed: a new run measures the capped output)' : '') };   // only on a pass, of either run (plan D-2)
     if (ctx.apNextTech) return { wait: why + ': Autopilot still owns "' + ctx.apNextTech.name + '"' };
     if (!nx.prereqsMet) return { wait: why + ': ' + nx.note };
     if (v.research) return { wait: why + ': research slot busy' };
@@ -4851,8 +4911,10 @@ try {
       steps: [{ msg: { type: 'StartTech', building: nx.b, region: REGION }, until: (x) => x.research?.building === nx.b || x.unlocked(nx.name) }] } };
   }
   // Stage A-B land: an acre plus a Cotton Farm while (acre + Farm) / hourly income <= cfg.landPaybackAB; one purchase per call.
-  function landAction(v, stage, floorCents) {
+  // block: why another use of the cash goes first (B1, B2).
+  function landAction(v, stage, floorCents, block) {
     if (stage !== 'A' && stage !== 'B') return { wait: 'land: stage ' + stage + ' land is bought by the buildout director with its blocks' };
+    if (block) return { wait: 'land: ' + block };
     if (!v.cottonGroup) return { wait: 'land: no running Cotton Farm group to add to' };
     if (v.acresOwned >= ACRE_CAP) return { wait: 'land: Heartland cap (' + ACRE_CAP + ' acres)' };
     const farm = v.idB('Farm'), farmCents = P.price(v.bld(farm).cost, v.owned('Farm'), 0);
@@ -4874,14 +4936,23 @@ try {
     const ids = ENGINE_ITEMS.map((n) => v.idI(n)).filter((i) => i != null);
     const never = ctx.ap.neverSell ?? [];
     const lacking = ids.filter((i) => !never.includes(i));
-    if (!lacking.length && ctx.ap.cdBooster === false) return null;
+    if (!lacking.length && ctx.ap.cdBooster === false) {
+      // Then stop Autopilot (plan D-4), only once Core plan resumes bill-paused groups (D7), and only once: a restart by the user is left alone.
+      const m = ctx.mem?.('handoff');
+      if (!m || m.get().stopped || cfg.handoffStopAutopilot === false) return null;
+      if (!directors.some((d) => d.name === 'resume') || cfg.dir_resume === false) return null;
+      const on = !!ctx.ap.running;   // not running: only recorded, so a later start by the user is not stopped either
+      return { id: 'handoff:stop', text: on ? 'hand-off: stop Autopilot (Core plan resumes bill-paused groups now)' : 'hand-off: Autopilot is not running; recorded (a later start is left alone)',
+        run: async () => { if (on) { if (!W.earlyGame?.stop) return false; W.earlyGame.stop(); } m.set({ stopped: ctx.now ?? Date.now() }); return true; } };
+    }
     return { id: 'handoff', text: 'hand-off: ' + (lacking.length ? lacking.length + ' engine items to Autopilot neverSell' : '') + (ctx.ap.cdBooster !== false ? (lacking.length ? ', ' : '') + 'CD booster off' : ''),
       patch: { neverSell: ids, cdBooster: false } };
   }
 
   // ---- plug-in directors (steps 5-10 live in their own files: src/cp-*.js) ------------------------------------------------
-  // A director is { name, order, defaults?, context?(v, ctx), decide(v, ctx, out) -> { action?, actions?, wait?, readout? }, duties?() }.
-  //   context: adds facts to ctx before any director decides (e.g. the retail sampler sets ctx.retailOk).
+  // A director is { name, order, always?, defaults?, context?(v, ctx), decide(v, ctx, out) -> { action?, actions?, wait?, readout? }, duties?() }.
+  //   always: it also decides when no stage holds (out.stage null).
+  //   context(v, ctx, stage): adds facts to ctx before any director decides (e.g. the retail sampler sets ctx.retailOk).
   //   decide: pure; an action is { id, text, steps: [{ msg, until(view) }], hold? } or { id, text, run: async () => true|false|null }.
   //   defaults: cfg keys (validated and saved like the built-in ones). ctx.mem(name) is a small saved object per director.
   const directors = [];
@@ -4899,21 +4970,40 @@ try {
   function decide(v, ctx = {}) {
     const S = startConditions(v, ctx);
     const stage = stageOf(v, S);
+    for (const dir of directors) { try { dir.context?.(v, ctx, stage); } catch (e) { console.error('[corePlan] ' + dir.name + '.context', e); } }
+    // After the directors' context: a failed retail checkpoint (ctx.retailFail) caps the planks at the furniture blocks sales carry (plan A2).
     let rule = null;
-    try { rule = M.landRule(landInput(v, ctx), v.C, { cyclesPerHour: ctx.cyclesPerHour ?? cfg.cyclesPerHour }); } catch (e) { console.error(e); }
-    for (const dir of directors) { try { dir.context?.(v, ctx); } catch (e) { console.error('[corePlan] ' + dir.name + '.context', e); } }
+    try {
+      const planksCap = ctx.retailFail && typeof ctx.retailCap === 'number' ? ctx.retailCap / M.engineModel(v.C).wsPerPlank : undefined;
+      rule = M.landRule(landInput(v, ctx), v.C, { cyclesPerHour: ctx.cyclesPerHour ?? cfg.cyclesPerHour, planksCap });
+    } catch (e) { console.error(e); }
     const E = endConditions(v, rule, ctx);
-    const out = { stage, S, E, rule, actions: [], waits: [], nextUnlock: null, finished: stage === 'D' && E.every((c) => c.ok) };
+    const out = { stage, S, E, rule, actions: [], waits: [], nextUnlock: null, finished: stage === 'D' && E.every((c) => c.ok), readouts: {} };
     if (out.finished) out.stage = 'END';
-    if (!stage) { out.waits.push('stage: start conditions do not hold (' + S.filter((c) => c.ok === false).map((c) => c.id + ': ' + c.why).join('; ') + ')'); return out; }
+    if (!stage) { out.waits.push('stage: start conditions do not hold (' + S.filter((c) => c.ok === false).map((c) => c.id + ': ' + c.why).join('; ') + ')'); return decideDirectors(v, ctx, out, true); }
     out.nextUnlock = nextUnlock(v);
-    out._ifId = v.idI('Iron Frame'); out._wfId = v.idI('Wooden Frame'); out._plId = v.idI('Planks');
+    out._ifId = v.idI('Iron Frame'); out._ifNeed = ifNeed(v); out._wfId = v.idI('Wooden Frame'); out._plId = v.idI('Planks');
+    out._failPath = !!ctx.retailFailPath;
+    try { out._wfKeep = W.corePlan._buildout?.wfKeep?.(v, ctx) ?? null; } catch { out._wfKeep = null; }   // null: the reserve keeps every frame
     const ho = ctx.planDone === true ? handoffAction(v, ctx) : null;
     if (ho) out.actions.push(ho);
-    if (cfg.unlocks) { const u = unlockAction(v, ctx, out.nextUnlock); if (u.action) out.actions.push(u.action); else out.waits.push(u.wait); }
-    if (cfg.land) { const l = landAction(v, stage, ctx.floorCents ?? 0); if (l.action) out.actions.push(l.action); else out.waits.push(l.wait); }
-    out.readouts = {};
+    if (ctx.ap?.running && ctx.mem?.('handoff')?.get?.()?.stopped) out.readouts.handoff = { alert: 'Autopilot was started again after the hand-off: left running (it also sells and resumes groups)' };
+    const u = unlockAction(v, ctx, out.nextUnlock);
+    if (cfg.unlocks) { if (u.action) out.actions.push(u.action); else out.waits.push(u.wait); }
+    let block = null;
+    // B2 (wiki 11.1): Stage A, the next unlock waits on CD alone (it would start with the CD in hand): no cash into Cotton Farms
+    if (stage === 'A' && !u.action && out.nextUnlock && unlockAction({ ...v, cd: Infinity }, ctx, out.nextUnlock).action) block = 'CD is the bottleneck: cash goes to the CD farm';
+    // B1 (plan D-1): Stage B, a block buildout can buy now goes before an acre + Cotton Farm
+    if (stage === 'B' && cfg.dir_buildout !== false && W.corePlan._buildout?.nextBuildStep) {
+      try { const nb = W.corePlan._buildout.nextBuildStep(v, ctx, rule, stage); if (nb?.pick) block = 'build-out goes first (' + nb.why + ')'; } catch (e) { console.error('[corePlan] buildout.nextBuildStep', e); }
+    }
+    if (cfg.land) { const l = landAction(v, stage, ctx.floorCents ?? 0, block); if (l.action) out.actions.push(l.action); else out.waits.push(l.wait); }
+    return decideDirectors(v, ctx, out, false);
+  }
+  // Directors in order; with no stage only those marked always (D7 resume) decide.
+  function decideDirectors(v, ctx, out, noStage) {
     for (const dir of directors) {
+      if (noStage && !dir.always) continue;
       if (cfg['dir_' + dir.name] === false) { out.waits.push(dir.name + ': off'); continue; }
       let r = null;
       try { r = dir.decide(v, ctx, out); } catch (e) { console.error('[corePlan] ' + dir.name, e); out.waits.push(dir.name + ': error ' + (e.message ?? e)); continue; }
@@ -4947,7 +5037,7 @@ try {
     for (const [n, x] of Object.entries(others?.by ?? {})) if (n !== 'corePlan') floor = Math.max(floor, x.moneyFloor ?? 0);
     return {
       planDone: apRes ? apRes.phase === 'done' : null,
-      ap: ap?.cfg ? { neverSell: [...(ap.cfg.neverSell ?? [])], cdBooster: ap.cfg.cdBooster } : null,
+      ap: ap?.cfg ? { neverSell: [...(ap.cfg.neverSell ?? [])], cdBooster: ap.cfg.cdBooster, running: !!ap.running } : null,
       apNextTech: apRes?.nextTech && ap?.busy ? apRes.nextTech : null,
       cashDelta10: cashDelta10(), floorCents: floor + cfg.cashReserve,
       retailOk: null,   // set by the retail director's checkpoint sampler (ctx is mutable for directors' context())
@@ -5080,8 +5170,6 @@ try {
       { duty: 'engine items kept off the shelf (neverSell, CD booster)', owner: 'Core plan', done: true },
       { duty: 'unlocks: Assembly Plant, Retail Store, Oil Rig', owner: 'Core plan', done: true },
       { duty: 'Stage A-B land and Cotton Farms', owner: 'Core plan', done: true },
-      { duty: 'resume groups paused by an unpaid bill', owner: 'Autopilot', done: false },
-      { duty: 'floor upgrades (furniture designs included)', owner: 'Autopilot', done: false },
       ...directors.flatMap((d) => { try { return d.duties?.() ?? []; } catch { return []; } }),
     ];
   }
@@ -5119,8 +5207,12 @@ try {
       // Before the store: Iron Frames for the prototypes. Once it is built: every Wooden Frame and Plank, so CD Farm's planner never
       // burns them on Mines / Quarries (wiki 11.4, the $294-per-CD mistake).
       const items = {};
-      if (last.stage === 'D' || last.stage === 'END') { for (const id of [last._wfId, last._plId]) if (id != null) items[id] = Infinity; }
-      else if (ifId != null && cfg.ifReserve > 0) items[ifId] = cfg.ifReserve;
+      // Retail fail path (plan A2): Wooden Frames only down to their keep line and Planks free, so CD Farm cycles the frames above it.
+      if (last.stage === 'D' || last.stage === 'END') {
+        if (last._failPath) { if (last._wfId != null) items[last._wfId] = last._wfKeep ?? Infinity; }
+        else for (const id of [last._wfId, last._plId]) if (id != null) items[id] = Infinity;
+      }
+      else if (ifId != null) { const k = Math.min(cfg.ifReserve, last._ifNeed ?? Infinity); if (k > 0) items[ifId] = k; }
       return { moneyFloor: 0, items, nextTech: v ? { b: v.b, name: v.name, cd: v.cd, prereqsMet: v.prereqsMet, note: v.note } : null, phase: null };
     },
     busy: () => running && !cfg.dryRun,
@@ -5134,7 +5226,7 @@ try {
     importCfg(o) { const r = apply(o?.cfg ?? o); save(); return r; },
     exportCfg() { return { cfg: Object.fromEntries(Object.entries(cfg).filter(([k]) => !SESSION_ONLY.includes(k))) }; },
     resetCfg() { Object.assign(cfg, DEFAULTS); save(); },
-    _view: view, _decide: decide, _step: step, _names: names, _startConditions: startConditions, _endConditions: endConditions, _nextUnlock: nextUnlock, _setPacer(p) { pacer = p; },
+    _ifNeed: ifNeed, _view: view, _decide: decide, _step: step, _names: names, _startConditions: startConditions, _endConditions: endConditions, _nextUnlock: nextUnlock, _setPacer(p) { pacer = p; },
     _unload() { unloaded = true; running = false; clearInterval(loopTimer); cancelResume(); loopTimer = 0; core.reserves?.unregister('corePlan'); dropLock(); },
   };
 
@@ -5147,14 +5239,15 @@ try {
 // ============================================================================
 // CORE PLAN DIRECTOR: 5. Engine build-out and Farm conversion
 // ============================================================================
-// Director "buildout" (wiki/core-game-plan.md 4.2-4.5, 4.8, 8.1, 11.2-11.3, 14 R8). One message (or one purchase) per step:
+// Director "buildout" (wiki/guides/core-game-plan.md 4.2-4.5, 4.8, 8.1, 11.2-11.3, 14 R8). One message (or one purchase) per step:
 //   - pool tidy: own Camps / Sawmills / Workshops left in the pool go into their group (never cdFarm's units), named groups get their recipe;
 //   - Kiln stock gate: unpause / switch the Kiln until Glass and Concrete reach their gates, pause again after;
+//   - Wooden Frame gate: pause Frame Timber at the WF keep line (Rivet use for cfg.ftKeepHours), resume below half (plan D-3);
 //   - Stage B-D: spare Frame Timber Workshops switch to furniture (split from the retail board), keeping 1 on Frame Timber;
 //   - Stage C-D: Farms go in 4 waves 3 h apart (UnassignBuildings + DemolishBuilding), only when the last wave's acres are built and running;
 //   - build-out toward core-math landRule: a consumer only when its supplier covers it, each buy gated by acre, kit, wood (R8), bill floor
-//     and the money floor; Stage C-D buys the acre too while the land rule is open.
-// Pure helpers for tests: corePlan._buildout.furnitureSplit / nextBuildStep / waveState.
+//     and the money floor; Stage C-D buys the acre too while the land rule is open, Stage B while (acre + $1,200) / $1,444 <= 20 h (plan D-1).
+// Pure helpers for tests: corePlan._buildout.furnitureSplit / nextBuildStep / waveState / waveStep; wfKeep is the keep line Core plan's reserve uses.
 // @@MODULE cp-buildout
 try {
 (() => {
@@ -5167,6 +5260,7 @@ try {
   const FLOOR = { 'Lumber Camp': 3, Sawmill: 2, Workshop: 5 }; // floor rate the plan assumes (wiki 4.5)
   const ENGINE = ['Lumber Camp', 'Sawmill', 'Workshop'];
   const HOUR = 3600000;
+  const BLOCK_SHARE = 1200, BLOCK_HOURLY = 1444;               // dollars: a block's buildings per acre, and what an engine acre earns an hour (plan D-1)
 
   const DEFAULTS = {
     keepFrameTimber: 1,          // Workshops kept on Frame Timber (wiki 4.8 step 1)
@@ -5180,6 +5274,8 @@ try {
     woodRunsPerSawmill: 2,       // R8: Wood stock >= Sawmills x this x Wood per run before more Sawmills
     glassGate: 100,              // Kiln: Glass before the store research ends (wiki 4.8 step 6)
     concreteGate: 400,           // Kiln: Concrete by the gate
+    ftKeepHours: 2,              // Wooden Frame keep line: this many hours of Rivet use (plan D-3); Frame Timber pauses at it, resumes below half
+    ftKeepMax: 19,               // ... capped here, so stock settles under 20 and E3 can hold (a Rivet Workshop takes 6 per wave start)
   };
 
   // ---- small pure helpers ------------------------------------------------------------------------------------------------------
@@ -5251,8 +5347,9 @@ try {
     const woodPerCamp = (R.wood.outputs[0]?.amount ?? 1) * runsH(R.wood, rateNow(R.wood));
     const wsPlanksH = (r) => amt(r.inputs, planksId) * runsH(r, ratePlan(r, 'Workshop'));
     const live = (g) => !g.paused && g.count > 0;
+    const ftHeld = new Set(ctx.mem?.('buildout')?.get?.()?.ftMine ?? []);   // Frame Timber the WF gate paused comes back: its planks stay spoken for
     const planksSupply = sum(groupsOf(id.saw, R.planks).filter(live)) * planksPerSaw;
-    const planksDemand = wsGroups.filter(live).reduce((a, g) => a + g.count * (C.recipes[g.recipe] ? wsPlanksH(C.recipes[g.recipe]) : 0), 0);
+    const planksDemand = wsGroups.filter((g) => live(g) || (ftHeld.has(g.id) && g.count > 0)).reduce((a, g) => a + g.count * (C.recipes[g.recipe] ? wsPlanksH(C.recipes[g.recipe]) : 0), 0);
     const woodSupply = sum(groupsOf(id.camp, R.wood).filter(live)) * woodPerCamp;
     const woodDemand = sum(groupsOf(id.saw, R.planks).filter(live)) * woodPerSaw;
     const kitOf = (b, r) => [...(v.bld(b).build_items ?? []), ...((r && layout(r)?.bom) ?? v.bld(b).default_kit ?? [])];
@@ -5268,14 +5365,21 @@ try {
   };
   const billNeed = (v, newMW) => newMW * 2000 + (v.st.subscriptions?.[REGION]?.power ?? 0) * 12000;   // cents: $20 per new MW + 2 h of bills ($60/MW/h)
 
+  // A measured retail fail: per good, the keep the fail path cuts to (ceil of its capBy, as cp-retail failAction), so buildout never adds
+  // above it and the two never undo each other. Goods not on the measured shelf keep `want`.
+  function failKeep(ctx, want) {
+    const by = ctx.retailFail ? ctx.retail?.capDecision?.capBy : null;
+    return by ? Object.fromEntries(FURN.map(([k, n]) => [k, n in by ? Math.min(want[k], Math.ceil(by[n] - 1e-9)) : want[k]])) : want;
+  }
   // Targets: Camps / Sawmills from the land rule, Workshops from the furniture split of the rule's planks, capped by ctx.retailCap.
   function targets(v, ctx, rule, e) {
     const split = furnitureSplit(ctx.retailBoard, rule.planksH, v.C);
     const furn = { bookshelf: split.bookshelf, table: split.table, chair: split.chair };
     let ft = cfg.keepFrameTimber;
-    if (typeof ctx.retailCap === 'number' && split.total > ctx.retailCap) {
-      // Over the retail cap: keep the board's mix inside the cap and send the planks left over to Frame Timber.
-      const capped = split.alloc(Math.max(0, Math.floor(ctx.retailCap)));
+    const kept = failKeep(ctx, furn);
+    if (kept !== furn || (typeof ctx.retailCap === 'number' && split.total > ctx.retailCap)) {
+      // Over the retail cap: the per-good keep on a measured fail, else the board's mix inside the cap; the planks left over go to Frame Timber.
+      const capped = kept !== furn ? kept : split.alloc(Math.max(0, Math.floor(ctx.retailCap)));
       const extra = Object.keys(furn).reduce((a, k) => a + (furn[k] - capped[k]) * split.planksPerWs[k], 0);
       Object.assign(furn, capped);
       ft += Math.ceil(extra / e.wsPlanksH(e.R.ft) - 1e-9);
@@ -5321,7 +5425,7 @@ try {
   // Same checks as the switch, so a Workshop the switch freed is never sent back to Frame Timber while the switch still wants it.
   function poolWorkshopRecipe(v, ctx, e, tg, n) {
     const furnTotal = FURN.reduce((a, [k]) => a + e.furnNow[k], 0);
-    const want = tg ? tg.furn : furnitureSplit(ctx.retailBoard, 0, v.C).alloc(furnTotal + n);
+    const want = failKeep(ctx, tg ? tg.furn : furnitureSplit(ctx.retailBoard, 0, v.C).alloc(furnTotal + n));
     const headroom = e.planksSupply - e.planksDemand;
     const gaps = FURN.map(([k]) => ({ k, gap: want[k] - e.furnNow[k] })).filter((x) => x.gap > 0).sort((a, b) => b.gap - a.gap);
     const ok = gaps.find((x) => !floorMissing(e, e.R[x.k]) && headroom + 1e-9 >= e.wsPlanksH(e.R[x.k]));
@@ -5352,6 +5456,7 @@ try {
     return null;
   }
 
+  const confirmed = (a, fn) => { const u = a.steps[0].until; a.steps[0].until = (x) => { const ok = u(x); if (ok) fn(); return ok; }; return a; };
   // 2. Kiln stock gate: Glass >= glassGate and Concrete >= concreteGate, then pause.
   // Only Kilns this director paused are resumed (ids in mem kilnMine, written when the pause is confirmed); a Kiln the user resumed after
   // that is left alone for good (kilnUser, from context()). A resume also needs the bill floor and the money floor for its draw.
@@ -5366,7 +5471,6 @@ try {
       if (add) s.add(gid); else s.delete(gid);
       m.set({ kilnMine: [...s] });
     };
-    const confirmed = (a, fn) => { const u = a.steps[0].until; a.steps[0].until = (x) => { const ok = u(x); if (ok) fn(); return ok; }; return a; };
     const manual = [];
     const want = { [e.R.glass.id]: v.has('Glass') < cfg.glassGate, [e.R.concrete.id]: v.has('Concrete') < cfg.concreteGate };
     const making = (rid) => kilns.some((g) => !g.paused && g.recipe === rid);
@@ -5390,6 +5494,46 @@ try {
       }
     }
     return { wait: (manual.length ? manual.join('; ') + '; ' : '') + 'Glass ' + Math.floor(v.has('Glass')) + '/' + cfg.glassGate + ', Concrete ' + Math.floor(v.has('Concrete')) + '/' + cfg.concreteGate };
+  }
+
+  // Wooden Frame keep line (plan D-3): what the running Rivet Workshops eat in cfg.ftKeepHours, plus the frames the unlocks' prototypes and
+  // first builds still need (corePlan ifNeed), at most cfg.ftKeepMax (E3: stock < 20). Buildout never buys Mines or Quarries, so their 4 frames each are not in it.
+  function wfKeep(v, ctx = {}, e = engine(v, ctx)) {
+    if (e.missing) return null;
+    const rivetH = e.sum(e.groupsOf(e.id.ws, e.R.rivet).filter((g) => !g.paused)) * runsH(e.R.rivet, e.rateNow(e.R.rivet)) * amt(e.R.rivet.inputs, v.idI('Wooden Frame'));
+    return Math.min(cfg.ftKeepMax, Math.ceil(rivetH * cfg.ftKeepHours) + cp._ifNeed(v, null, 'Wooden Frame'));
+  }
+  // 2b. Wooden Frame gate: pause Frame Timber at or above the keep line, resume below half of it (planks above the line are worth more as
+  // furniture, wiki 11.4). Kiln-gate bookkeeping: only groups paused here come back (mem ftMine), one the user resumed is left alone
+  // (ftUser, from context()). On the retail fail path after a pass CD Farm burns the frames above the line: nothing is paused, ours come
+  // back. That holds only while the ladder has a CD need (ctx.ladderNeed) and CD Farm runs Auto; otherwise the gate bounds the frames.
+  function ftStep(v, ctx, e) {
+    const keep = wfKeep(v, ctx, e), wf = v.has('Wooden Frame');
+    const km = ctx.mem?.('buildout')?.get?.() ?? {};
+    const mine = new Set(km.ftMine ?? []), user = new Set(km.ftUser ?? []);
+    const note = (gid, add) => () => {   // runs when the server confirms the pause / resume
+      const m = ctx.mem?.('buildout'); if (!m) return;
+      const s = new Set(m.get().ftMine ?? []);
+      if (add) s.add(gid); else s.delete(gid);
+      m.set({ ftMine: [...s] });
+    };
+    const line = 'Wooden Frame ' + Math.floor(wf) + ', keep line ' + keep;
+    const paused = v.groups.filter((g) => mine.has(g.id) && g.paused && g.count > 0);
+    // a paused group the switch or the retail fail path moved off Frame Timber comes back at once
+    const cf = ctx.mods?.cdFarm?.cfg;   // CD Farm farms (the ladder's Oil Rig / Refinery need) only after a pass, with Auto on
+    const burn = !!(ctx.retailFailPath && ctx.retailOk === true && ctx.ladderNeed && typeof ctx.ladderNeed === 'object' && cf?.building === 'auto' && cf.autoStart);
+    const back = paused.find((g) => g.recipe !== e.R.ft.id) ?? (burn || wf < keep / 2 ? paused[0] : null);
+    if (back) {
+      const mw = (v.bld(back.building).draws?.power ?? 0) * back.count, bill = billNeed(v, mw), floor = ctx.floorCents ?? 0;
+      if (v.money < floor + bill) return { wait: 'WF gate: resume group ' + back.id + ' waits: cash ' + usd(v.money) + ' < ' + usd(floor + bill) + ' (money floor + ' + mw + ' MW bills)' };
+      return { action: confirmed(pauseAction(v, back, false, 'Wooden Frame gate (' + line + ')'), note(back.id, false)) };
+    }
+    if (burn) return { wait: line + ' (retail fail path after a pass: CD Farm burns the frames above it)' };
+    if (!(keep > 0) || wf < keep) return { wait: line };
+    if (!ctx.boMemOk) return { wait: line + ': Frame Timber not paused, browser storage does not save (a pause it forgets would starve Rivet)' };
+    const g = e.groupsOf(e.id.ws, e.R.ft).find((x) => !x.paused && x.count > 0 && !user.has(x.id));
+    if (!g) return { wait: line };
+    return { action: confirmed(pauseAction(v, g, true, 'Wooden Frame gate (' + line + ')'), note(g.id, true)) };
   }
 
   // 3. Spare Frame Timber Workshops to furniture (Stage B on), keeping cfg.keepFrameTimber (and the Rivet group, never touched).
@@ -5457,7 +5601,7 @@ try {
     const cap = typeof ctx.retailCap === 'number' ? Math.max(0, Math.floor(ctx.retailCap)) : Infinity;
     const n = Math.min(furnTotal + spare, cap);
     if (n <= furnTotal) return { wait: 'switch: furniture at the retail cap (' + cap + '), spare Frame Timber stays' };
-    const want = split.alloc(n);
+    const want = failKeep(ctx, split.alloc(n));   // a measured fail: never above the per-good keep the fail path cuts to
     const gaps = FURN.map(([k]) => ({ k, gap: want[k] - e.furnNow[k] })).filter((x) => x.gap > 0).sort((a, b) => b.gap - a.gap);
     if (!gaps.length) return null;
     // Planks cap: a switch may not push plank use past what the Sawmills make (a Bookshelf eats more than Frame Timber).
@@ -5502,10 +5646,11 @@ try {
     return { base, waves, size, wave: m.wave ?? 0, at: m.at ?? null, farms: cottonFarms(v, e), targetAfter: (k) => Math.max(0, base - (k + 1) * size) };
   }
   function blocksRunning(v, ctx, e) {
+    const ftHeld = new Set(ctx.mem?.('buildout')?.get?.()?.ftMine ?? []);   // paused by the WF gate on purpose
     for (const bn of ENGINE) {
       const b = v.idB(bn);
       if (e.ownPool(b) > 0) return v.bld(b).name + ' in the pool';
-      const g = v.groups.find((x) => x.building === b && x.count > 0 && (x.paused || (x.equipped ?? x.count) < x.count));
+      const g = v.groups.find((x) => x.building === b && x.count > 0 && !ftHeld.has(x.id) && (x.paused || (x.equipped ?? x.count) < x.count));
       if (g) return 'group ' + g.id + ' (' + (g.name ?? v.bld(b).name) + ') ' + (g.paused ? 'paused' : 'equipped ' + g.equipped + '/' + g.count);
     }
     return null;
@@ -5538,6 +5683,8 @@ try {
     }
     if (!w.farms) return { status: 'conversion done (0 cotton Farms)' };
     if (w.wave >= w.waves) return { status, wait: 'conversion: all ' + w.waves + ' waves done, ' + w.farms + ' Farms left' };
+    if (ctx.retailOk === false) return { status, wait: 'retail checkpoint failed: remaining Farms stay on Cotton' };   // plan A2: any fail, measured or not; the capped engine needs no more acres
+    if (ctx.retailFail) return { status, wait: 'retail fail path: Farms stay on Cotton' };   // a pass of the re-run proves only the capped output sells
     if (ctx.boCdBusy) return { status, wait: 'conversion: CD Farm is running' };
     // Fail closed: without saved wave memory every step would look like wave 1 and demolish another quarter of the Farms.
     if (!ctx.boMemOk || ctx.mem?.('buildout')?.get?.()?.base == null) return { status, wait: 'conversion: wave memory not saved (browser storage), no wave' };
@@ -5587,12 +5734,20 @@ try {
     if (!pick) return { wait: held.length ? held.join('; ') : 'build-out at target (' + e.camps + ' Camps, ' + e.saws + ' Sawmills, ' + e.workshops + ' Workshops)', done: !held.length };
     const b = v.idB(pick.bn), bd = v.bld(b);
     const why = 'next ' + pick.label;
-    // Acre: keep the CD-farm buffer free; Stage C-D buys acres while the land rule is open, Stage B only builds on free land.
-    const acres = Math.max(0, cfg.bufferAcres + bd.acres - v.freeAcres);
+    // Acre: keep the CD-farm buffer free; Stage C-D buys acres while the land rule is open, Stage B while the Stage A-B payback rule holds
+    // for the dearest acre bought (plan D-1: a block earns more an acre than a Cotton Farm).
+    // Stage B buys only the block's own acres (like the land director: the buffer is never used, nor refilled here).
+    const acres = stage === 'B' ? Math.max(0, bd.acres - Math.max(0, v.freeAcres - cfg.bufferAcres)) : Math.max(0, cfg.bufferAcres + bd.acres - v.freeAcres);
     let landCents = 0;
     if (acres > 0) {
-      if (stage !== 'C' && stage !== 'D') return { wait: why + ': no free acre (stage ' + stage + ' builds on free land only, ' + v.freeAcres + ' free, buffer ' + cfg.bufferAcres + ')' };
-      if (v.acresOwned + acres > Math.min(rule.lastAcre, ACRE_CAP)) return { wait: why + ': no free acre and the land rule closes at #' + Math.min(rule.lastAcre, ACRE_CAP) };
+      if (stage === 'B') {
+        const last = cp._acrePriceCents(v.landBought + acres - 1), pb = (last / 100 + BLOCK_SHARE) / BLOCK_HOURLY;
+        if (pb > cfg.landPaybackAB) return { wait: why + ': acre #' + (v.acresOwned + acres) + ' ' + usd(last) + ' + block ' + usd(BLOCK_SHARE * 100) + ' pays back in ' + pb.toFixed(1) + ' h > ' + cfg.landPaybackAB + ' h (Stage A-B rule closed)' };
+        if (v.acresOwned + acres > ACRE_CAP) return { wait: why + ': no free acre and Heartland is at its cap (' + ACRE_CAP + ' acres)' };
+      } else {
+        if (stage !== 'C' && stage !== 'D') return { wait: why + ': no free acre (stage ' + stage + ' builds on free land only, ' + v.freeAcres + ' free, buffer ' + cfg.bufferAcres + ')' };
+        if (v.acresOwned + acres > Math.min(rule.lastAcre, ACRE_CAP)) return { wait: why + ': no free acre and the land rule closes at #' + Math.min(rule.lastAcre, ACRE_CAP) };
+      }
       for (let i = 0; i < acres; i++) landCents += cp._acrePriceCents(v.landBought + i);
     }
     const lack = short(v, e.kitOf(b, pick.r));
@@ -5625,6 +5780,7 @@ try {
   const dir = {
     name: 'buildout', order: 40, defaults: DEFAULTS,
     furnitureSplit, nextBuildStep, waveState: (v, ctx) => waveState(v, ctx, engine(v, ctx)), allocate,
+    waveStep: (v, ctx, rule, stage) => waveStep(v, ctx, engine(v, ctx), null, rule, stage), wfKeep: (v, ctx) => wfKeep(v, ctx ?? {}),
     waveGate: (v, ctx, rule, stage, n) => waveGate(v, ctx, engine(v, ctx), rule, stage, n),
     buyAction: (v, ctx, s) => buyAction(v, engine(v, ctx), s),
     context(v, ctx) {
@@ -5643,6 +5799,11 @@ try {
       const mine = m.get().kilnMine ?? [];
       const resumed = mine.filter((id) => { const g = v.groups.find((x) => x.id === id); return !g || g.building !== kilnId || !g.paused; });
       if (resumed.length) m.set({ kilnMine: mine.filter((id) => !resumed.includes(id)), kilnUser: [...new Set([...(m.get().kilnUser ?? []), ...resumed])] });
+      // Frame Timber the WF gate paused: one running again on Frame Timber was resumed by the user (hands off); one gone, emptied or
+      // running on another recipe just drops out (a paused one on another recipe stays: ftStep resumes it).
+      const ftR = v.idR('Frame Timber'), ftMine = m.get().ftMine ?? [], ftKeep = [], ftUser = [];
+      for (const id of ftMine) { const g = v.groups.find((x) => x.id === id); if (g && g.count > 0 && g.paused) ftKeep.push(id); else if (g && g.recipe === ftR) ftUser.push(id); }
+      if (ftKeep.length !== ftMine.length) m.set({ ftMine: ftKeep, ...(ftUser.length ? { ftUser: [...new Set([...(m.get().ftUser ?? []), ...ftUser])] } : {}) });
       // Wave bookkeeping from state (right under chaos, dry run and reloads): base at the first Stage C look, a wave counts once the
       // cotton Farms are at or below its target, and its time is when that is first seen.
       if (!conversionStage(v)) return;
@@ -5676,6 +5837,9 @@ try {
       const k = kilnStep(v, ctx, e);
       readout.kiln = k.wait ?? k.action?.text;
       if (k.action) return done(k.action);
+      const fs = ftStep(v, ctx, e);
+      readout.frames = fs.wait ?? fs.action?.text;
+      if (fs.action) return done(fs.action);
       // Furniture floors first (wiki 4.5: Workshop v1 = x5, scored live): a switch or a furniture Workshop needs its recipe's floor.
       const fl = floorStep(v, ctx, e, tg);
       if (fl?.action) return done(fl.action);
@@ -5697,7 +5861,7 @@ try {
     },
     duties: () => [
       { duty: 'Stage C-D land, engine build-out, Farm conversion', owner: 'Core plan', done: true },
-      { duty: 'spare Frame Timber Workshops to furniture, Kiln Glass / Concrete gate', owner: 'Core plan', done: true },
+      { duty: 'spare Frame Timber Workshops to furniture, Kiln Glass / Concrete gate, Wooden Frame gate', owner: 'Core plan', done: true },
     ],
   };
   cp.addDirector(dir);
@@ -5720,7 +5884,10 @@ try {
 //     measured sales can carry, on a fail), ctx.retailE1 (cfg.retailE1Hours in a row against the streak's first appetite).
 //     Samples live in localStorage "corePlan.v1.mem.retail"; removing that key starts the checkpoint over.
 //   - Fail path (plan step 6): furniture Workshops above the cap move to Frame Timber (SetRecipe a whole group, or Unassign and put the
-//     pooled Workshops in a Frame Timber group). Farms are left on Cotton.
+//     pooled Workshops in a Frame Timber group). Farms are left on Cotton. Once the cap holds, one new checkpoint run starts at the capped
+//     output (old decision kept as prevDecision, its cap in force); a pass of it sets ctx.retailOk = true (plan B3) and opens only the Oil Rig
+//     gate: that pass proves the capped output sells, so the cap stays. ctx.retailFail / retailFailPath tell the other directors a measured
+//     cap is in force (reserve, waves, land rule, ladder).
 // @@MODULE cp-retail
 try {
 (() => {
@@ -5742,6 +5909,7 @@ try {
 
   // ---- the board ------------------------------------------------------------------------------------------------------------------
   // Asserts the shape seen on 2026-11-22 (shelves[region][itemId] = { appetite, held, standard, price }); never guesses past it.
+  // Only appetite and price are required: held is just a note on the appetite row.
   function checkBoard(board, ids) {
     if (!board || typeof board !== 'object') return 'no board from engine.retailJson()';
     const rows = board.shelves?.[REGION] ?? board.shelves?.[String(REGION)];
@@ -5750,7 +5918,7 @@ try {
     for (const [n, id] of Object.entries(ids)) {
       const r = rows[id];
       if (!r) return 'no shelf row for ' + n + ' (item ' + id + ')';
-      const miss = ['appetite', 'held', 'price'].filter((k) => !num(r[k]));
+      const miss = ['appetite', 'price'].filter((k) => !num(r[k]));
       if (miss.length) return n + ' row lacks ' + miss.join(', ');
     }
     return null;
@@ -5815,13 +5983,20 @@ try {
         assigned: v.groups.some((g) => g.recipe === rid && g.count > 0) };
     });
     f.eligible = (g) => g.made || g.assigned || g.stock > 0;
-    f.demandH = (g) => g.appetite / 240 * (f.share ?? 0) * TICKS_H;
+    f.demandH = (g) => demandH(g, f.share);
     // Before the store: the shelf is what is eligible now (shelfPick() adds the keep-on-shelf rule once the store exists).
     f.chosen = pickOrder(f.goods.filter(f.eligible));
     needOf(f, c);
     return f;
   }
 
+  // Units per hour the shelf sells: appetite per 240 ticks x this store's share.
+  const demandH = (g, share) => g.appetite / 240 * (share ?? 0) * TICKS_H;
+  // Hours the stock lasts: it drains by demand minus what the groups make (Infinity when output keeps up). The board's `held` is not used.
+  function shelfHours(g, share) {
+    const drain = demandH(g, share) - g.outTick * TICKS_H;
+    return drain > 0 ? g.stock / drain : Infinity;
+  }
   const pickOrder = (gs) => [...gs].sort((a, b) => b.appetite * b.unit - a.appetite * a.unit).slice(0, 4);
   // 1 h of what will sell: sales stop at output once output is below demand, so stock past an hour of output adds nothing.
   // Only made goods: a held-only good cannot grow, it just sells out.
@@ -5880,11 +6055,15 @@ try {
       const a0 = base?.[id] ?? s0.g[id].a;
       for (const s of samples) { const d = a0 && s.g[id] ? Math.abs(s.g[id].a / a0 - 1) : 0; if (d > worst) { worst = d; worstName = s0.g[id].n; } }
     }
-    const held0 = ids.reduce((a, id) => a + s0.g[id].h, 0), heldN = ids.reduce((a, id) => a + (sN.g[id]?.h ?? 0), 0);
+    const held0 = ids.reduce((a, id) => a + (s0.g[id].h ?? 0), 0), heldN = ids.reduce((a, id) => a + (sN.g[id]?.h ?? 0), 0);
     out.push({ id: 'appetite', ok: samples.length < 2 ? null : worst <= c.retailAppetiteTol / 100, why: 'max drift ' + pct(worst) + (worstName ? ' (' + worstName + ')' : '') + ', limit ' + c.retailAppetiteTol + '%; held ' + held0 + ' -> ' + heldN });
     // 2. sales >= pass% of the model
+    // per good (wiki E1): every shelved good with a model must pass, so one dead good cannot hide behind the others; the worst is named
     const sv = salesOver(samples, ids);
-    out.push({ id: 'sales', ok: sv.model > 0 ? sv.sold >= c.retailSamplePassPct / 100 * sv.model : null, why: 'sold ' + Math.round(sv.sold) + ' of model ' + Math.round(sv.model) + ' (' + (sv.model ? pct(sv.sold / sv.model) : '-') + ', pass ' + c.retailSamplePassPct + '%)' });
+    const per = ids.filter((id) => sv.by[id].model > 0).map((id) => ({ n: s0.g[id].n, ...sv.by[id], x: sv.by[id].sold / sv.by[id].model })).sort((a, b) => a.x - b.x);
+    const w = per[0];
+    out.push({ id: 'sales', ok: per.length ? per.every((p) => p.x >= c.retailSamplePassPct / 100) : null,
+      why: (w ? 'worst ' + w.n + ' sold ' + Math.round(w.sold) + ' of model ' + Math.round(w.model) + ' (' + pct(w.x) + ')' : 'no model yet') + ', all goods ' + Math.round(sv.sold) + ' of ' + Math.round(sv.model) + ', pass ' + c.retailSamplePassPct + '%' });
     // 3. price about 1.52 x base at quality 0
     let pw = 0, pName = '';
     for (const s of samples) for (const id of ids) { const x = s.g[id]; if (!x) continue; const d = Math.abs(x.p / 10000 * Q0 / PRICE_X - 1); if (d > pw) { pw = d; pName = x.n + ' ' + (x.p / 10000 * Q0).toFixed(2) + 'x'; } }
@@ -5894,8 +6073,8 @@ try {
     const dl = mem.shelvedAt + c.retailRatingMin * 60000;
     const hit = rated.find((s) => s.r >= c.retailRating && s.t <= dl + c.retailSampleMin * 60000);
     const rate = rated.length >= 2 ? (rated[rated.length - 1].r - rated[0].r) / ((rated[rated.length - 1].t - rated[0].t) / 1000 * TPS) : null;
-    // E1 run (after the checkpoint): the rating just has to stay at the target
-    const okR = !rated.length ? null : e1 ? rated[rated.length - 1].r >= c.retailRating : hit ? true : now > dl + c.retailSampleMin * 60000 ? false : null;
+    // E1 run (after the checkpoint): the rating stays at the target at every sample of the run, not only the last one
+    const okR = !rated.length ? null : e1 ? rated.every((s) => s.r >= c.retailRating) : hit ? true : now > dl + c.retailSampleMin * 60000 ? false : null;
     out.push({ id: 'rating', ok: okR,
       why: !rated.length ? 'no rating in st.retail_ratings' : 'rating ' + rated[rated.length - 1].r + (rate != null ? ', ' + rate.toFixed(2) + ' per tick' : '') + ', needs ' + c.retailRating + ' within ' + c.retailRatingMin + ' min' + (hit ? ' (reached at ' + Math.round((hit.t - mem.shelvedAt) / 60000) + ' min)' : '') });
     return { rows: out, sales: sv };
@@ -5936,11 +6115,17 @@ try {
       else if (v.groups.length && mem.shelvedAt) {
         if (mem.goneSince == null) mem = m.set({ goneSince: ctx.now });
         else if (ctx.now - mem.goneSince >= c.retailGoneMin * 60000)
-          mem = m.set({ shelvedAt: null, samples: [], decision: null, streakStart: null, e1Base: null, e1: false, goneSince: null });
+          mem = m.set({ shelvedAt: null, samples: [], decision: null, prevDecision: null, streakStart: null, e1Base: null, e1: false, goneSince: null });
       }
       return { mem, n: 0 };
     }
     if (mem.goneSince != null) mem = m.set({ goneSince: null });
+    // Re-checkpoint after a fail (plan B3, D-2): once the fail path has applied the cap (nothing left for failAction), or nothing was measured,
+    // a new run starts at the capped output (again after each fail). The old decision stays as prevDecision: its cap holds meanwhile and
+    // the readout shows it.
+    const d0 = mem.decision;
+    if (d0 && !d0.ok && !f.badBoard && (!d0.measured || !failAction(v, f, d0)))
+      mem = m.set({ prevDecision: d0, decision: null, shelvedAt: ctx.now, samples: [], streakStart: ctx.now, e1Base: null, e1: false });
     const shelf = f.storeGroup.assortment ?? [];
     // The clock starts when the store can sell: the first read with shelves set, not the group's creation.
     if (!mem.shelvedAt) {
@@ -5995,23 +6180,34 @@ try {
     shelfPick(f, ctx, ctx.mem('retail'));
     const s = sampler(v, ctx, f);
     f.sampler = s;
-    const d = s.mem.decision;
+    // a re-run (B3) keeps the old fail in force until it decides: retailOk false, its cap, its fail path
+    const prev = s.mem.prevDecision ?? null, d = s.mem.decision ?? prev;
+    f.decision = d;
+    // The measured fail whose cap is in force: the decision itself, or the fail before a re-run's pass. That pass proves only that the
+    // capped output sells, so it opens the Oil Rig gate (retailOk) and nothing else: cap, land rule, Farms on Cotton and the ladder waiver stay.
+    const capD = d && !d.ok && d.measured ? d : d?.ok && prev && !prev.ok && prev.measured ? prev : null;   // an undecided fail has no sales figure to cap at
+    f.capDecision = capD;
     ctx.retailOk = f.storeGroup ? (d ? d.ok : null) : null;
-    ctx.retailCap = d && !d.ok ? d.cap : null;
+    ctx.retailCap = capD ? capD.cap : null;
     ctx.retailE1 = !!(f.storeGroup && s.mem.e1);
     ctx.retailDecided = !!d;
+    // fail path (plan A2): a measured cap in force (Farms stay, engine capped, CD from Wooden Frames)
+    ctx.retailFail = !!(f.storeGroup && capD);
+    ctx.retailFailPath = ctx.retailFail;
   }
 
   // ---- what to send ----------------------------------------------------------------------------------------------------------------
   function readoutOf(f) {
     if (!f || f.err) return { error: f?.err ?? 'no facts' };
-    const s = f.sampler ?? {}, d = s.mem?.decision;
+    const s = f.sampler ?? {}, d = s.mem?.decision, p = s.mem?.prevDecision, capP = d?.ok && f.capDecision === p;
     return {
       board: f.badBoard ? 'BAD: ' + f.badBoard : 'ok', share: f.share, rating: f.rating,
       shelf: (f.chosen ?? []).map((g) => g.name + ' appetite ' + g.appetite + '/2min, ' + usd(g.unit) + ', stock ' + Math.floor(g.stock) + (g.made ? ', ' + (g.outTick * TICKS_H).toFixed(1) + '/h made' : '')),
       samples: s.n ?? 0, shelvedAt: s.mem?.shelvedAt ?? null,
       rows: (s.rows ?? []).map((r) => r.id + ' ' + (r.ok === null ? '?' : r.ok ? 'pass' : 'FAIL') + ': ' + r.why),
-      decision: d ? (d.ok ? 'PASS (scale to the land rule)' : 'FAIL ' + d.kind + ': cap ' + d.cap + ' furniture blocks ' + JSON.stringify(d.capBy) + ', excess Workshops to Frame Timber, Farms stay on Cotton (' + d.why + ')') : f.storeGroup ? 'sampling' : 'store not built',
+      decision: d ? (d.ok ? (capP ? 'PASS at the capped output: Oil Rig opens; the cap of ' + p.cap + ' furniture blocks stays, Farms stay on Cotton' : 'PASS (scale to the land rule)') : 'FAIL ' + d.kind + ': cap ' + d.cap + ' furniture blocks ' + JSON.stringify(d.capBy) + ', excess Workshops to Frame Timber, Farms stay on Cotton (' + d.why + ')')
+        : p ? 're-checkpoint at the capped output: sampling (the earlier FAIL holds meanwhile)' : f.storeGroup ? 'sampling' : 'store not built',
+      prevDecision: p ? 'FAIL ' + p.kind + ': cap ' + p.cap + ' furniture blocks (' + p.why + ')' : null,
       e1: !!s.mem?.e1,
     };
   }
@@ -6046,8 +6242,13 @@ try {
       if (whole) return { action: { id: 'retail:ft:switch:' + whole.id, text: 'retail fail: ' + g.name + ' group ' + whole.id + ' (' + whole.count + ' Workshops) to Frame Timber, keeping ' + keep + ' on ' + g.name, hold: true,
         steps: [{ msg: { type: 'SetRecipe', group: whole.id, recipe: ftR }, until: (x) => x.groups.find((y) => y.id === whole.id)?.recipe === ftR }] } };
       const big = [...on].sort((a, b) => b.count - a.count)[0], c0 = big.count;
-      return { action: { id: 'retail:ft:cut:' + big.id + ':' + c0, text: 'retail fail: take ' + excess + ' Workshops off ' + g.name + ' (group ' + big.id + '), keeping ' + keep, hold: true,
-        steps: [{ msg: { type: 'UnassignBuildings', group: big.id, amount: excess }, until: (x) => (x.groups.find((y) => y.id === big.id)?.count ?? 0) <= c0 - excess }] } };
+      // The cut goes straight on to Frame Timber, so nothing waits in the pool for buildout's tidy to put back on furniture.
+      // No Frame Timber group: a new one; its recipe comes from the branch above on the next step (its id is not known before).
+      const ft = wg.filter((x) => x.recipe === ftR).sort((a, b) => b.count - a.count)[0], f0 = ft?.count ?? 0;
+      const to = ft ? { msg: { type: 'AssignBuildings', group: ft.id, amount: excess }, until: (x) => (x.groups.find((y) => y.id === ft.id)?.count ?? 0) >= f0 + excess }
+        : { msg: { type: 'CreateGroup', building: wsB, amount: excess, name: FT_GROUP, region: REGION }, until: (x) => x.groups.some((y) => y.building === wsB && y.name === FT_GROUP) };
+      return { action: { id: 'retail:ft:cut:' + big.id + ':' + c0, text: 'retail fail: move ' + excess + ' Workshops off ' + g.name + ' (group ' + big.id + ') to Frame Timber, keeping ' + keep, hold: true,
+        steps: [{ msg: { type: 'UnassignBuildings', group: big.id, amount: excess }, until: (x) => (x.groups.find((y) => y.id === big.id)?.count ?? 0) <= c0 - excess }, to] } };
     }
     return null;
   }
@@ -6075,9 +6276,9 @@ try {
         const short = f.need.filter((x) => x.g.stock < x.need);
         if (short.length) return { wait: 'pre-store gate: ' + short.map((x) => x.g.name + ' ' + Math.floor(x.g.stock) + ' / ' + x.need).join(', ') + ' (' + cfg().stockHoursPerShelf + ' h of sales at min(demand, output))', readout };
         const cost = P ? P.price(bd.cost, v.owned(STORE), 0) : bd.cost;
-        // Iron Frames: corePlan keeps cfg.ifReserve back for prototypes until Stage D (its reserve provider publishes the same number)
+        // Iron Frames: until Stage D the prototypes and first builds still to pay are kept back (corePlan ifNeed, capped by cfg.ifReserve); this build's own frames are not
         const ifId = v.idI('Iron Frame'), late = out?.stage === 'D' || out?.stage === 'END';
-        const keepOf = (i) => (i === ifId && !late ? cfg().ifReserve ?? 0 : 0);
+        const keepOf = (i) => (i === ifId && !late ? Math.min(cfg().ifReserve ?? 0, W.corePlan._ifNeed(v, STORE)) : 0);
         const lack = (bd.build_items ?? []).filter((i) => (v.st.stock?.[REGION]?.[i.item] ?? 0) - i.amount < keepOf(i.item));
         if (lack.length) return { wait: 'store needs ' + lack.map((i) => i.amount + ' ' + (v.C.items[i.item]?.name ?? i.item) + (keepOf(i.item) ? ' (+' + keepOf(i.item) + ' kept for prototypes)' : '')).join(', '), readout };
         if (v.freeAcres < bd.acres) return { wait: 'store needs ' + bd.acres + ' free acres (' + v.freeAcres + ' free)', readout };
@@ -6095,8 +6296,8 @@ try {
       return { action: { id: 'retail:shelf:' + want.join(','), text: 'shelves: ' + f.chosen.map((x) => x.name).join(', '),
         steps: [{ msg: { type: 'SetAssortment', group: g.id, items: want }, until: (x) => sameSet(x.groups.find((y) => y.id === g.id)?.assortment ?? [], want) }] }, readout };
     }
-    const d = f.sampler?.mem?.decision;
-    if (d && !d.ok && d.measured) {
+    const d = f.capDecision;   // a re-run, and its pass, keep cutting to the earlier fail's cap
+    if (d) {
       const fa = failAction(v, f, d);
       if (fa) return { ...fa, readout };
     }
@@ -6123,7 +6324,7 @@ try {
     context, decide,
     duties: () => [{ duty: 'Retail Store, shelves and the retail checkpoint (wiki 4.7)', owner: 'Core plan', done: true }],
   });
-  W.corePlan._retail = { checkBoard, shareOf, salesOver, rowsOf, capOf, shapeOf };
+  W.corePlan._retail = { facts, demandH, shelfHours, checkBoard, shareOf, salesOver, rowsOf, capOf, shapeOf };
 })();
 } catch (e) { console.error('[IdleCorp] cp-retail failed to load:', e); }
 // @@END cp-retail
@@ -6359,7 +6560,7 @@ try {
 // @@END cp-lab// ============================================================================
 // CORE PLAN DIRECTOR: 8. Stage D ladder (window.corePlan director "ladder")
 // ============================================================================
-// Feeds and tunes CD Farm's Auto mode per stage (wiki/core-game-plan.md section 11); it never cycles buildings itself.
+// Feeds and tunes CD Farm's Auto mode per stage (wiki/guides/core-game-plan.md section 11); it never cycles buildings itself.
 //   CD need (out.cdNeed): A = next unlock (Assembly Plant 20,000), B = Retail Store 5,000 banked, C = none (pause Auto once),
 //   D = none until the retail checkpoint passes, then Oil Rig 5,000, then Refinery 750,000 (11.4: 755,000 farmed in Stage D).
 //   Auto tuning through cdFarm.importCfg, only between runs and only for keys that differ, read back after:
@@ -6367,7 +6568,8 @@ try {
 //   autoStart: armed when Auto is off and nothing says the user wants it off. The user's Stop (or unticking it) is sticky until
 //   they switch it on again; Alt+Shift+X, CD Farm's own error / dry-run switch-off wait for Core plan's next Live session
 //   (the live-resume countdown after a reload); the ladder's own Stage C pause ends with the stage.
-//   Stage D gates (11.4): checkpoint passed, 0 Farms owned, free acres >= batch + spare; alert when Auto's plan is not Farm-only.
+//   Stage D gates (11.4): checkpoint passed (a pass of either run, plan D-2), 0 Farms owned (waived on the retail fail path, where Wooden
+//   Frames are the CD source), free acres >= batch + spare; alert when Auto's plan is not Farm-only.
 // @@MODULE cp-ladder
 try {
 (() => {
@@ -6424,7 +6626,7 @@ try {
       return { key: 'C', need: false, pause: true, why: 'stage C: Retail Store CD is in hand, no CD cycling (11.3)' };
     }
     if (stage === 'D' || stage === 'END') {
-      if (ctx.retailOk !== true && ctx.retailDecided !== true) return { key: 'D-wait', need: false, pause: true, why: 'stage D: the store has not passed the retail checkpoint' + (ctx.retailOk === false ? ' (it failed)' : ' yet') };
+      if (ctx.retailOk !== true) return { key: 'D-wait', need: false, pause: true, why: 'stage D: the store has not passed the retail checkpoint' + (ctx.retailOk === false ? ' (it failed: a new run measures the capped output)' : ' yet') };
       if (!gone(v, 'Oil Rig')) return { key: 'D', need: needOf(v, 'Oil Rig'), arm: true, ladder: true };
       if (!gone(v, 'Refinery')) return { key: 'D', need: needOf(v, 'Refinery', v.unlocked('Oil Rig') ? '' : 'Oil Rig research running'), arm: true, ladder: true };
       return { key: 'D-done', need: false, why: 'Refinery research started: no CD need left' };
@@ -6433,7 +6635,10 @@ try {
   }
 
   // CD Farm reads are not pure (rates() reads the page, evaluate() samples its history), so they happen here, before decide.
-  function context(v, ctx) {
+  function context(v, ctx, stage) {
+    // The phase's CD need, published before any decide: buildout (order 40) reads it for the Wooden Frame gate.
+    const ph = phaseOf(v, stage, ctx);
+    ctx.ladderNeed = ph?.need && !ph.need.missing ? ph.need : false;
     const gap = 3 * (cfgOf().intervalMs ?? 5000);
     if (ctx.live) { if (!liveAt || ctx.now - liveAt > gap) session++; liveAt = ctx.now; }
     else liveAt = 0;   // dry run: going Live again is a new session
@@ -6474,13 +6679,15 @@ try {
       const held = lad.held, farmId0 = v.idB('Farm');
       const heldAll = held ? Object.values(held).reduce((a, n) => a + (n > 0 ? n : 0), 0) : 0;
       const farms = inRun && !held ? 0 : v.owned('Farm') - (held?.[farmId0] ?? 0);
-      if (farms > 0) waits.push(farms + ' Farms owned: the ladder needs 0 (each one raises the next Farm price by $2.05)');
+      // Fail path (plan A2): the remaining Farms stay on Cotton and CD Farm burns Wooden Frames above the keep line instead
+      if (ctx.retailFailPath) alerts.push('fail path: CD from Wooden Frames');
+      else if (farms > 0) waits.push(farms + ' Farms owned: the ladder needs 0 (each one raises the next Farm price by $2.05)');
       const want = (batch ?? 1) + spare;
       if (!inRun && v.freeAcres + heldAll < want) waits.push('free acres ' + (v.freeAcres + heldAll) + ' < batch ' + (batch ?? '?') + ' + spare ' + spare);
       if (waits.length) { ph.need = false; ph.arm = false; }
       const units = lad.plan?.units ?? [];
       const farmId = v.idB('Farm');
-      if (units.length && (!units.some((u) => u.b === farmId) || units.length > 2)) alerts.push('CD Farm plan is ' + units.map((u) => u.n + ' ' + u.name).join(' + ') + ', not Farm-only (or Farm + 1 type): check Farms owned and the Wooden Frame reserve');
+      if (!ctx.retailFailPath && units.length && (!units.some((u) => u.b === farmId) || units.length > 2)) alerts.push('CD Farm plan is ' + units.map((u) => u.n + ' ' + u.name).join(' + ') + ', not Farm-only (or Farm + 1 type): check Farms owned and the Wooden Frame reserve');
     }
     if (ph.need !== undefined) out.cdNeed = ph.need;
     const need = ph.need || (ph.need === undefined ? out.nextUnlock : null);
@@ -6516,7 +6723,8 @@ try {
     const want = { land: 'off', pace: ph.ladder ? c.ladderPaceD : c.ladderPace, reserveAcres: spare };
     // batch follows a noisy income slope: only move it by 2 or more, so tune actions do not flip back and forth.
     if (batch && !(typeof fc.batch === 'number' && Math.abs(batch - fc.batch) < 2)) want.batch = batch;
-    if (stage === 'D' || stage === 'END') want.maxTypes = 1;   // Farm-only: each extra type adds a Buy and a Demolish round trip
+    // Farm-only: each extra type adds a Buy and a Demolish round trip. Not on the fail path: Farms stay on Cotton, CD comes from frames.
+    if ((stage === 'D' || stage === 'END') && !ctx.retailFailPath) want.maxTypes = 1;
     const sid = lad.session, off = m.off;
     if (ph.arm && !fc.autoStart) {
       if (!off || (off.why === 'ladder' && m.paused !== ph.key)) want.autoStart = true;
@@ -6572,7 +6780,8 @@ try {
 // @@END cp-ladder// ============================================================================
 // CORE PLAN DIRECTORS 9-10: Cotton slot, sell jobs, cadence, offline checklist, endgame (corePlan directors)
 // ============================================================================
-// Four directors on top of corePlan (wiki/core-game-plan.md sections 5, 6, 12, 13):
+// Five directors on top of corePlan (wiki/guides/core-game-plan.md sections 5, 6, 8.1, 12, 13):
+//   resume   SetPaused false on a group an unpaid bill paused, once bills are affordable (plan D7, Autopilot's rule; yours stay paused).
 //   slot     KeepFilling on the best Heartland Cotton bid while Farms exist (5.1), then a surplus bid or nothing (5.2).
 //            Autopilot's autoShipCotton does the same job: while Autopilot runs with it on, this director only reads out.
 //   sell     autoSell jobs for ore, stone, sheets and saturated shelves above the keep line (section 6). Live only.
@@ -6645,10 +6854,9 @@ try {
     const target = TARGETS.find(([n]) => v.idI(n) === item)?.[1] ?? 0;
     return Math.ceil(Math.max(2 * kit, cfg.sellKeepHours * (use[item] ?? 0), target));
   }
-  function shelvesOf(ctx) { const s = ctx.retailBoard?.shelves; return s?.[REGION] ?? s?.[String(REGION)] ?? null; }
   const storeItems = (v) => [...new Set(v.groups.filter((g) => g.building === v.idB('Retail Store')).flatMap((g) => g.assortment ?? []))];
-  // Hours the shelf holds at its appetite (appetite read as units per hour).
-  const shelfHours = (sh) => (sh && sh.appetite > 0 ? (sh.held ?? 0) / sh.appetite : Infinity);
+  // Hours a shelf's stock lasts, from the retail facts (stock, output, appetite x share); Infinity for a good the store does not shelve.
+  const shelfHours = (f, i) => { const g = f?.goods?.find((x) => x.id === i); return g ? cp._retail.shelfHours(g, f.share) : Infinity; };
 
   // ---- slot (wiki 5.1, 5.2) -----------------------------------------------------------------------------------------------------
   function apOwnsSlot(ctx) { const eg = ctx.mods?.earlyGame; return !!(eg && eg.running && eg.cfg?.autoShipCotton !== false); }
@@ -6719,7 +6927,7 @@ try {
   // ---- sell (wiki 6) ----------------------------------------------------------------------------------------------------------------
   function sellPlan(v, ctx, out) {
     const never = neverIds(v), cotton = v.idI('Cotton'), wood = v.idI('Wood');
-    const use = consumption(v), shelves = shelvesOf(ctx), t = tickOf(v, ctx);
+    const use = consumption(v), rf = ctx.retail, t = tickOf(v, ctx);
     const filled = new Set(Object.keys(v.st.standing_fills ?? {}).map(Number));
     const jobs = ctx.sellJobs ?? [];
     const jobItems = new Set(jobs.map((j) => j.item)), jobDeals = new Set(jobs.map((j) => j.deal));
@@ -6730,8 +6938,9 @@ try {
       if (!it) return null;
       if (it.category === 'Raw') return 'raw';
       if (/ Sheet$/.test(it.name)) return 'sheet';
-      const sh = shelves?.[i] ?? shelves?.[String(i)];
-      if (sh && shelfHours(sh) >= cfg.sellSaturatedHours) return 'saturated shelf';
+      // Saturated: output keeps up with demand and the stock is a stretch of demand deep (wiki 6).
+      const g = rf?.share != null ? rf.goods?.find((x) => x.id === i) : null;
+      if (g) { const dem = cp._retail.demandH(g, rf.share); if (g.outTick * TPH >= dem && g.stock >= cfg.sellSaturatedHours * dem) return 'saturated shelf'; }
       return null;
     };
     const best = {};
@@ -6811,26 +7020,21 @@ try {
     const floor = sub * 12000;
     c.push(chk('cash', v.money >= floor, 'money ' + usd(v.money) + (v.money >= floor ? ' >= ' : ' < ') + 'bill floor ' + usd(floor) + ' (2 h of bills)'));
     if (out.stage === 'D' || out.stage === 'END') {
-      const sh = shelvesOf(ctx);
-      if (!sh) c.push(chk('shelves', null, 'retail board unreadable'));
+      const rf = ctx.retail;
+      if (!rf?.goods) c.push(chk('shelves', null, 'retail board unreadable'));
+      else if (rf.share == null) c.push(chk('shelves', null, 'retail share unknown'));
       else {
-        const low = storeItems(v).filter((i) => shelfHours(sh[i] ?? sh[String(i)]) < cfg.shelfHours);
+        const low = storeItems(v).filter((i) => shelfHours(rf, i) < cfg.shelfHours);
         c.push(chk('shelves', !low.length, low.length ? 'under ' + cfg.shelfHours + ' h: ' + low.map((i) => itemName(v, i)).join(', ') : 'every shelf >= ' + cfg.shelfHours + ' h'));
       }
     }
     return c;
   }
-  function freeModules(v) {
-    const used = new Set(v.groups.flatMap((g) => Object.values(g.modules ?? {})).map(Number));
-    const fleet = v.st.fleet_modules ?? [];
-    for (const m of Array.isArray(fleet) ? fleet : Object.keys(fleet)) used.add(+m);
-    return Object.keys(v.st.module_defs ?? {}).map(Number).filter((id) => !used.has(id));
-  }
   function sixHourChecks(v, ctx, out) {
     const r = out.rule, c = [];
     c.push(chk('land', !!r, r ? 'land rule: last acre #' + r.lastAcre + ', T_wall ' + (+r.tWall).toFixed(1) + ' h, ' + (r.acresToBuy ?? 0) + ' acres to buy' : 'land rule unavailable'));
-    const fm = freeModules(v);
-    c.push(chk('modules', !fm.length, fm.length ? fm.length + ' module(s) not installed: ' + fm.map((id) => v.st.module_defs[id]?.name ?? '#' + id).join(', ') : 'all modules installed'));
+    const fm = cp._lab.freeModules(v);
+    c.push(chk('modules', !fm.length, fm.length ? fm.length + ' module(s) not installed: ' + fm.map((d) => d.name ?? '#' + d.id).join(', ') : 'all modules installed'));
     const builds = nextBuilds(v, r, cfg.kitWaveBuilds), kit = kitOf(v, builds);
     const short = Object.entries(kit).filter(([i, n]) => stockOf(v, +i) < n);
     c.push(chk('kit', !short.length, short.length ? 'next wave (' + builds.join(', ') + ') short of ' + short.map(([i, n]) => num(n - stockOf(v, +i)) + ' ' + itemName(v, +i)).join(', ') : 'kit stock covers the next ' + builds.length + ' builds'));
@@ -6869,7 +7073,7 @@ try {
     // Unlocks: queueing charges CD and the prototype at once, so they are budgeted together. Oil Rig is never queued (retail checkpoint first).
     const queue = v.st.research_queue ?? [], busyB = v.research?.building ?? null;
     const pending = new Set([busyB, ...queue.map((q) => q.building)].filter((b) => b != null));
-    const retailGo = opts.retailOk === true || opts.retailDecided === true;   // a failed checkpoint is decided too: the live plan starts the Oil Rig
+    const retailGo = opts.retailOk === true;   // Oil Rig only on a pass, of either checkpoint run (plan D-2), as the live plan
     let cd = v.cd; const stock = { ...(v.st.stock?.[REGION] ?? {}) };
     const tech = (b) => v.N.techs.find((t) => t.building === b);
     const affordable = (b) => { const t = tech(b); if (!t || cd < t.cost) return false; return (v.bld(b).build_items ?? []).every((i) => (stock[i.item] ?? 0) >= i.amount); };
@@ -6902,9 +7106,10 @@ try {
     const mw = v.st.subscriptions?.[REGION]?.power ?? 0, need = mw * 6000 * hours;
     add('cash', v.money >= need, 'cash ' + usd(v.money) + (v.money >= need ? ' >= ' : ' < ') + mw + ' MW x $60 x ' + hours + ' h = ' + usd(need));
     if (v.owned('Retail Store') > 0) {
-      const sh = opts.shelves ?? null, items = storeItems(v);
-      const low = sh ? items.filter((i) => shelfHours(sh[i] ?? sh[String(i)]) < hours) : [];
-      add('shelves', sh ? !low.length : null, !sh ? 'retail board unreadable: stock the shelves for ' + hours + ' h' : low.length ? 'shelves run dry before ' + hours + ' h: ' + low.map((i) => itemName(v, i)).join(', ') : 'every shelf holds ' + hours + ' h');
+      const rf = opts.retail?.goods ? opts.retail : null, items = storeItems(v);
+      const low = rf ? items.filter((i) => shelfHours(rf, i) < hours) : [];
+      if (rf && rf.share == null) add('shelves', null, 'retail share unknown: stock the shelves for ' + hours + ' h');
+      else add('shelves', rf ? !low.length : null, !rf ? 'retail board unreadable: stock the shelves for ' + hours + ' h' : low.length ? 'shelves run dry before ' + hours + ' h: ' + low.map((i) => itemName(v, i)).join(', ') : 'every shelf holds ' + hours + ' h');
     } else add('shelves', true, 'no Retail Store yet');
     add('autoship', true, 'auto-ship and distributor sales stop while away');
     return { hours, premium, capHours: cap, ok: list.every((x) => x.ok !== false), checklist: list, sends };
@@ -6913,11 +7118,11 @@ try {
     const w = core.walk(true);
     if (!w?.st || !w.catalog) return { error: 'game state not readable' };
     const v = cp._view(w.st, w.catalog, w.deals ?? []);
-    let shelves = null;
-    try { const j = w.engine?.retailJson?.(); const b = typeof j === 'string' ? JSON.parse(j) : j; shelves = b?.shelves?.[REGION] ?? b?.shelves?.['0'] ?? null; } catch {}
+    let retail = null;
+    try { const j = w.engine?.retailJson?.(); retail = cp._retail.facts(v, { retailBoard: typeof j === 'string' ? JSON.parse(j) : j }); } catch {}
     // The retail checkpoint as the last step saw it (the retail director's context sets it; saved by the cadence context).
     const cm = memRef?.('cadence').get() ?? {};
-    return offlinePlan(v, +hours, { shelves, retailOk: cm.retailOk ?? null, retailDecided: cm.retailDecided ?? null });
+    return offlinePlan(v, +hours, { retail, retailOk: cm.retailOk ?? null });
   }
 
   // ---- endgame (wiki 12) ------------------------------------------------------------------------------------------------------------
@@ -6943,10 +7148,57 @@ try {
       steps: [{ msg: { type: 'StartTech', building: b, region: REGION }, until: (x) => x.research?.building === b || x.unlocked('Refinery') }] } };
   }
 
+  // ---- resume groups paused by an unpaid bill (plan D7, D-4: Autopilot's observe() + resume step, moved here) -------------
+  // A powered group seen running, then paused while cash is under ~2 bills (or the subscription is below the load), was paused by an
+  // unpaid bill; any other pause, and a group already paused when first seen, is the user's and is never touched (Autopilot's rule).
+  const lastPaused = new Map();                  // this session only, like Autopilot: a group paused before the load counts as yours
+  const drawOf = (v, g) => v.bld(g.building).draws?.power ?? 0;
+  const powerHave = (v) => v.st.subscriptions?.[REGION]?.power ?? 0;
+  function resumeObserve(v, m) {
+    const needAll = v.groups.reduce((a, g) => a + drawOf(v, g) * g.count, 0), have = powerHave(v);
+    const billShort = have < needAll || v.money < Math.max(have, needAll) * 1000 * 2;
+    const o = m.get(), bill = new Set(o.bill ?? []), user = new Set(o.user ?? []);
+    let changed = false;
+    for (const g of v.groups) {
+      const prev = lastPaused.get(g.id);
+      if (g.paused && prev !== true && !bill.has(g.id) && !user.has(g.id)) { (prev === false && billShort && drawOf(v, g) > 0 ? bill : user).add(g.id); changed = true; }
+      if (!g.paused && (bill.delete(g.id) | user.delete(g.id))) changed = true;
+      lastPaused.set(g.id, !!g.paused);
+    }
+    if (changed) m.set({ bill: [...bill], user: [...user] });
+  }
+  // One SetPaused false per step once the bills are affordable: cash >= Autopilot's floor (1 h of bills, min $100, the group counted)
+  // + one bill for it, and the subscription covers the load with it. Groups a director paused on purpose (Kiln gate, WF gate) stay.
+  function resumeDecide(v, ctx) {
+    if (!ctx.mem) return null;
+    const bo = ctx.mem('buildout').get(), mine = new Set([...(bo.kilnMine ?? []), ...(bo.ftMine ?? [])]);
+    const bill = new Set(ctx.mem('resume').get().bill ?? []);
+    const list = v.groups.filter((g) => g.paused && g.count > 0 && bill.has(g.id) && !mine.has(g.id));
+    if (!list.length) return null;
+    const eg = ctx.mods?.earlyGame;
+    if (eg?.running && eg.cfg?.resumePaused !== false) return { wait: 'Autopilot resumes the ' + list.length + ' bill-paused group(s) while it runs' };   // one driver per job
+    const have = powerHave(v), load = powerLoad(v), waits = [];
+    for (const g of list) {
+      const mw = drawOf(v, g) * g.count, name = '"' + (g.name ?? v.bld(g.building).name) + '"';
+      if (have < load + mw) { waits.push(name + ' is paused (unpaid bill?): power subscription ' + have + ' MW < ' + (load + mw) + ' MW with it'); continue; }
+      const need = Math.max(10000, (Math.max(have, load) + mw) * 1000 * 6) + mw * 1000;
+      if (v.money < need) { waits.push(name + ' is paused (unpaid bill?): waiting for cash ' + usd(v.money) + ' / ' + usd(need) + ' to resume'); continue; }
+      return { action: { id: 'resume:' + g.id, text: 'resume ' + name + ' (paused by an unpaid bill, bills affordable again)',
+        steps: [{ msg: { type: 'SetPaused', group: g.id, paused: false }, until: (x) => !x.groups.find((y) => y.id === g.id)?.paused }] } };
+    }
+    return { wait: waits.join(' | ') };
+  }
+
   // ---- registration ------------------------------------------------------------------------------------------------------------------
   // The server tick now: the core's clock (last tick seen + elapsed), never behind the last mutation tick.
   let memRef = null;                             // ctx.mem, for corePlan.offline() outside a step
   const setTick = (v, ctx) => { if (ctx.tick == null) { let t = 0; try { t = core?.nowTick?.() ?? 0; } catch {} ctx.tick = Math.max(t, v.mutTick ?? 0); } };
+  cp.addDirector({
+    name: 'resume', order: 10, always: true,   // always: a bill pause can make cash fall (S6) and drop the stage
+    context(v, ctx) { if (ctx.mem) resumeObserve(v, ctx.mem('resume')); },
+    decide: resumeDecide,
+    duties: () => [{ duty: 'resume groups paused by an unpaid bill (waits while Autopilot runs with resumePaused on)', owner: 'Core plan', done: true }],
+  });
   cp.addDirector({
     name: 'slot', order: 70,
     defaults: { dir_slot: true, slotLotMin: 150000, slotMinMinutes: 60, slotRearmMinutes: 15 },
@@ -6971,10 +7223,11 @@ try {
       // A job we started that autoSell ended by itself (5 unconfirmed sends, bid filled, user stop) cools down before that bid
       // is tried again: an instant restart would loop unconfirmed sends forever without tripping the 3-fail stop.
       const m = ctx.mem('sell'), o = m.get(), now = ctx.now ?? 0, have = new Set(ctx.sellJobs.map((j) => j.deal));
-      const mine = o.mine ?? [], ended = mine.filter((d) => !have.has(d));
+      // A job autoSell moved to another bid (its `from` is our old id) is still ours. shortcut: only the last move is remembered, so a job that moves twice between two ticks is lost; upgrade to a chain if that is ever seen.
+      const was = o.mine ?? [], mine = was.map((d) => ctx.sellJobs.find((j) => j.from === d)?.deal ?? d), ended = mine.filter((d) => !have.has(d));
       const cool = Object.fromEntries(Object.entries(o.cool ?? {}).filter(([, until]) => until > now));
       for (const d of ended) cool[d] = now + cfg.sellCooldownMinutes * 60000;
-      if (ended.length || Object.keys(cool).length !== Object.keys(o.cool ?? {}).length) m.set({ mine: mine.filter((d) => have.has(d)), cool });
+      if (ended.length || mine.some((d, i) => d !== was[i]) || Object.keys(cool).length !== Object.keys(o.cool ?? {}).length) m.set({ mine: mine.filter((d) => have.has(d)), cool });
     },
     decide: sellDecide,
     duties: () => [{ duty: 'Auto ship jobs for ore, stone, sheets and saturated shelves (keep line)', owner: 'Core plan', done: true }],
@@ -6985,7 +7238,7 @@ try {
     context(v, ctx) {
       setTick(v, ctx); memRef = ctx.mem;
       const m = ctx.mem('cadence');
-      if ((m.get().retailOk ?? null) !== (ctx.retailOk ?? null) || (m.get().retailDecided ?? null) !== (ctx.retailDecided ?? null)) m.set({ retailOk: ctx.retailOk ?? null, retailDecided: ctx.retailDecided ?? null });
+      if ((m.get().retailOk ?? null) !== (ctx.retailOk ?? null)) m.set({ retailOk: ctx.retailOk ?? null });
       cadenceSettle(cp.plan?.(), m, ctx.now ?? 0);
       ctx.cadenceFired = tickPeriods(m, ctx.now ?? 0);
     },
@@ -7000,7 +7253,7 @@ try {
   });
   cp.offline = offline;
   cp.canSaveDesign = canSaveDesign;
-  cp._cadence = { slotDecide, sellPlan, sellDecide, cadenceDecide, cadenceSettle, tickPeriods, hourlyChecks, sixHourChecks, offlinePlan, canSaveDesign, endgameDecide, keepLine, consumption, activeFills, slotFills, NEVER, TARGETS };
+  cp._cadence = { slotDecide, sellPlan, sellDecide, cadenceDecide, cadenceSettle, tickPeriods, hourlyChecks, sixHourChecks, offlinePlan, canSaveDesign, endgameDecide, resumeObserve, resumeDecide, keepLine, consumption, activeFills, slotFills, NEVER, TARGETS };
 })();
 } catch (e) { console.error('[IdleCorp] cp-cadence failed to load:', e); }
 // @@END cp-cadence// ============================================================================
@@ -7008,7 +7261,7 @@ try {
 // ============================================================================
 // @@MODULE early-game (test/early-game-sim.js evals everything from this line down)
 //
-// IdleCorp early-game autopilot: plays wiki/early-game-plan.md, Phase 1 → Phase 5, over the game WebSocket.
+// IdleCorp early-game autopilot: plays wiki/guides/early-game-plan.md, Phase 1 → Phase 5, over the game WebSocket.
 // Install as a userscript (Tampermonkey / Violentmonkey) and open "Autopilot" in the game's sidebar,
 // or paste into the DevTools console on https://idlecorp.net (logged in). Console API:
 //
@@ -7524,7 +7777,7 @@ try {
 
   // ---- floorplans ----------------------------------------------------------------
 
-  // Best known designs (found with the game's scorer; see wiki/floorplan-search.md).
+  // Best known designs (found with the game's scorer; see wiki/dev/floorplan-search.md).
   // Cells as "x,y:item:rot". Pieces: 113 Furnace, 114 Cutter, 116 Assembler, 121 Digging Eq.,
   // 122 Field Eq., 123 Conveyor, 126 Splitter, 127 Merger, 128 Crossing.
   // Library designs never change: unpack each string once and freeze it, so cellsKey can remember its key too.

@@ -325,6 +325,35 @@ async function sync(cp, st, ctx) { for (let i = 0; i < 4; i++) { const a = act(d
     F.unload();
   });
 
+  await F.t('stage D fail path (A2, B3): no CD need before a pass; after a pass of the new run the "0 Farms" gate is waived with an alert', () => {
+    const { cp } = F.load(['cp-ladder']);
+    const farms = () => { const s = stD(); s.building_pool[0][Bc('Farm')] = 3; return s; };
+    const failed = dec(cp, farms(), F.ctxOf({ retailOk: false, retailFail: true, retailFailPath: true, mods: { cdFarm: fakeFarm() } }));
+    assert.strictEqual(failed.cdNeed, false);
+    assert.match(lwait(failed), /not passed the retail checkpoint \(it failed: a new run measures the capped output\)/);
+    const passed = dec(cp, farms(), F.ctxOf({ retailOk: true, retailFailPath: true, mods: { cdFarm: fakeFarm() } }));
+    assert.strictEqual(passed.cdNeed.name, 'Oil Rig');
+    assert.ok(!/Farms owned/.test(lwait(passed)), lwait(passed));
+    assert.ok(passed.readouts.ladder.alerts.includes('fail path: CD from Wooden Frames'));
+    assert.match(lwait(dec(cp, farms(), F.ctxOf({ retailOk: true, mods: { cdFarm: fakeFarm() } }))), /3 Farms owned/, 'a plain pass keeps the gate');
+    // fail path: no maxTypes 1 (CD comes from Wooden Frames on Mines / Quarries) and no "not Farm-only" alert
+    const mq = { idle: false, income: 35000000, plan: { units: [{ b: Bc('Mine'), name: 'Mine', n: 2, cd: 1 }, { b: Bc('Quarry'), name: 'Quarry', n: 2, cd: 1 }] } };
+    const fp = dec(cp, farms(), F.ctxOf({ retailOk: true, retailFailPath: true, mods: { cdFarm: fakeFarm({ ev: mq }) } })).readouts.ladder;
+    assert.strictEqual(typeof fp.tune, 'object', 'decide reached the tuning: ' + JSON.stringify(fp.tune));
+    assert.ok(!('maxTypes' in fp.tune), JSON.stringify(fp.tune));
+    assert.ok(!fp.alerts.some((x) => /not Farm-only/.test(x)), JSON.stringify(fp.alerts));
+    const pl = dec(cp, stD(), F.ctxOf({ retailOk: true, mods: { cdFarm: fakeFarm({ ev: mq }) } })).readouts.ladder;
+    assert.strictEqual(pl.tune.maxTypes, 1); assert.ok(pl.alerts.some((x) => /not Farm-only/.test(x)), 'a plain pass keeps both');
+    // ctx.ladderNeed is published in context(), before buildout decides
+    const cx = F.ctxOf({ retailOk: true, retailFailPath: true, mods: { cdFarm: fakeFarm() } });
+    dec(cp, farms(), cx);
+    assert.strictEqual(cx.ladderNeed.name, 'Oil Rig');
+    const cx2 = F.ctxOf({ retailOk: false, retailFail: true, retailFailPath: true });
+    dec(cp, farms(), cx2);
+    assert.strictEqual(cx2.ladderNeed, false, 'no CD need before a pass, CD Farm not loaded');
+    F.unload();
+  });
+
   F.done();
 })();
 function core_reserve_need() { return globalThis.idleCore.reserves.merged()?.nextTech ?? null; }

@@ -21,7 +21,7 @@ const view = (cp, st, deals = []) => cp._view(st, CAT, deals);
 const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; };
 
 (async () => {
-  const { cp } = F.load(['cp-cadence']);
+  const { cp } = F.load(['cp-lab', 'cp-cadence']);
   const X = cp._cadence;
 
   await t('directors load; endgame is off by default', () => {
@@ -142,7 +142,7 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
     const st = plain();
     const disk = F.mem(); globalThis.localStorage = disk;     // ctx.mem persists through localStorage, as in the browser
     const deals = [{ id: 31, side: 'Sell', item: I('Cotton'), amount: 400000, price: 60000000, region: 0, expires_at: st.ssi.last_user_mutation_tick + 50000 }];
-    const { cp: c2, w } = F.boot(st, { deals, catalog: CAT, modules: ['cp-cadence'] });
+    const { cp: c2, w } = F.boot(st, { deals, catalog: CAT, modules: ['cp-lab', 'cp-cadence'] });
     assert.deepStrictEqual(c2.importCfg({ land: false, unlocks: false, handoff: false, dir_sell: false, dir_cadence: false }).skipped, []);
     c2.start({ dryRun: false });
     await waitFor(() => w.ws.sent.some((m) => m.type === 'KeepFilling'));
@@ -157,7 +157,7 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
   await t('slot chaos: an unconfirmed KeepFilling is retried at most once per step and stops after 3', async () => {
     const st = plain();
     const deals = [{ id: 32, side: 'Sell', item: I('Cotton'), amount: 400000, price: 60000000, region: 0, expires_at: st.ssi.last_user_mutation_tick + 50000 }];
-    const { cp: c2, w } = F.boot(st, { deals, catalog: CAT, modules: ['cp-cadence'], ignore: ['KeepFilling'] });
+    const { cp: c2, w } = F.boot(st, { deals, catalog: CAT, modules: ['cp-lab', 'cp-cadence'], ignore: ['KeepFilling'] });
     assert.deepStrictEqual(c2.importCfg({ land: false, unlocks: false, handoff: false, dir_sell: false, dir_cadence: false, confirmMs: 30 }).skipped, []);
     c2.start({ dryRun: false });
     for (let i = 0; i < 4 && c2.running; i++) { await waitFor(() => !c2.active); await c2._step(); }
@@ -167,7 +167,7 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
   });
 
   // ---- sell -------------------------------------------------------------------------------------------------------------
-  const { cp: cpS } = F.load(['cp-cadence']);
+  const { cp: cpS } = F.load(['cp-lab', 'cp-cadence']);
   const XS = cpS._cadence;
   const sellSt = () => { const st = plain(); st.stock[0][I('Iron Ore')] = 500000; st.stock[0][I('Gold Ore')] = 155; st.stock[0][I('Iron Sheet')] = 900000; st.stock[0][I('Wood')] = 900000; st.stock[0][I('Wooden Frame')] = 9000; return st; };
   const sellDeals = () => [bid(41, I('Iron Ore'), 393000, 229, 300), bid(42, I('Iron Sheet'), 400000, 9000, 300), bid(43, I('Wood'), 386000, 75, 300), bid(44, I('Wooden Frame'), 10000, 99999, 300), bid(45, I('Gold Ore'), 399600, 918, 300), bid(46, I('Cotton'), 300000, 150, 300)];
@@ -234,6 +234,25 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
     r = XS.sellDecide(view(cpS, st, deals), cx(), out);
     assert.ok(!r.action || !/^sell:keep/.test(r.action.id));
   });
+  await t('sell: a job autoSell moved to another bid (from: old id) stays ours: no cooldown, keep line raised on the new id', async () => {
+    const st = sellSt(); st.stock[0][I('Gold Ore')] = 400000;
+    const deals = sellDeals(), out = cpS._decide(view(cpS, st, deals), F.ctxOf({ tick: T0, deals }));
+    const started = [];
+    const jobs = [{ deal: 47, from: 45, item: I('Gold Ore'), keep: 0, left: null, fullLoads: true }];
+    const as = { jobs: () => jobs, start: (o) => { started.push(o); jobs[0].keep = o.keep; return o.deal; }, stop() {} };
+    const mm = F.ctxOf().mem; mm('sell').set({ mine: [45] });
+    st.groups[7].recipe = Rc('Smelt Gold'); delete st.groups[7].work;
+    const keep = XS.keepLine(view(cpS, st, deals), out.rule, I('Gold Ore'));
+    assert.ok(keep > 0);
+    const now = 1.8e12, cx = () => F.ctxOf({ now, tick: T0, deals, mods: { autoSell: as }, mem: mm });
+    const c = cx(); cpS._decide(view(cpS, st, deals), c);       // the sell context remaps mine
+    assert.deepStrictEqual(mm('sell').get().mine, [47]);
+    assert.ok(!mm('sell').get().cool?.[45], 'no cooldown on the old id');
+    const r = XS.sellDecide(view(cpS, st, deals), c, out);
+    assert.strictEqual(r.action.id, 'sell:keep:47:' + keep);
+    assert.strictEqual(await r.action.run(), true);
+    assert.deepStrictEqual(started, [{ deal: 47, total: null, keep, fullLoads: true }]);
+  });
   await t('sell: a job autoSell ended by itself cools down before that bid is tried again', () => {
     const st = sellSt(), deals = sellDeals();
     const mm = F.ctxOf().mem; mm('sell').set({ mine: [41] });
@@ -260,6 +279,7 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
   };
   await t('cadence: over 24 h the hourly checks run 24 times and the 6-hour checks 4 times, each on its tick', () => {
     const st = plain(), { n, lab } = spy(st), v = view(cpS, st, []);
+    cpS.cfg.dir_lab = false;                                    // the lab director also reads labRunner.running: keep it out of the spy count
     const mm = F.ctxOf().mem, quiet = () => {};
     const t0 = 1.8e12 + 123457;
     let h = 0, s = 0, prev = null;
@@ -276,6 +296,7 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
       assert.ok(rc.hourly.length && rc.six.length, 'saved results shown between ticks');
       prev = d;
     }
+    cpS.cfg.dir_lab = true;
     assert.strictEqual(h, 24); assert.strictEqual(s, 4);
     assert.deepStrictEqual([mm('cadence').get().hFires, mm('cadence').get().sFires], [24, 4]);
     // A long sleep gives one catch-up fire, not several.
@@ -325,7 +346,7 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
   await t('cadence runner: a dry run alerts too (the alert is not a game command)', async () => {
     const st = plain();
     globalThis.localStorage = F.mem();                         // ctx.mem persists through localStorage, as in the browser
-    const { cp: c2 } = F.boot(st, { deals: [], catalog: CAT, modules: ['cp-cadence'] });
+    const { cp: c2 } = F.boot(st, { deals: [], catalog: CAT, modules: ['cp-lab', 'cp-cadence'] });
     const notes = [];
     globalThis.idleCore.notify = (...a) => notes.push(a);
     c2.importCfg({ land: false, unlocks: false, handoff: false, dir_slot: false, dir_sell: false });
@@ -368,19 +389,22 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
       assert.strictEqual(u.ok, true); assert.match(u.text, /Oil Rig waits for the retail checkpoint/);
     }
     // corePlan.offline() uses the checkpoint the last step saw (the retail director's ctx.retailOk).
-    const { cp: cpO, core } = F.load(['cp-cadence']);
+    const { cp: cpO, core } = F.load(['cp-lab', 'cp-cadence']);
     const mm = F.ctxOf().mem;
     cpO._decide(view(cpO, st), F.ctxOf({ tick: T0, mem: mm, retailOk: true }));
     core.walk = () => ({ st, catalog: CAT, deals: [] });
     assert.deepStrictEqual(cpO.offline(10).sends, [{ type: 'StartTech', building: B('Oil Rig'), region: 0 }]);
     cpO._decide(view(cpO, st), F.ctxOf({ tick: T0, mem: mm, retailOk: null }));
     assert.deepStrictEqual(cpO.offline(10).sends, []);
-    // A failed checkpoint is still decided: the live plan starts the Oil Rig, and so does the offline plan.
+    // A failed checkpoint waits for a pass of the new run (plan D-2), offline as live; that pass starts the Oil Rig.
     for (const premium of [true, false]) {
-      p = XS.offlinePlan(view(cpS, st), 10, { premium, retailOk: false, retailDecided: true });
-      assert.deepStrictEqual(p.sends, [{ type: 'StartTech', building: B('Oil Rig'), region: 0 }], 'failed checkpoint, premium ' + premium);
+      p = XS.offlinePlan(view(cpS, st), 10, { premium, retailOk: false });
+      assert.deepStrictEqual(p.sends, [], 'failed checkpoint, premium ' + premium);
+      assert.match(p.checklist.find((x) => x.id === 'unlock').text, /Oil Rig waits for the retail checkpoint/);
     }
-    cpO._decide(view(cpO, st), F.ctxOf({ tick: T0, mem: mm, retailOk: false, retailDecided: true }));
+    cpO._decide(view(cpO, st), F.ctxOf({ tick: T0, mem: mm, retailOk: false }));
+    assert.deepStrictEqual(cpO.offline(10).sends, []);
+    cpO._decide(view(cpO, st), F.ctxOf({ tick: T0, mem: mm, retailOk: true }));
     assert.deepStrictEqual(cpO.offline(10).sends, [{ type: 'StartTech', building: B('Oil Rig'), region: 0 }]);
     // Cash: subscribed MW x $60 x hours.
     st.subscriptions = { 0: { power: 100 } }; st.items[0] = 100 * 6000 * 10 - 1;
@@ -418,6 +442,129 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
     assert.ok(!d.waits.includes('endgame: off'));
     assert.ok(d.waits.some((w) => /^endgame: end conditions/.test(w)), d.waits.join(' | '));
     cpS.importCfg({ dir_endgame: false });
+  });
+
+  // ---- shelf hours, free modules (plan A1, A4) -----------------------------------------------------------------------------
+  const { cp: cpR, core: coreR } = F.load(['cp-lab', 'cp-retail', 'cp-cadence']);
+  const XR = cpR._cadence, R = cpR._retail;
+  const chair = (stock, outTick = 0) => ({ id: I('Chair'), appetite: 2400, stock, outTick });   // demand 72,000 per hour at share 1
+  await t('shelf hours: stock over (demand - output), Infinity when output keeps up; the board\'s held is not read', () => {
+    assert.strictEqual(R.shelfHours(chair(144000), 1), 2);
+    assert.strictEqual(R.shelfHours(chair(36000), 1), 0.5);
+    assert.strictEqual(R.shelfHours(chair(144000, 5), 1), 144000 / 36000, 'output offsets the drain');
+    assert.strictEqual(R.shelfHours(chair(0, 10), 1), Infinity);
+    assert.strictEqual(R.shelfHours(chair(0), 0.5), 0);
+    const stD = plain(); stD.groups[90] = { building: B('Retail Store'), region: 0, count: 1, recipe: null, name: 'Retail', modules: {}, assortment: [I('Chair')] };
+    const board = { shelves: { 0: { [I('Chair')]: { appetite: 2400, held: 0, price: 10000 } } } };   // held 0: the old check failed on it
+    const hc = (g) => XR.hourlyChecks(view(cpR, stD, []), F.ctxOf({ retailBoard: board, retail: g ? { goods: [g], share: 1 } : undefined }), { stage: 'D' }).find((x) => x.id === 'shelves');
+    assert.strictEqual(hc(chair(144000)).ok, true, '2 h of stock passes');
+    const low = hc(chair(36000));
+    assert.strictEqual(low.ok, false, '0.5 h of stock fails'); assert.match(low.why, /Chair/);
+    assert.strictEqual(hc(chair(0, 10)).ok, true, 'output at demand: never runs dry');
+    assert.strictEqual(hc(null).ok, null, 'no retail facts: unknown, not a failure');
+    const off = (g, hours) => XR.offlinePlan(view(cpR, stD, []), hours, { retail: { goods: [g], share: 1 } }).checklist.find((x) => x.id === 'shelves');
+    assert.strictEqual(off(chair(144000), 1).ok, true);
+    assert.strictEqual(off(chair(144000), 10).ok, false);
+    assert.strictEqual(off(chair(0, 10), 10).ok, true);
+    // share unknown (rival ratings shape): never a pass, even with no stock
+    const hcN = XR.hourlyChecks(view(cpR, stD, []), F.ctxOf({ retailBoard: board, retail: { goods: [chair(0)], share: null } }), { stage: 'D' }).find((x) => x.id === 'shelves');
+    assert.strictEqual(hcN.ok, null); assert.match(hcN.why, /retail share unknown/);
+    const offN = XR.offlinePlan(view(cpR, stD, []), 10, { retail: { goods: [chair(0)], share: null } }).checklist.find((x) => x.id === 'shelves');
+    assert.strictEqual(offN.ok, null); assert.match(offN.text, /retail share unknown/);
+    // corePlan.offline() builds the facts from the engine's board.
+    coreR.walk = () => ({ st: stD, catalog: CAT, deals: [], engine: { retailJson: () => JSON.stringify(F.stageB.retail) } });
+    assert.notStrictEqual(cpR.offline(1).checklist.find((x) => x.id === 'shelves').ok, null, 'readable board');
+  });
+  await t('sell: a shelf is saturated when output >= demand and stock >= sellSaturatedHours of demand', () => {
+    const dl = [bid(61, I('Clock'), 400000, 500, 300)], st = plain(); st.stock[0][I('Clock')] = 9e6;
+    const sat = (g) => XR.sellPlan(view(cpR, st, dl), F.ctxOf({ tick: T0, deals: dl, retail: { goods: [g], share: 1 } }), {}).find((p) => p.item === I('Clock'));
+    const clock = (stock, outTick) => ({ id: I('Clock'), appetite: 2400, stock, outTick });
+    assert.strictEqual(sat(clock(2e6, 10)).kind, 'saturated shelf');
+    assert.ok(!sat(clock(1e6, 10)), 'under 24 h of demand in stock');
+    assert.ok(!sat(clock(2e6, 5)), 'output below demand');
+  });
+  await t('free modules: object sockets (modId) count as installed', () => {
+    const st = plain(); st.fleet_modules = [];
+    st.module_defs = { 7: { id: 7, name: 'Overclock A', kind: 1 }, 8: { id: 8, name: 'Refiner B', kind: 2 } };
+    st.groups[3].modules = { '1,-1': { id: 7 } };
+    const m = XR.sixHourChecks(view(cpR, st, []), F.ctxOf(), { rule: null }).find((x) => x.id === 'modules');
+    assert.strictEqual(m.ok, false); assert.match(m.why, /1 module\(s\) not installed: Refiner B/);
+  });
+
+  // ---- resume (D7) and the Autopilot hand-off (B4) ---------------------------------------------------------------------
+  await t('resume (D7): a group an unpaid bill paused comes back once bills are affordable; yours and a director\'s stay paused', () => {
+    const { cp: c } = F.load(['cp-cadence']);
+    const cat = F.board.catalog, dl = F.cottonBidDeals(), st = F.stageA();
+    const v0 = c._view(st, cat, dl), drawAll = v0.groups.reduce((a, g) => a + (v0.bld(g.building).draws?.power ?? 0) * g.count, 0);
+    assert.ok((v0.bld(F.B('Smelter')).draws?.power ?? 0) > 0 && drawAll > 0, 'Smelters draw power');
+    st.subscriptions = { 0: { power: drawAll } };
+    const mem = F.ctxOf().mem;
+    const dec = (o = {}) => c._decide(c._view(st, cat, dl), F.ctxOf({ mem, ...o }));
+    const res = (d) => d.actions.find((a) => a.director === 'resume');
+    st.groups[7].paused = true;                                  // already paused when first seen: the user's
+    dec();                                                       // the Smelters are seen running
+    st.groups[1].paused = true; st.items[F.MONEY] = 100;         // paused with cash under 2 bills: the bill did it
+    let d = dec();
+    assert.deepStrictEqual(mem('resume').get().bill, [1]);
+    assert.ok(mem('resume').get().user.includes(7));
+    assert.ok(!res(d)); assert.match(d.waits.join(' | '), /resume: "Smelter" is paused \(unpaid bill\?\): waiting for cash/);
+    st.items[F.MONEY] = 5e6;
+    st.groups[6].paused = true;                                  // paused with the bills covered: the user's
+    d = dec();
+    assert.deepStrictEqual(res(d).steps[0].msg, { type: 'SetPaused', group: 1, paused: false });
+    assert.ok(mem('resume').get().user.includes(6) && !mem('resume').get().bill.includes(6));
+    assert.ok(res(dec({ cashDelta10: -50 })), 'no stage (cash falling): it still resumes');
+    assert.match(dec({ mods: { earlyGame: { running: true, cfg: { resumePaused: true } } } }).waits.join(' | '), /resume: Autopilot resumes the 1 bill-paused group/);
+    st.subscriptions[0].power = 0;
+    assert.match(dec().waits.join(' | '), /power subscription 0 MW < \d+ MW with it/);
+    st.subscriptions[0].power = drawAll;
+    mem('buildout').set({ kilnMine: [1] });                      // a director paused it on purpose
+    assert.ok(!res(dec()));
+    mem('buildout').set({ kilnMine: [], ftMine: [1] });
+    assert.ok(!res(dec()));
+    mem('buildout').set({ ftMine: [] });
+    st.groups[1].paused = false; dec();                          // running again: forgotten
+    assert.deepStrictEqual(mem('resume').get().bill, []);
+    assert.ok(c.duties().some((x) => /resume groups paused by an unpaid bill/.test(x.duty) && x.owner === 'Core plan'));
+    assert.ok(!c.duties().some((x) => /floor upgrades/.test(x.duty) || x.owner === 'Autopilot'));
+  });
+
+  await t('hand-off (B4): every engine item to neverSell, then Autopilot stopped once; a restart by the user is left alone with an alert', async () => {
+    const { cp: c } = F.load(['cp-cadence']);
+    const cat = F.board.catalog, v = c._view(F.stageA(), cat, F.cottonBidDeals()), mem = F.ctxOf().mem;
+    let stops = 0;
+    const eg = { running: true, stop() { stops++; this.running = false; } };
+    globalThis.earlyGame = eg;
+    const ap = (o) => ({ neverSell: [], cdBooster: true, running: eg.running, ...o });
+    const ho = (o, cx = c) => cx._decide(v, F.ctxOf({ mem, ap: ap(o) })).actions.find((a) => a.id.startsWith('handoff'));
+    const a1 = ho();
+    assert.strictEqual(a1.id, 'handoff');
+    for (const n of ['Wood', 'Planks', 'Iron Sheet', 'Concrete', 'Glass', 'Bookshelf', 'Table', 'Chair', 'Bench', 'Wooden Frame', 'Iron Frame',
+      'Iron Ore', 'Coal', 'Limestone', 'Sand', 'Copper Ore', 'Copper Wire', 'Wired Frame']) assert.ok(a1.patch.neverSell.includes(F.I(n)), n);
+    for (const n of X.NEVER) assert.ok(a1.patch.neverSell.includes(F.I(n)), 'cadence NEVER: ' + n);
+    const patched = { neverSell: a1.patch.neverSell, cdBooster: false };
+    c.cfg.handoffStopAutopilot = false; assert.ok(!ho(patched), 'cfg.handoffStopAutopilot false: Autopilot keeps running'); c.cfg.handoffStopAutopilot = true;
+    c.cfg.dir_resume = false; assert.ok(!ho(patched), 'D7 off: Autopilot keeps the resume duty'); c.cfg.dir_resume = true;
+    const a2 = ho(patched);
+    assert.strictEqual(a2.id, 'handoff:stop');
+    assert.strictEqual(await a2.run(), true);
+    assert.strictEqual(stops, 1); assert.ok(mem('handoff').get().stopped);
+    assert.ok(!ho(patched), 'stopped: nothing more to do');
+    eg.running = true;                                           // the user starts Autopilot again
+    const d = c._decide(v, F.ctxOf({ mem, ap: ap(patched) }));
+    assert.ok(!d.actions.some((a) => a.id.startsWith('handoff')));
+    assert.match(d.readouts.handoff.alert, /started again after the hand-off: left running/);
+    assert.strictEqual(stops, 1);
+    // Autopilot not running at the hand-off: recorded without a stop, so a later start is left alone
+    const mem2 = F.ctxOf().mem, a3 = c._decide(v, F.ctxOf({ mem: mem2, ap: ap({ ...patched, running: false }) })).actions.find((a) => a.id === 'handoff:stop');
+    assert.match(a3.text, /Autopilot is not running; recorded/);
+    assert.strictEqual(await a3.run(), true); assert.strictEqual(stops, 1); assert.ok(mem2('handoff').get().stopped);
+    assert.ok(!c._decide(v, F.ctxOf({ mem: mem2, ap: ap(patched) })).actions.some((a) => a.id.startsWith('handoff')), 'started later: not stopped');
+    // no resume director loaded (D7): Autopilot is never stopped
+    const { cp: c2 } = F.load([]);
+    globalThis.earlyGame = { running: true, stop() { stops++; } };
+    assert.ok(!c2._decide(v, F.ctxOf({ ap: ap(patched) })).actions.some((a) => a.id === 'handoff:stop'));
+    globalThis.earlyGame = undefined;
   });
 
   F.unload();

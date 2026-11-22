@@ -1,7 +1,7 @@
 // ============================================================================
 // CORE PLAN DIRECTOR: 8. Stage D ladder (window.corePlan director "ladder")
 // ============================================================================
-// Feeds and tunes CD Farm's Auto mode per stage (wiki/core-game-plan.md section 11); it never cycles buildings itself.
+// Feeds and tunes CD Farm's Auto mode per stage (wiki/guides/core-game-plan.md section 11); it never cycles buildings itself.
 //   CD need (out.cdNeed): A = next unlock (Assembly Plant 20,000), B = Retail Store 5,000 banked, C = none (pause Auto once),
 //   D = none until the retail checkpoint passes, then Oil Rig 5,000, then Refinery 750,000 (11.4: 755,000 farmed in Stage D).
 //   Auto tuning through cdFarm.importCfg, only between runs and only for keys that differ, read back after:
@@ -9,7 +9,8 @@
 //   autoStart: armed when Auto is off and nothing says the user wants it off. The user's Stop (or unticking it) is sticky until
 //   they switch it on again; Alt+Shift+X, CD Farm's own error / dry-run switch-off wait for Core plan's next Live session
 //   (the live-resume countdown after a reload); the ladder's own Stage C pause ends with the stage.
-//   Stage D gates (11.4): checkpoint passed, 0 Farms owned, free acres >= batch + spare; alert when Auto's plan is not Farm-only.
+//   Stage D gates (11.4): checkpoint passed (a pass of either run, plan D-2), 0 Farms owned (waived on the retail fail path, where Wooden
+//   Frames are the CD source), free acres >= batch + spare; alert when Auto's plan is not Farm-only.
 // @@MODULE cp-ladder
 try {
 (() => {
@@ -66,7 +67,7 @@ try {
       return { key: 'C', need: false, pause: true, why: 'stage C: Retail Store CD is in hand, no CD cycling (11.3)' };
     }
     if (stage === 'D' || stage === 'END') {
-      if (ctx.retailOk !== true && ctx.retailDecided !== true) return { key: 'D-wait', need: false, pause: true, why: 'stage D: the store has not passed the retail checkpoint' + (ctx.retailOk === false ? ' (it failed)' : ' yet') };
+      if (ctx.retailOk !== true) return { key: 'D-wait', need: false, pause: true, why: 'stage D: the store has not passed the retail checkpoint' + (ctx.retailOk === false ? ' (it failed: a new run measures the capped output)' : ' yet') };
       if (!gone(v, 'Oil Rig')) return { key: 'D', need: needOf(v, 'Oil Rig'), arm: true, ladder: true };
       if (!gone(v, 'Refinery')) return { key: 'D', need: needOf(v, 'Refinery', v.unlocked('Oil Rig') ? '' : 'Oil Rig research running'), arm: true, ladder: true };
       return { key: 'D-done', need: false, why: 'Refinery research started: no CD need left' };
@@ -75,7 +76,10 @@ try {
   }
 
   // CD Farm reads are not pure (rates() reads the page, evaluate() samples its history), so they happen here, before decide.
-  function context(v, ctx) {
+  function context(v, ctx, stage) {
+    // The phase's CD need, published before any decide: buildout (order 40) reads it for the Wooden Frame gate.
+    const ph = phaseOf(v, stage, ctx);
+    ctx.ladderNeed = ph?.need && !ph.need.missing ? ph.need : false;
     const gap = 3 * (cfgOf().intervalMs ?? 5000);
     if (ctx.live) { if (!liveAt || ctx.now - liveAt > gap) session++; liveAt = ctx.now; }
     else liveAt = 0;   // dry run: going Live again is a new session
@@ -116,13 +120,15 @@ try {
       const held = lad.held, farmId0 = v.idB('Farm');
       const heldAll = held ? Object.values(held).reduce((a, n) => a + (n > 0 ? n : 0), 0) : 0;
       const farms = inRun && !held ? 0 : v.owned('Farm') - (held?.[farmId0] ?? 0);
-      if (farms > 0) waits.push(farms + ' Farms owned: the ladder needs 0 (each one raises the next Farm price by $2.05)');
+      // Fail path (plan A2): the remaining Farms stay on Cotton and CD Farm burns Wooden Frames above the keep line instead
+      if (ctx.retailFailPath) alerts.push('fail path: CD from Wooden Frames');
+      else if (farms > 0) waits.push(farms + ' Farms owned: the ladder needs 0 (each one raises the next Farm price by $2.05)');
       const want = (batch ?? 1) + spare;
       if (!inRun && v.freeAcres + heldAll < want) waits.push('free acres ' + (v.freeAcres + heldAll) + ' < batch ' + (batch ?? '?') + ' + spare ' + spare);
       if (waits.length) { ph.need = false; ph.arm = false; }
       const units = lad.plan?.units ?? [];
       const farmId = v.idB('Farm');
-      if (units.length && (!units.some((u) => u.b === farmId) || units.length > 2)) alerts.push('CD Farm plan is ' + units.map((u) => u.n + ' ' + u.name).join(' + ') + ', not Farm-only (or Farm + 1 type): check Farms owned and the Wooden Frame reserve');
+      if (!ctx.retailFailPath && units.length && (!units.some((u) => u.b === farmId) || units.length > 2)) alerts.push('CD Farm plan is ' + units.map((u) => u.n + ' ' + u.name).join(' + ') + ', not Farm-only (or Farm + 1 type): check Farms owned and the Wooden Frame reserve');
     }
     if (ph.need !== undefined) out.cdNeed = ph.need;
     const need = ph.need || (ph.need === undefined ? out.nextUnlock : null);
@@ -158,7 +164,8 @@ try {
     const want = { land: 'off', pace: ph.ladder ? c.ladderPaceD : c.ladderPace, reserveAcres: spare };
     // batch follows a noisy income slope: only move it by 2 or more, so tune actions do not flip back and forth.
     if (batch && !(typeof fc.batch === 'number' && Math.abs(batch - fc.batch) < 2)) want.batch = batch;
-    if (stage === 'D' || stage === 'END') want.maxTypes = 1;   // Farm-only: each extra type adds a Buy and a Demolish round trip
+    // Farm-only: each extra type adds a Buy and a Demolish round trip. Not on the fail path: Farms stay on Cotton, CD comes from frames.
+    if ((stage === 'D' || stage === 'END') && !ctx.retailFailPath) want.maxTypes = 1;
     const sid = lad.session, off = m.off;
     if (ph.arm && !fc.autoStart) {
       if (!off || (off.why === 'ladder' && m.paused !== ph.key)) want.autoStart = true;

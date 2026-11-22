@@ -759,16 +759,54 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     } finally { as._unload(); globalThis.autoSell = undefined; globalThis.idleCore._unload(); globalThis.idleCore = undefined; }
   });
 
-  await t('Auto ship: a job ends when the bid is gone or the target is reached, but never because the board is not loaded', () => {
+  await t('Auto ship: a job ends when the target is reached (or after 24 h with no bid), moves to the best open bid when its own is gone, and never ends because the board is not loaded', () => {
     fresh(); (0, eval)(coreSrc + '\n' + asSrc);
     const as = globalThis.autoSell, d = as._decide;
     try {
-      assert.strictEqual(d(asJob(), asBase({ deals: [] })).kind, 'end', 'bid gone');
-      assert.strictEqual(d(asJob(), asBase({ deals: [{ ...bid(1, COTTON, 10, 150), side: 'Buy' }] })).kind, 'end', 'an ask is never sold into');
+      const IRON = itemId('Iron Sheet');
+      const NOW = 200000000, DAY = 86400000;
       assert.strictEqual(d(asJob({ left: 0 }), asBase()).kind, 'end', 'target reached');
+      assert.strictEqual(d(asJob({ left: 0 }), asBase({ deals: [] })).kind, 'end', 'target first, even when the bid is gone');
+      assert.strictEqual(d(asJob({ left: 0 }), asBase({ deals: null })).kind, 'end', 'target first, even when the board is not loaded');
       assert.strictEqual(d(asJob(), asBase({ deals: null })).kind, 'wait', 'board not loaded: keep waiting');
       assert.match(d(asJob(), asBase({ deals: null })).why, /Market board not loaded/);
-      assert.strictEqual(d(asJob({ expiresAt: 50 }), asBase({ deals: null })).kind, 'end', 'known to be expired');
+      // The bid is gone: wait for another one (it used to end the job).
+      let v = d(asJob(), asBase({ deals: [] }));
+      assert.deepStrictEqual([v.kind, v.noBid], ['wait', true], 'bid gone, no other bid');
+      assert.match(v.why, /waiting for a Cotton bid/);
+      assert.strictEqual(d(asJob(), asBase({ deals: [{ ...bid(1, COTTON, 10, 150), side: 'Buy' }] })).kind, 'wait', 'an ask is never sold into');
+      v = d(asJob({ expiresAt: 50 }), asBase({ deals: null }));
+      assert.deepStrictEqual([v.kind, v.noBid], ['wait', true], 'known to be expired, board not loaded');
+      assert.match(v.why, /bid expired/);
+      // Rollover: bid 1 is gone; the highest unit price wins, in the job's own region only.
+      const two = [bid(2, COTTON, 100000, 140), bid(3, COTTON, 100000, 160)];
+      v = d(asJob(), asBase({ deals: two }));
+      assert.deepStrictEqual([v.kind, v.deal.id], ['switch', 3], 'highest unit price');
+      assert.strictEqual(d(asJob(), asBase({ deals: [two[0], bid(3, COTTON, 100000, 160, { region: 3 })] })).deal.id, 2, 'own region only');
+      assert.strictEqual(d(asJob(), asBase({ deals: two, taken: new Set([3]) })).deal.id, 2, 'a bid another job holds');
+      assert.strictEqual(d(asJob(), asBase({ deals: two, st: { ...asBase().st, standing_fills: { 3: {} } } })).deal.id, 2, 'a bid the game\'s own auto-ship runs on');
+      assert.strictEqual(d(asJob(), asBase({ deals: [...two, bid(4, WOOD, 100000, 900)] })).deal.id, 3, 'another item is ignored');
+      assert.strictEqual(d(asJob(), asBase({ deals: [two[0], bid(3, COTTON, 100000, 160, { expires_at: 100 })] })).deal.id, 2, 'expired bid skipped');
+      assert.strictEqual(d(asJob(), asBase({ deals: [bid(2, COTTON, 100000, 140), bid(3, COTTON, 100000, 140)] })).deal.id, 2, 'a tie: the first on the board');
+      assert.strictEqual(d(asJob(), asBase({ deals: [{ ...bid(4, COTTON, 1, 999), amount: 0 }, bid(2, COTTON, 100000, 140)] })).deal.id, 2, 'an empty lot (amount 0) is never picked');
+      // Price floor: never below what a unit costs to make.
+      const floor = as._unitCost(board.catalog, IRON);
+      assert.ok(floor > 0);
+      const ironJob = asJob({ item: IRON });
+      v = d(ironJob, asBase({ deals: [bid(4, IRON, 1, floor - 1)] }));
+      assert.deepStrictEqual([v.kind, v.noBid], ['wait', true], 'below the floor');
+      assert.match(v.why, /≥ \$/);
+      assert.strictEqual(d(ironJob, asBase({ deals: [bid(4, IRON, 1, floor)] })).deal.id, 4, 'exactly at the floor');
+      // Give up after 24 h with no qualifying bid; a job that is not waiting for a bid has no clock.
+      v = d(asJob({ waitSince: NOW - DAY }), asBase({ deals: [], now: NOW }));
+      assert.strictEqual(v.kind, 'end');
+      assert.match(v.why, /no Cotton bid at ≥ \$0\.00 for 24 h/);
+      v = d(asJob({ waitSince: NOW - DAY + 1 }), asBase({ deals: [], now: NOW }));
+      assert.deepStrictEqual([v.kind, v.noBid], ['wait', true]);
+      assert.strictEqual(d(asJob({ waitSince: 0 }), asBase({ deals: [], now: NOW })).kind, 'wait');
+      assert.strictEqual(d(asJob({ waitSince: NOW - DAY }), asBase({ deals: null, now: NOW, tick: 1e9 })).kind, 'end', 'expired bid on an unloaded board: same clock');
+      v = d(asJob({ waitSince: NOW - 2 * DAY }), asBase({ now: NOW, st: { ...asBase().st, stock: {} } }));
+      assert.deepStrictEqual([v.kind, v.noBid], ['wait', undefined], 'a live bid waiting for stock is not waiting for a bid');
     } finally { as._unload(); globalThis.autoSell = undefined; globalThis.idleCore._unload(); globalThis.idleCore = undefined; }
   });
 
@@ -835,6 +873,90 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       assert.deepStrictEqual(core.stopAll('test'), ['Auto ship']);
       assert.strictEqual(globalThis.autoSell.jobs().length, 0);
       assert.deepStrictEqual(JSON.parse(disk['autoSell.v1']).jobs, []);
+    } finally {
+      globalThis.autoSell?._unload(); core._unload(); globalThis.idleCore = undefined; globalThis.autoSell = undefined;
+      delete globalThis.document; delete globalThis.WebSocket; delete globalThis.localStorage;
+    }
+  });
+
+  await t('Auto ship loop: a job whose bid is gone moves to the best open bid and keeps its totals, survives a reload, two jobs never take the same bid, and it gives up after cfg.bidWaitMs', async () => {
+    fresh();
+    const disk = {};
+    globalThis.localStorage = { getItem: (k) => disk[k] ?? null, setItem: (k, v) => { disk[k] = v; } };
+    const st = baseState();
+    st.stock = { 0: { [COTTON]: 1200 } };
+    st.courier_ready_at = 0; st.next_shipment_id = 10; st.standing_fills = {};
+    const deals = [bid(7, COTTON, 100000, 150)];
+    const sent = [];
+    class FakeWS {
+      constructor() { this.readyState = 1; this.ls = []; }
+      addEventListener(_t, f) { this.ls.push(f); } removeEventListener() {}
+      send(m) {
+        const msg = JSON.parse(m); sent.push(msg);
+        const tick = (st.ssi.last_user_mutation_tick += 4);
+        st.stock[msg.region][deals.find((x) => x.id === msg.deal).item] -= msg.amount;
+        st.next_shipment_id++;
+        st.courier_ready_at = tick + 100000;
+        setTimeout(() => { for (const f of this.ls) f({ data: JSON.stringify({ kind: 'Diff', tick: tick + 1, diff: { tick: tick + 1, ssi: { last_user_mutation_tick: tick } } }) }); }, 20);
+      }
+    }
+    labPage(st, FakeWS);
+    globalThis.document.getElementById('root').__reactContainer$x.memoizedState.next.next = { memoizedState: deals, next: null };
+    (0, eval)(coreSrc + '\n' + asSrc);
+    let as = globalThis.autoSell;
+    const core = globalThis.idleCore;
+    const timing = { cycleMs: 40, confirmMs: 3000, jitterMs: 0 };
+    Object.assign(as.cfg, timing);
+    core.ledger.clear();
+    const saved = () => JSON.parse(disk['autoSell.v1']).jobs;
+    try {
+      as.start({ deal: 7, total: 700 });
+      await until(() => sent.length >= 1);
+      assert.strictEqual(sent[0].deal, 7);
+      // Bid 7 is filled; two new bids open. The same job moves to the better one (the same object: sold, left, revenue carry over).
+      deals.splice(deals.findIndex((x) => x.id === 7), 1, bid(11, COTTON, 100000, 130), bid(12, COTTON, 100000, 170));
+      await until(() => as.jobs().some((x) => x.deal === 12));
+      let j = as.jobs()[0];
+      assert.deepStrictEqual([as.jobs().length, j.from, j.unit, j.sold, j.left, j.revenue], [1, 7, 170, cottonLoad, 700 - cottonLoad, cottonLoad * 150]);
+      assert.ok(core.ledger.list().some((e) => e.mod === 'AS' && /moved: bid #7 @ \$1\.50 → #12 @ \$1\.70/.test(e.text)));
+      assert.deepStrictEqual([saved().length, saved()[0].deal, saved()[0].from, saved()[0].waitSince], [1, 12, 7, 0]);
+      // A reload resumes the job on the new bid.
+      as._unload(); globalThis.autoSell = undefined;
+      (0, eval)(asSrc);
+      as = globalThis.autoSell;
+      Object.assign(as.cfg, timing);
+      assert.deepStrictEqual(as.jobs().map((x) => [x.deal, x.sold]), [[12, cottonLoad]], 'resumed on the new bid');
+      // The courier is free again: the next FillDeal goes to bid 12, and the job ends at its target.
+      // (The test page has no navigation, so the resume loop never starts by itself: start() on the restored job does it.)
+      as.start({ deal: 12, total: 700 - cottonLoad });
+      st.courier_ready_at = 0;
+      await until(() => !as.jobs().length, 8000);
+      assert.deepStrictEqual(sent.map((m) => m.deal), [7, 12]);
+      assert.strictEqual(sent[1].amount, 700 - cottonLoad);
+      assert.ok(core.ledger.list().some((e) => e.mod === 'AS' && /ended: target reached \(700 sold\)/.test(e.text)));
+      assert.deepStrictEqual(saved(), []);
+
+      // Two jobs whose bids both vanish, one replacement: one moves, the other waits (the replacement is taken).
+      st.courier_ready_at = 1e9;
+      deals.splice(0, deals.length, bid(21, COTTON, 100000, 150), bid(22, COTTON, 100000, 140));
+      as.start({ deal: 21 }); as.start({ deal: 22 });
+      deals.splice(0, deals.length, bid(23, COTTON, 100000, 160));
+      await until(() => as.jobs().some((x) => x.deal === 23));
+      await sleep(200);
+      assert.deepStrictEqual(as.jobs().map((x) => x.deal).sort(), [22, 23], 'the other job did not take bid 23');
+      assert.match(as.jobs().find((x) => x.deal === 22).status, /waiting for a Cotton bid/i);
+      await until(() => saved().some((x) => x.deal === 22 && x.waitSince > 0));
+      // A bid that comes back ends the wait: the clock is reset.
+      deals.push(bid(24, COTTON, 100000, 120));
+      await until(() => as.jobs().some((x) => x.deal === 24));
+      assert.deepStrictEqual(saved().map((x) => x.waitSince), [0, 0]);
+
+      // Give up: no bid for cfg.bidWaitMs ends both jobs.
+      as.cfg.bidWaitMs = 200;
+      deals.splice(0, deals.length, bid(99, WOOD, 100000, 90));   // an empty array would read as "board not loaded"
+      await until(() => !as.jobs().length, 8000);
+      assert.ok(core.ledger.list().some((e) => e.mod === 'AS' && /ended: no Cotton bid .* for 24 h/.test(e.text)));
+      assert.deepStrictEqual(saved(), []);
     } finally {
       globalThis.autoSell?._unload(); core._unload(); globalThis.idleCore = undefined; globalThis.autoSell = undefined;
       delete globalThis.document; delete globalThis.WebSocket; delete globalThis.localStorage;

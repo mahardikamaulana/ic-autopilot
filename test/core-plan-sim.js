@@ -30,7 +30,7 @@ function stageA(over = {}) {
   const st = {
     ssi: { corp_id: 1, last_user_mutation_tick: 0 },
     items: { [MONEY]: 5000000, [CD]: 100 },
-    stock: { 0: { [I('Iron Frame')]: 30, [I('Concrete')]: 100 } },
+    stock: { 0: { [I('Iron Frame')]: 30, [I('Concrete')]: 0 } },   // no Concrete: the Assembly Plant prototype is short, so CD alone is not the bottleneck (B2)
     groups: {
       1: { building: B('Smelter'), region: 0, count: 3, recipe: Rc('Roll Iron Sheet') },
       2: { building: B('Workshop'), region: 0, count: 2, recipe: Rc('Rivet Iron Frame') },
@@ -244,6 +244,22 @@ const fastPacer = () => ({ beforeCommand: async () => {}, noteConfirm() {}, note
     unload();
   });
 
+  await t('B2 (wiki 11.1): Stage A, the next unlock waits on CD alone: no land; prototype short or slot busy: land runs', () => {
+    const { cp } = load();
+    const st = stageA(); st.items[CD] = 15000; st.stock[0][I('Concrete')] = 40;   // Assembly Plant: 15,000 / 20,000 CD, 10 IF + 40 Concrete in stock
+    const land = (s) => cp._decide(view(cp, s), ctxOf());
+    const d = land(st);
+    assert.strictEqual(d.stage, 'A');
+    assert.ok(!d.actions.some((x) => x.id.startsWith('land:')), JSON.stringify(d.actions.map((x) => x.id)));
+    assert.ok(d.waits.includes('land: CD is the bottleneck: cash goes to the CD farm'), d.waits.join(' | '));
+    assert.ok(d.waits.some((w) => /unlock Assembly Plant: 15000 \/ 20000 CD/.test(w)));
+    st.stock[0][I('Concrete')] = 0;                                              // prototype missing: CD is not the only gap
+    assert.ok(land(st).actions.some((x) => x.id.startsWith('land:')), land(st).waits.join(' | '));
+    st.stock[0][I('Concrete')] = 40; st.research = { building: B('Mine') };      // research slot busy
+    assert.ok(land(st).actions.some((x) => x.id.startsWith('land:')), land(st).waits.join(' | '));
+    unload();
+  });
+
   await t('hand-off at Plan done: engine items to neverSell and CD booster off, once', () => {
     const { cp } = load();
     const v = view(cp, stageA());
@@ -251,7 +267,8 @@ const fastPacer = () => ({ beforeCommand: async () => {}, noteConfirm() {}, note
     const d = cp._decide(v, ctxOf({ ap }));
     const ho = d.actions.find((x) => x.id === 'handoff');
     assert.ok(ho);
-    for (const n of ['Wood', 'Planks', 'Iron Sheet', 'Concrete', 'Glass', 'Bookshelf', 'Table', 'Chair', 'Bench', 'Wooden Frame', 'Iron Frame']) assert.ok(ho.patch.neverSell.includes(I(n)), n);
+    for (const n of ['Wood', 'Planks', 'Iron Sheet', 'Concrete', 'Glass', 'Bookshelf', 'Table', 'Chair', 'Bench', 'Wooden Frame', 'Iron Frame',
+      'Iron Ore', 'Coal', 'Limestone', 'Sand', 'Copper Ore', 'Copper Wire', 'Wired Frame']) assert.ok(ho.patch.neverSell.includes(I(n)), n);
     assert.strictEqual(ho.patch.cdBooster, false);
     const done = cp._decide(v, ctxOf({ ap: { neverSell: ho.patch.neverSell, cdBooster: false } }));
     assert.ok(!done.actions.some((x) => x.id === 'handoff'));
@@ -318,7 +335,7 @@ const fastPacer = () => ({ beforeCommand: async () => {}, noteConfirm() {}, note
     assert.strictEqual(tuned.length, 1);
     assert.strictEqual(tuned[0].cdBooster, false);
     assert.strictEqual(w.ws.sent.length, 0);
-    assert.match(core.ledger.text(), /hand-off: 11 engine items to Autopilot neverSell, CD booster off/);
+    assert.match(core.ledger.text(), /hand-off: 18 engine items to Autopilot neverSell, CD booster off/);
     cp.stop(); unload();
   });
 

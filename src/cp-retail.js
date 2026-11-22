@@ -13,7 +13,10 @@
 //     measured sales can carry, on a fail), ctx.retailE1 (cfg.retailE1Hours in a row against the streak's first appetite).
 //     Samples live in localStorage "corePlan.v1.mem.retail"; removing that key starts the checkpoint over.
 //   - Fail path (plan step 6): furniture Workshops above the cap move to Frame Timber (SetRecipe a whole group, or Unassign and put the
-//     pooled Workshops in a Frame Timber group). Farms are left on Cotton.
+//     pooled Workshops in a Frame Timber group). Farms are left on Cotton. Once the cap holds, one new checkpoint run starts at the capped
+//     output (old decision kept as prevDecision, its cap in force); a pass of it sets ctx.retailOk = true (plan B3) and opens only the Oil Rig
+//     gate: that pass proves the capped output sells, so the cap stays. ctx.retailFail / retailFailPath tell the other directors a measured
+//     cap is in force (reserve, waves, land rule, ladder).
 // @@MODULE cp-retail
 try {
 (() => {
@@ -35,6 +38,7 @@ try {
 
   // ---- the board ------------------------------------------------------------------------------------------------------------------
   // Asserts the shape seen on 2026-11-22 (shelves[region][itemId] = { appetite, held, standard, price }); never guesses past it.
+  // Only appetite and price are required: held is just a note on the appetite row.
   function checkBoard(board, ids) {
     if (!board || typeof board !== 'object') return 'no board from engine.retailJson()';
     const rows = board.shelves?.[REGION] ?? board.shelves?.[String(REGION)];
@@ -43,7 +47,7 @@ try {
     for (const [n, id] of Object.entries(ids)) {
       const r = rows[id];
       if (!r) return 'no shelf row for ' + n + ' (item ' + id + ')';
-      const miss = ['appetite', 'held', 'price'].filter((k) => !num(r[k]));
+      const miss = ['appetite', 'price'].filter((k) => !num(r[k]));
       if (miss.length) return n + ' row lacks ' + miss.join(', ');
     }
     return null;
@@ -108,13 +112,20 @@ try {
         assigned: v.groups.some((g) => g.recipe === rid && g.count > 0) };
     });
     f.eligible = (g) => g.made || g.assigned || g.stock > 0;
-    f.demandH = (g) => g.appetite / 240 * (f.share ?? 0) * TICKS_H;
+    f.demandH = (g) => demandH(g, f.share);
     // Before the store: the shelf is what is eligible now (shelfPick() adds the keep-on-shelf rule once the store exists).
     f.chosen = pickOrder(f.goods.filter(f.eligible));
     needOf(f, c);
     return f;
   }
 
+  // Units per hour the shelf sells: appetite per 240 ticks x this store's share.
+  const demandH = (g, share) => g.appetite / 240 * (share ?? 0) * TICKS_H;
+  // Hours the stock lasts: it drains by demand minus what the groups make (Infinity when output keeps up). The board's `held` is not used.
+  function shelfHours(g, share) {
+    const drain = demandH(g, share) - g.outTick * TICKS_H;
+    return drain > 0 ? g.stock / drain : Infinity;
+  }
   const pickOrder = (gs) => [...gs].sort((a, b) => b.appetite * b.unit - a.appetite * a.unit).slice(0, 4);
   // 1 h of what will sell: sales stop at output once output is below demand, so stock past an hour of output adds nothing.
   // Only made goods: a held-only good cannot grow, it just sells out.
@@ -173,11 +184,15 @@ try {
       const a0 = base?.[id] ?? s0.g[id].a;
       for (const s of samples) { const d = a0 && s.g[id] ? Math.abs(s.g[id].a / a0 - 1) : 0; if (d > worst) { worst = d; worstName = s0.g[id].n; } }
     }
-    const held0 = ids.reduce((a, id) => a + s0.g[id].h, 0), heldN = ids.reduce((a, id) => a + (sN.g[id]?.h ?? 0), 0);
+    const held0 = ids.reduce((a, id) => a + (s0.g[id].h ?? 0), 0), heldN = ids.reduce((a, id) => a + (sN.g[id]?.h ?? 0), 0);
     out.push({ id: 'appetite', ok: samples.length < 2 ? null : worst <= c.retailAppetiteTol / 100, why: 'max drift ' + pct(worst) + (worstName ? ' (' + worstName + ')' : '') + ', limit ' + c.retailAppetiteTol + '%; held ' + held0 + ' -> ' + heldN });
     // 2. sales >= pass% of the model
+    // per good (wiki E1): every shelved good with a model must pass, so one dead good cannot hide behind the others; the worst is named
     const sv = salesOver(samples, ids);
-    out.push({ id: 'sales', ok: sv.model > 0 ? sv.sold >= c.retailSamplePassPct / 100 * sv.model : null, why: 'sold ' + Math.round(sv.sold) + ' of model ' + Math.round(sv.model) + ' (' + (sv.model ? pct(sv.sold / sv.model) : '-') + ', pass ' + c.retailSamplePassPct + '%)' });
+    const per = ids.filter((id) => sv.by[id].model > 0).map((id) => ({ n: s0.g[id].n, ...sv.by[id], x: sv.by[id].sold / sv.by[id].model })).sort((a, b) => a.x - b.x);
+    const w = per[0];
+    out.push({ id: 'sales', ok: per.length ? per.every((p) => p.x >= c.retailSamplePassPct / 100) : null,
+      why: (w ? 'worst ' + w.n + ' sold ' + Math.round(w.sold) + ' of model ' + Math.round(w.model) + ' (' + pct(w.x) + ')' : 'no model yet') + ', all goods ' + Math.round(sv.sold) + ' of ' + Math.round(sv.model) + ', pass ' + c.retailSamplePassPct + '%' });
     // 3. price about 1.52 x base at quality 0
     let pw = 0, pName = '';
     for (const s of samples) for (const id of ids) { const x = s.g[id]; if (!x) continue; const d = Math.abs(x.p / 10000 * Q0 / PRICE_X - 1); if (d > pw) { pw = d; pName = x.n + ' ' + (x.p / 10000 * Q0).toFixed(2) + 'x'; } }
@@ -187,8 +202,8 @@ try {
     const dl = mem.shelvedAt + c.retailRatingMin * 60000;
     const hit = rated.find((s) => s.r >= c.retailRating && s.t <= dl + c.retailSampleMin * 60000);
     const rate = rated.length >= 2 ? (rated[rated.length - 1].r - rated[0].r) / ((rated[rated.length - 1].t - rated[0].t) / 1000 * TPS) : null;
-    // E1 run (after the checkpoint): the rating just has to stay at the target
-    const okR = !rated.length ? null : e1 ? rated[rated.length - 1].r >= c.retailRating : hit ? true : now > dl + c.retailSampleMin * 60000 ? false : null;
+    // E1 run (after the checkpoint): the rating stays at the target at every sample of the run, not only the last one
+    const okR = !rated.length ? null : e1 ? rated.every((s) => s.r >= c.retailRating) : hit ? true : now > dl + c.retailSampleMin * 60000 ? false : null;
     out.push({ id: 'rating', ok: okR,
       why: !rated.length ? 'no rating in st.retail_ratings' : 'rating ' + rated[rated.length - 1].r + (rate != null ? ', ' + rate.toFixed(2) + ' per tick' : '') + ', needs ' + c.retailRating + ' within ' + c.retailRatingMin + ' min' + (hit ? ' (reached at ' + Math.round((hit.t - mem.shelvedAt) / 60000) + ' min)' : '') });
     return { rows: out, sales: sv };
@@ -229,11 +244,17 @@ try {
       else if (v.groups.length && mem.shelvedAt) {
         if (mem.goneSince == null) mem = m.set({ goneSince: ctx.now });
         else if (ctx.now - mem.goneSince >= c.retailGoneMin * 60000)
-          mem = m.set({ shelvedAt: null, samples: [], decision: null, streakStart: null, e1Base: null, e1: false, goneSince: null });
+          mem = m.set({ shelvedAt: null, samples: [], decision: null, prevDecision: null, streakStart: null, e1Base: null, e1: false, goneSince: null });
       }
       return { mem, n: 0 };
     }
     if (mem.goneSince != null) mem = m.set({ goneSince: null });
+    // Re-checkpoint after a fail (plan B3, D-2): once the fail path has applied the cap (nothing left for failAction), or nothing was measured,
+    // a new run starts at the capped output (again after each fail). The old decision stays as prevDecision: its cap holds meanwhile and
+    // the readout shows it.
+    const d0 = mem.decision;
+    if (d0 && !d0.ok && !f.badBoard && (!d0.measured || !failAction(v, f, d0)))
+      mem = m.set({ prevDecision: d0, decision: null, shelvedAt: ctx.now, samples: [], streakStart: ctx.now, e1Base: null, e1: false });
     const shelf = f.storeGroup.assortment ?? [];
     // The clock starts when the store can sell: the first read with shelves set, not the group's creation.
     if (!mem.shelvedAt) {
@@ -288,23 +309,34 @@ try {
     shelfPick(f, ctx, ctx.mem('retail'));
     const s = sampler(v, ctx, f);
     f.sampler = s;
-    const d = s.mem.decision;
+    // a re-run (B3) keeps the old fail in force until it decides: retailOk false, its cap, its fail path
+    const prev = s.mem.prevDecision ?? null, d = s.mem.decision ?? prev;
+    f.decision = d;
+    // The measured fail whose cap is in force: the decision itself, or the fail before a re-run's pass. That pass proves only that the
+    // capped output sells, so it opens the Oil Rig gate (retailOk) and nothing else: cap, land rule, Farms on Cotton and the ladder waiver stay.
+    const capD = d && !d.ok && d.measured ? d : d?.ok && prev && !prev.ok && prev.measured ? prev : null;   // an undecided fail has no sales figure to cap at
+    f.capDecision = capD;
     ctx.retailOk = f.storeGroup ? (d ? d.ok : null) : null;
-    ctx.retailCap = d && !d.ok ? d.cap : null;
+    ctx.retailCap = capD ? capD.cap : null;
     ctx.retailE1 = !!(f.storeGroup && s.mem.e1);
     ctx.retailDecided = !!d;
+    // fail path (plan A2): a measured cap in force (Farms stay, engine capped, CD from Wooden Frames)
+    ctx.retailFail = !!(f.storeGroup && capD);
+    ctx.retailFailPath = ctx.retailFail;
   }
 
   // ---- what to send ----------------------------------------------------------------------------------------------------------------
   function readoutOf(f) {
     if (!f || f.err) return { error: f?.err ?? 'no facts' };
-    const s = f.sampler ?? {}, d = s.mem?.decision;
+    const s = f.sampler ?? {}, d = s.mem?.decision, p = s.mem?.prevDecision, capP = d?.ok && f.capDecision === p;
     return {
       board: f.badBoard ? 'BAD: ' + f.badBoard : 'ok', share: f.share, rating: f.rating,
       shelf: (f.chosen ?? []).map((g) => g.name + ' appetite ' + g.appetite + '/2min, ' + usd(g.unit) + ', stock ' + Math.floor(g.stock) + (g.made ? ', ' + (g.outTick * TICKS_H).toFixed(1) + '/h made' : '')),
       samples: s.n ?? 0, shelvedAt: s.mem?.shelvedAt ?? null,
       rows: (s.rows ?? []).map((r) => r.id + ' ' + (r.ok === null ? '?' : r.ok ? 'pass' : 'FAIL') + ': ' + r.why),
-      decision: d ? (d.ok ? 'PASS (scale to the land rule)' : 'FAIL ' + d.kind + ': cap ' + d.cap + ' furniture blocks ' + JSON.stringify(d.capBy) + ', excess Workshops to Frame Timber, Farms stay on Cotton (' + d.why + ')') : f.storeGroup ? 'sampling' : 'store not built',
+      decision: d ? (d.ok ? (capP ? 'PASS at the capped output: Oil Rig opens; the cap of ' + p.cap + ' furniture blocks stays, Farms stay on Cotton' : 'PASS (scale to the land rule)') : 'FAIL ' + d.kind + ': cap ' + d.cap + ' furniture blocks ' + JSON.stringify(d.capBy) + ', excess Workshops to Frame Timber, Farms stay on Cotton (' + d.why + ')')
+        : p ? 're-checkpoint at the capped output: sampling (the earlier FAIL holds meanwhile)' : f.storeGroup ? 'sampling' : 'store not built',
+      prevDecision: p ? 'FAIL ' + p.kind + ': cap ' + p.cap + ' furniture blocks (' + p.why + ')' : null,
       e1: !!s.mem?.e1,
     };
   }
@@ -339,8 +371,13 @@ try {
       if (whole) return { action: { id: 'retail:ft:switch:' + whole.id, text: 'retail fail: ' + g.name + ' group ' + whole.id + ' (' + whole.count + ' Workshops) to Frame Timber, keeping ' + keep + ' on ' + g.name, hold: true,
         steps: [{ msg: { type: 'SetRecipe', group: whole.id, recipe: ftR }, until: (x) => x.groups.find((y) => y.id === whole.id)?.recipe === ftR }] } };
       const big = [...on].sort((a, b) => b.count - a.count)[0], c0 = big.count;
-      return { action: { id: 'retail:ft:cut:' + big.id + ':' + c0, text: 'retail fail: take ' + excess + ' Workshops off ' + g.name + ' (group ' + big.id + '), keeping ' + keep, hold: true,
-        steps: [{ msg: { type: 'UnassignBuildings', group: big.id, amount: excess }, until: (x) => (x.groups.find((y) => y.id === big.id)?.count ?? 0) <= c0 - excess }] } };
+      // The cut goes straight on to Frame Timber, so nothing waits in the pool for buildout's tidy to put back on furniture.
+      // No Frame Timber group: a new one; its recipe comes from the branch above on the next step (its id is not known before).
+      const ft = wg.filter((x) => x.recipe === ftR).sort((a, b) => b.count - a.count)[0], f0 = ft?.count ?? 0;
+      const to = ft ? { msg: { type: 'AssignBuildings', group: ft.id, amount: excess }, until: (x) => (x.groups.find((y) => y.id === ft.id)?.count ?? 0) >= f0 + excess }
+        : { msg: { type: 'CreateGroup', building: wsB, amount: excess, name: FT_GROUP, region: REGION }, until: (x) => x.groups.some((y) => y.building === wsB && y.name === FT_GROUP) };
+      return { action: { id: 'retail:ft:cut:' + big.id + ':' + c0, text: 'retail fail: move ' + excess + ' Workshops off ' + g.name + ' (group ' + big.id + ') to Frame Timber, keeping ' + keep, hold: true,
+        steps: [{ msg: { type: 'UnassignBuildings', group: big.id, amount: excess }, until: (x) => (x.groups.find((y) => y.id === big.id)?.count ?? 0) <= c0 - excess }, to] } };
     }
     return null;
   }
@@ -368,9 +405,9 @@ try {
         const short = f.need.filter((x) => x.g.stock < x.need);
         if (short.length) return { wait: 'pre-store gate: ' + short.map((x) => x.g.name + ' ' + Math.floor(x.g.stock) + ' / ' + x.need).join(', ') + ' (' + cfg().stockHoursPerShelf + ' h of sales at min(demand, output))', readout };
         const cost = P ? P.price(bd.cost, v.owned(STORE), 0) : bd.cost;
-        // Iron Frames: corePlan keeps cfg.ifReserve back for prototypes until Stage D (its reserve provider publishes the same number)
+        // Iron Frames: until Stage D the prototypes and first builds still to pay are kept back (corePlan ifNeed, capped by cfg.ifReserve); this build's own frames are not
         const ifId = v.idI('Iron Frame'), late = out?.stage === 'D' || out?.stage === 'END';
-        const keepOf = (i) => (i === ifId && !late ? cfg().ifReserve ?? 0 : 0);
+        const keepOf = (i) => (i === ifId && !late ? Math.min(cfg().ifReserve ?? 0, W.corePlan._ifNeed(v, STORE)) : 0);
         const lack = (bd.build_items ?? []).filter((i) => (v.st.stock?.[REGION]?.[i.item] ?? 0) - i.amount < keepOf(i.item));
         if (lack.length) return { wait: 'store needs ' + lack.map((i) => i.amount + ' ' + (v.C.items[i.item]?.name ?? i.item) + (keepOf(i.item) ? ' (+' + keepOf(i.item) + ' kept for prototypes)' : '')).join(', '), readout };
         if (v.freeAcres < bd.acres) return { wait: 'store needs ' + bd.acres + ' free acres (' + v.freeAcres + ' free)', readout };
@@ -388,8 +425,8 @@ try {
       return { action: { id: 'retail:shelf:' + want.join(','), text: 'shelves: ' + f.chosen.map((x) => x.name).join(', '),
         steps: [{ msg: { type: 'SetAssortment', group: g.id, items: want }, until: (x) => sameSet(x.groups.find((y) => y.id === g.id)?.assortment ?? [], want) }] }, readout };
     }
-    const d = f.sampler?.mem?.decision;
-    if (d && !d.ok && d.measured) {
+    const d = f.capDecision;   // a re-run, and its pass, keep cutting to the earlier fail's cap
+    if (d) {
       const fa = failAction(v, f, d);
       if (fa) return { ...fa, readout };
     }
@@ -416,7 +453,7 @@ try {
     context, decide,
     duties: () => [{ duty: 'Retail Store, shelves and the retail checkpoint (wiki 4.7)', owner: 'Core plan', done: true }],
   });
-  W.corePlan._retail = { checkBoard, shareOf, salesOver, rowsOf, capOf, shapeOf };
+  W.corePlan._retail = { facts, demandH, shelfHours, checkBoard, shareOf, salesOver, rowsOf, capOf, shapeOf };
 })();
 } catch (e) { console.error('[IdleCorp] cp-retail failed to load:', e); }
 // @@END cp-retail

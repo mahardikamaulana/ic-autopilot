@@ -87,11 +87,11 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
     assert.strictEqual(r[0].steps[0].msg.type, 'BuyBuilding');
   });
 
-  await t('store gate: Iron Frames keep cfg.ifReserve back; bill floor on top of the price', () => {
+  await t('store gate: Iron Frames still needed by the other unlocks are kept back (capped by cfg.ifReserve); bill floor on top of the price', () => {
     const st = liveC(); st.stock[0][I('Iron Frame')] = 6;
     const a = dec(st);
     assert.strictEqual(a.r.length, 0);
-    assert.ok(a.w.some((x) => /store needs 6 Iron Frame \(\+44 kept for prototypes\)/.test(x)), a.w.join(' | '));
+    assert.ok(a.w.some((x) => /store needs 6 Iron Frame \(\+22 kept for prototypes\)/.test(x)), a.w.join(' | '));
     st.stock[0][I('Iron Frame')] = 50;
     assert.strictEqual(dec(st).r.length, 1);
     // price $15,000; bill floor 2 MW x $20 + 12 x (11 MW x $10) = $1,360
@@ -101,6 +101,21 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
     assert.ok(b.w.some((x) => /bill floor \$1,360/.test(x)), b.w.join(' | '));
     st.items[F.MONEY] = 1500000 + 136000;
     assert.strictEqual(dec(st).r.length, 1);
+  });
+
+  await t('store gate: the build counts its own Iron Frames once, plus only what Oil Rig still needs', () => {
+    const acres = (n) => cat.buildings.find((b) => b.id === B(n)).acres;
+    const st = liveC(); st.building_pool[0][B('Assembly Plant')] = 1; st.land_bought[0] += acres('Assembly Plant');   // plant built: its 10 frames are paid
+    const ifs = (n) => { st.stock[0][I('Iron Frame')] = n; return dec(st); };
+    assert.strictEqual(ifs(17).r.length, 0, '6 own + 12 for the Oil Rig prototype and first build = 18, not 6 + 44');
+    assert.ok(ifs(17).w.some((x) => /store needs 6 Iron Frame \(\+12 kept for prototypes\)/.test(x)));
+    assert.strictEqual(ifs(18).r.length, 1);
+    // Oil Rig researched and built: nothing left to keep, the store needs its 6.
+    st.unlocked_buildings.push(B('Oil Rig')); st.building_pool[0][B('Oil Rig')] = 1; st.land_bought[0] += acres('Oil Rig');
+    assert.strictEqual(ifs(5).r.length, 0);
+    assert.strictEqual(ifs(6).r.length, 1);
+    // The reserve other modules see is the same need, capped by cfg.ifReserve.
+    assert.strictEqual(cp._ifNeed(cp._view(liveC(), cat, F.stageB.deals), 'Retail Store'), 22);
   });
 
   await t('empty Retail group: pooled store is assigned to it, no new group, no rebuy', () => {
@@ -210,10 +225,11 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
   // ---- checkpoint over simulated time --------------------------------------------------------------------------------------------
   // Each 10 min: Workshops add their waves, the store sells min(stock, appetite / 240 x ticks), the rating moves +1 per selling tick
   // (-2 when nothing sells), then the board for that minute is read and corePlan decides.
-  // shelfAt: minute the shelves are set (before it the store cannot sell); counts: furniture group sizes.
-  function simulate(appetiteAt, { minutes = 120, stock = 50000, shelfAt = 0, counts = {} } = {}) {
+  // shelfAt: minute the shelves are set (before it the store cannot sell); counts: furniture group sizes; cd: CD in hand (Oil Rig).
+  function simulate(appetiteAt, { minutes = 120, stock = 50000, shelfAt = 0, counts = {}, cd = null } = {}) {
     const { cp: c } = F.load(['cp-retail']);
     const st = liveC({ stock, counts });
+    if (cd != null) st.items[F.CD] = cd;
     st.groups[90] = { building: B('Retail Store'), region: 0, count: 1, recipe: null, name: 'Retail', modules: {}, assortment: shelfAt > 0 ? [] : shelfIds() };
     st.retail_ratings = { 0: 0 };
     const mem = memFn(), t0 = 1.8e12, b0 = board();
@@ -244,15 +260,15 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
     return { log, last: log[log.length - 1], c, mem, st };
   }
 
-  await t('steady board: undecided before 2 h, PASS at 2 h, E1 after 6 h', () => {
-    const { log, last } = simulate((m) => 1 + 0.04 * Math.sin(m / 17), { minutes: 380, stock: 200000 });
+  await t('steady board: undecided before 2 h, PASS at 2 h, E1 after 6 h with the rating at 9,000 at every sample', () => {
+    const { log, last } = simulate((m) => 1 + 0.04 * Math.sin(m / 17), { minutes: 500, stock: 200000 });
     assert.ok(log.filter((x) => x.m < 120).every((x) => x.ok === null), 'undecided early');
     const at2 = log.find((x) => x.m === 120);
     assert.strictEqual(at2.ok, true, JSON.stringify(at2.out.readouts.retail, null, 1));
     assert.strictEqual(at2.cap, null);
-    // E1 needs 6 h of sampling: false at the 2 h checkpoint, true once 6 h have run
+    // E1 needs 6 h with every sample at 9,000 (C2): the rating ramp (9,000 at 75 min) restarts the run at the first look after the pass
     assert.strictEqual(at2.e1, false);
-    assert.ok(log.filter((x) => x.m < 360).every((x) => x.e1 === false), 'no E1 before 6 h');
+    assert.ok(log.filter((x) => x.m < 130 + 360).every((x) => x.e1 === false), 'no E1 before 6 h at 9,000: ' + log.find((x) => x.e1)?.m);
     assert.strictEqual(last.e1, true, JSON.stringify(last.out.readouts.retail, null, 1));
     const ro = at2.out.readouts.retail;
     assert.ok(ro.rows.length === 4 && ro.rows.every((r) => / pass: /.test(r)), ro.rows.join('\n'));
@@ -311,9 +327,7 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
       const out = c._decide(c._view(st, cat, []), ctx);
       const a = out.actions.find((x) => x.director === 'retail');
       if (!a) break;
-      assert.strictEqual(a.steps.length, 1);
-      sent.push(a.steps[0].msg); w.ws.send(JSON.stringify(a.steps[0].msg));
-      assert.ok(a.steps[0].until(c._view(st, cat, [])), 'confirmed: ' + JSON.stringify(a.steps[0].msg));
+      for (const s of a.steps) { sent.push(s.msg); w.ws.send(JSON.stringify(s.msg)); assert.ok(s.until(c._view(st, cat, [])), 'confirmed: ' + JSON.stringify(s.msg)); }
       now += MIN;
     }
     assert.ok(sent.length >= 4 && sent.length < 20, sent.map((m) => m.type).join(','));
@@ -385,6 +399,203 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
     at(st, 51);
     assert.strictEqual(mem('retail').get().samples.length, 0);
     assert.strictEqual(mem('retail').get().shelvedAt, null);
+  });
+
+  // ---- fail path, re-checkpoint, per-good sales, rating at every sample (plan A2, B3, C1, C2) ------------------------------------
+  const FAIL3 = { ok: false, kind: 'saturating', cap: 3, capBy: { Bookshelf: 1, Table: 1, Chair: 1 }, measured: true, at: 1.8e12, why: 'test' };
+  // Stage D store with a Rivet group (liveC puts the live one on Chair) and the given checkpoint decision in mem.
+  function failSt() {
+    const st = liveC();
+    st.groups[90] = { building: B('Retail Store'), region: 0, count: 1, recipe: null, name: 'Retail', modules: {}, assortment: shelfIds() };
+    st.groups[91] = { building: B('Workshop'), region: 0, count: 2, recipe: Rc('Rivet Iron Frame'), modules: {} };
+    st.retail_ratings = { 0: 10000 };
+    return st;
+  }
+  const memWith = (decision, now = 1.8e12) => { const m = memFn(); m('retail').set({ shelvedAt: now - 3 * 3600000, samples: [], decision }); return m; };
+
+  await t('fail path (A2): Farm waves wait, the land rule caps Camps and the last acre, the reserve keeps Wooden Frames to the keep line and frees Planks', async () => {
+    const { cp: c } = F.load(['cp-buildout', 'cp-retail']);
+    const st = failSt(), v = c._view(st, cat, []);
+    const ctxF = F.ctxOf({ retailBoard: board(), mem: memWith(FAIL3) }), dF = c._decide(v, ctxF);
+    const ctxP = F.ctxOf({ retailBoard: board(), mem: memWith({ ok: true, kind: 'pass', at: 1.8e12 }) }), dP = c._decide(v, ctxP);
+    assert.strictEqual(ctxF.retailOk, false); assert.strictEqual(ctxF.retailFail, true); assert.strictEqual(ctxF.retailFailPath, true);
+    assert.strictEqual(ctxP.retailFail, false); assert.strictEqual(ctxP.retailFailPath, false);
+    assert.ok(dF.rule.camps < dP.rule.camps, 'camps ' + dF.rule.camps + ' vs ' + dP.rule.camps);
+    assert.ok(dF.rule.sawmills < dP.rule.sawmills, 'sawmills ' + dF.rule.sawmills + ' vs ' + dP.rule.sawmills);
+    assert.ok(dF.rule.lastAcre < dP.rule.lastAcre, 'last acre ' + dF.rule.lastAcre + ' vs ' + dP.rule.lastAcre);
+    assert.match(c._buildout.waveStep(v, ctxF, dF.rule, 'D').wait, /retail checkpoint failed: remaining Farms stay on Cotton/);
+    assert.ok(!/retail checkpoint failed/.test(c._buildout.waveStep(v, ctxP, dP.rule, 'D').wait ?? ''));
+    // C-fix: a pass of the re-run after the measured fail opens only the Oil Rig gate; the cap, the capped land rule and the Farms stay
+    const memRP = memWith({ ok: true, kind: 'pass', at: 1.8e12 }); memRP('retail').set({ prevDecision: FAIL3 });
+    const ctxRP = F.ctxOf({ retailBoard: board(), mem: memRP }), dRP = c._decide(v, ctxRP);
+    assert.strictEqual(ctxRP.retailOk, true); assert.strictEqual(ctxRP.retailCap, 3);
+    assert.strictEqual(ctxRP.retailFail, true); assert.strictEqual(ctxRP.retailFailPath, true);
+    assert.deepStrictEqual([dRP.rule.camps, dRP.rule.sawmills, dRP.rule.lastAcre], [dF.rule.camps, dF.rule.sawmills, dF.rule.lastAcre]);
+    assert.strictEqual(c._buildout.waveStep(v, ctxRP, dRP.rule, 'D').wait, 'retail fail path: Farms stay on Cotton');
+    assert.match(dRP.readouts.retail.decision, /^PASS at the capped output: Oil Rig opens; the cap of 3 furniture blocks stays/);
+    // the reserve CD Farm reads (runner): fail -> Wooden Frames = keep line (2 Rivet x 24 WF/h x 2 h = 96, capped at cfg.ftKeepMax 19), no Planks; pass -> both held
+    const keep = c._buildout.wfKeep(v, ctxF);
+    assert.strictEqual(keep, 19);
+    for (const [decision, want] of [[FAIL3, { [I('Wooden Frame')]: 19 }], [{ ok: true, kind: 'pass', at: 1 }, { [I('Wooden Frame')]: Infinity, [I('Planks')]: Infinity }]]) {
+      globalThis.localStorage = F.mem({ 'corePlan.v1.mem.retail': JSON.stringify({ shelvedAt: Date.now() - 3 * 3600000, samples: [], decision }) });
+      const { cp: r, core } = F.boot(failSt(), { modules: ['cp-buildout', 'cp-retail'], catalog: cat, deals: [], retail: board() });
+      r.start();
+      await waitFor(() => !r.active); await r._step();
+      assert.strictEqual(r.status().stage, 'D');
+      assert.deepStrictEqual(core.reserves.merged().by.corePlan.items, want, JSON.stringify(decision));
+      r.stop(); F.unload();
+    }
+  });
+
+  await t('fail path vs buildout: the cut goes to Frame Timber, the pool tidy keeps to the per-good keep, it converges and the re-run starts', () => {
+    const { cp: c } = F.load(['cp-buildout', 'cp-retail']);
+    const st = failSt();
+    st.groups[3].count = 3;   // Bookshelf 3 over its keep of 1, Table 1, Chair 1
+    st.building_pool[0][B('Workshop')] = 1;   // a pooled Workshop: before the fix tidy put it back on Bookshelf and the cut took it off again
+    for (const n of ['Make Bookshelf', 'Make Table', 'Make Chair']) st.layouts[Rc(n)] = { fx: { rate: 5 }, bom: [] };
+    for (const g of Object.values(st.groups)) if (g.building === B('Sawmill')) g.count *= 10;   // planks headroom for any furniture
+    const w = F.world(st, [], { catalog: cat, retail: board() }), mem = memWith(FAIL3);
+    const total = Object.values(st.groups).filter((g) => g.building === B('Workshop')).reduce((a, g) => a + g.count, 0) + 1;
+    const ids = [];
+    let cut = null;
+    for (let k = 0; k < 12; k++) {
+      const out = c._decide(c._view(st, cat, []), F.ctxOf({ retailBoard: board(), mem, now: 1.8e12 + k * MIN }));
+      const a = out.actions.find((x) => x.director === 'buildout' || x.director === 'retail');
+      if (!a) break;
+      ids.push(a.id);
+      if (a.id.startsWith('retail:ft:cut:')) cut = a;
+      for (const s of a.steps) { w.ws.send(JSON.stringify(s.msg)); assert.ok(s.until(c._view(st, cat, [])), a.id + ' confirmed'); }
+    }
+    assert.ok(ids.length < 12, 'converges: ' + ids.join(', '));
+    // the tidy made the Frame Timber group from the pooled Workshop, so the cut joins it in the same action
+    assert.deepStrictEqual(cut.steps.map((s) => s.msg.type), ['UnassignBuildings', 'AssignBuildings'], 'the cut is placed in the same action');
+    assert.strictEqual(st.groups[cut.steps[1].msg.group].recipe, Rc('Frame Timber'));
+    assert.strictEqual(new Set(ids.map((x) => x.split(':').slice(0, 4).join(':'))).size, ids.length, 'no step undone and redone: ' + ids.join(', '));
+    const on = (r) => Object.values(st.groups).filter((g) => g.recipe === Rc(r)).reduce((a, g) => a + g.count, 0);
+    assert.deepStrictEqual([on('Make Bookshelf'), on('Make Table'), on('Make Chair')], [1, 1, 1]);
+    assert.strictEqual(st.building_pool[0][B('Workshop')] ?? 0, 0);
+    assert.strictEqual(on('Frame Timber') + on('Rivet Iron Frame') + 3, total, 'every other Workshop on Frame Timber');
+    // nothing left for the fail path: the B3 re-run starts at the capped output, the old fail kept as prevDecision
+    const r = mem('retail').get();
+    assert.strictEqual(r.decision, null); assert.strictEqual(r.prevDecision.kind, 'saturating');
+  });
+
+  // Steps buildout + retail on the fake server until neither acts: the ids sent (12 = never settled).
+  function converge(c, st, mem, b = board()) {
+    const w = F.world(st, [], { catalog: cat, retail: b }), ids = [], acts = [];
+    for (let k = 0; k < 12; k++) {
+      const out = c._decide(c._view(st, cat, []), F.ctxOf({ retailBoard: b, mem, now: 1.8e12 + k * MIN }));
+      const a = out.actions.find((x) => x.director === 'buildout' || x.director === 'retail');
+      if (!a) break;
+      ids.push(a.id); acts.push(a);
+      for (const s of a.steps) { w.ws.send(JSON.stringify(s.msg)); assert.ok(s.until(c._view(st, cat, [])), a.id + ' confirmed'); }
+    }
+    return { ids, acts };
+  }
+  const furnOn = (st, r) => Object.values(st.groups).filter((g) => g.recipe === Rc(r)).reduce((a, g) => a + g.count, 0);
+
+  await t('fail path vs buildout: no Frame Timber group: the cut makes one, it gets its recipe next, converges, the re-run starts', () => {
+    const { cp: c } = F.load(['cp-buildout', 'cp-retail']);
+    const st = failSt();
+    for (const g of Object.values(st.groups)) if (g.recipe === Rc('Frame Timber')) g.recipe = Rc('Make Bookshelf');   // every Frame Timber Workshop on Bookshelf
+    const mem = memWith(FAIL3), { ids, acts } = converge(c, st, mem);
+    assert.ok(ids.length < 12, 'converges: ' + ids.join(', '));
+    const cut = acts.find((a) => a.id.startsWith('retail:ft:cut:'));
+    assert.deepStrictEqual(cut.steps.map((s) => s.msg.type), ['UnassignBuildings', 'CreateGroup'], ids.join(', '));
+    const ft = Object.values(st.groups).find((g) => g.name === 'Frame Timber');
+    assert.strictEqual(ft.recipe, Rc('Frame Timber'));
+    assert.deepStrictEqual(['Make Bookshelf', 'Make Table', 'Make Chair'].map((r) => furnOn(st, r)), [1, 1, 1]);
+    assert.strictEqual(st.building_pool[0][B('Workshop')] ?? 0, 0);
+    const r = mem('retail').get();
+    assert.strictEqual(r.decision, null); assert.strictEqual(r.prevDecision.kind, 'saturating');
+  });
+
+  await t('fail path vs buildout: furniture under the cap with spare Frame Timber: the switch keeps to the per-good keep, converges', () => {
+    const { cp: c } = F.load(['cp-buildout', 'cp-retail']);
+    const st = failSt();
+    st.groups[3].count = 1; st.groups[8].count = 1;
+    st.groups[11].recipe = Rc('Frame Timber'); st.groups[11].count = 6;   // Chair at 0 (keep 1), spare Frame Timber to switch
+    for (const n of ['Make Bookshelf', 'Make Table', 'Make Chair']) st.layouts[Rc(n)] = { fx: { rate: 5 }, bom: [] };
+    for (const g of Object.values(st.groups)) if (g.building === B('Sawmill')) g.count *= 10;
+    const b = board(), rows = b.shelves[0] ?? b.shelves['0'];
+    rows[I('Bookshelf')].appetite *= 20;   // the board's mix wants Bookshelf above its keep of 1
+    const { ids } = converge(c, st, memWith(FAIL3), b);
+    assert.ok(ids.length < 12, 'converges: ' + ids.join(', '));
+    assert.ok(!ids.some((x) => x.startsWith('retail:ft:cut:')), 'nothing to cut: ' + ids.join(', '));
+    assert.ok(furnOn(st, 'Make Bookshelf') <= 1 && furnOn(st, 'Make Table') <= 1 && furnOn(st, 'Make Chair') <= 1, ids.join(', '));
+  });
+
+  await t('undecided fail (no measured sales): no cap, no fail path, no land-rule cap, but the Farm waves still wait', () => {
+    const { cp: c } = F.load(['cp-buildout', 'cp-retail']);
+    const st = failSt(), v = c._view(st, cat, []);
+    const ctxU = F.ctxOf({ retailBoard: board(), mem: memWith({ ok: false, kind: 'undecided', cap: 0, capBy: {}, measured: false, at: 1.8e12, why: 'test' }) }), dU = c._decide(v, ctxU);
+    const ctxP = F.ctxOf({ retailBoard: board(), mem: memWith({ ok: true, kind: 'pass', at: 1.8e12 }) }), dP = c._decide(v, ctxP);
+    assert.strictEqual(ctxU.retailOk, false);
+    assert.strictEqual(ctxU.retailCap, null); assert.strictEqual(ctxU.retailFail, false); assert.strictEqual(ctxU.retailFailPath, false);
+    assert.strictEqual(dU.rule.camps, dP.rule.camps, 'no planks cap');
+    assert.match(c._buildout.waveStep(v, ctxU, dU.rule, 'D').wait, /retail checkpoint failed: remaining Farms stay on Cotton/);
+  });
+
+  await t('board check: held is optional (appetite and price only)', () => {
+    const b = board(), rows = b.shelves[0] ?? b.shelves['0'];
+    for (const r of Object.values(rows)) delete r.held;
+    assert.strictEqual(cp._retail.checkBoard(b, { Chair: I('Chair') }), null);
+    delete rows[I('Chair')].price;
+    assert.match(cp._retail.checkBoard(b, { Chair: I('Chair') }), /Chair row lacks price/);
+    // samples then carry no held: the appetite row's note shows 0, not NaN
+    const s = (t) => ({ t, r: 10000, share: 1, g: { [I('Chair')]: { n: 'Chair', a: 2400, p: 16000, s: 1000, out: 0 } } });
+    const ap = cp._retail.rowsOf([s(1.8e12), s(1.8e12 + 600000)], { shelvedAt: 1.8e12 }, cp.cfg, 1.8e12 + 600000, false, null).rows.find((r) => r.id === 'appetite');
+    assert.match(ap.why, /held 0 -> 0/);
+  });
+
+  await t('re-checkpoint (B3): a fail at the cap starts a new run; its pass sets retailOk and lets the Oil Rig start; a fail above the cap never does', () => {
+    const f = (m) => 0.35 + 0.65 * Math.exp(-m / 15);
+    const oil = (x) => x.out.actions.some((a) => a.id === 'tech:' + B('Oil Rig'));
+    const { log } = simulate(f, { minutes: 260, cd: 20000 });
+    const at = (m) => log.find((x) => x.m === m);
+    assert.strictEqual(at(120).ok, false);
+    assert.ok(!oil(at(120)) && at(120).out.waits.some((w) => /unlock Oil Rig: waits for the retail checkpoint \(failed/.test(w)));
+    // furniture already under the cap: the next look starts the new run, the old fail stays in force meanwhile
+    const r = at(130).ctx.retail.sampler.mem;
+    assert.strictEqual(r.decision, null); assert.strictEqual(r.prevDecision.kind, 'saturating'); assert.strictEqual(r.shelvedAt, 1.8e12 + 130 * MIN);
+    assert.ok(log.filter((x) => x.m >= 130 && x.m < 250).every((x) => x.ok === false && x.ctx.retailFail && !oil(x)), 'fail holds during the new run');
+    assert.match(at(130).out.readouts.retail.decision, /re-checkpoint at the capped output/);
+    assert.strictEqual(at(250).ok, true, JSON.stringify(at(250).out.readouts.retail.rows));
+    assert.ok(oil(at(250)), at(250).out.waits.join(' | '));
+    assert.match(at(250).out.readouts.retail.prevDecision, /^FAIL saturating/);
+    assert.strictEqual(at(250).ctx.retailFailPath, true, 'pass after a measured fail: CD from Wooden Frames');
+    assert.strictEqual(at(250).ctx.retailCap, at(250).ctx.retail.sampler.mem.prevDecision.cap, 'C-fix: the cap stays after the pass');
+    assert.strictEqual(at(250).ctx.retailFail, true);
+    // 600 furniture Workshops and nothing cutting them (no server): the cap is never reached, no new run, no Oil Rig
+    const big = simulate(f, { minutes: 260, cd: 20000, counts: { 3: 300, 8: 200, 11: 100 } });
+    assert.ok(big.log.filter((x) => x.m >= 120).every((x) => x.ok === false && !oil(x)));
+    assert.strictEqual(big.last.ctx.retail.sampler.mem.prevDecision, undefined);
+    // the new run fails too (demand still sliding): once its cap holds, another run starts with that fail as prevDecision
+    const slide = simulate((m) => Math.max(0.05, 1 - m / 150), { minutes: 260 });
+    const sat = (m) => slide.log.find((x) => x.m === m);
+    assert.strictEqual(sat(130).ctx.retail.sampler.mem.prevDecision.at, 1.8e12 + 120 * MIN);
+    assert.strictEqual(sat(250).ok, false); assert.strictEqual(sat(250).ctx.retail.sampler.mem.decision.at, 1.8e12 + 250 * MIN);
+    const m3 = sat(260).ctx.retail.sampler.mem;
+    assert.strictEqual(m3.decision, null); assert.strictEqual(m3.prevDecision.at, 1.8e12 + 250 * MIN); assert.strictEqual(m3.shelvedAt, 1.8e12 + 260 * MIN);
+  });
+
+  await t('sales row (C1): judged per good; one good far under the model fails even when the total passes', () => {
+    const { cp: c } = F.load(['cp-retail']);
+    const t0 = 1.8e12, g = (bs, ts) => ({ 1: { n: 'Bookshelf', a: 240, h: 0, p: 16000, s: bs, out: 0 }, 2: { n: 'Table', a: 24, h: 0, p: 16000, s: ts, out: 0 } });
+    const run = (tableLeft) => c._retail.rowsOf([{ t: t0, r: 10000, share: 1, g: g(1e6, 1e4) }, { t: t0 + 3600000, r: 10000, share: 1, g: g(1e6 - 7200, tableLeft) }], { shelvedAt: t0 }, c.cfg, t0 + 3600000).rows.find((r) => r.id === 'sales');
+    // Bookshelf sells its whole model (7,200), Table none of its 720: the total is 91%, Table is 0%
+    const bad = run(1e4);
+    assert.strictEqual(bad.ok, false, bad.why);
+    assert.match(bad.why, /^worst Table sold 0 of model 720 \(0%\), all goods 7200 of 7920/);
+    assert.strictEqual(run(1e4 - 720).ok, true);
+  });
+
+  await t('E1 rating (C2): 9,000 at every sample of the run, not only the last one', () => {
+    const { cp: c } = F.load(['cp-retail']);
+    const t0 = 1.8e12, g = { 1: { n: 'Bookshelf', a: 240, h: 0, p: 16000, s: 1e6, out: 0 } };
+    const rows = (rs) => c._retail.rowsOf(rs.map((r, k) => ({ t: t0 + k * 600000, r, share: 1, g })), { shelvedAt: t0 }, c.cfg, t0 + rs.length * 600000, true).rows.find((x) => x.id === 'rating');
+    assert.strictEqual(rows([9500, 8000, 9500]).ok, false, 'a dip in the run fails it');
+    assert.strictEqual(rows([9000, 9500, 10000]).ok, true);
   });
 
   done();

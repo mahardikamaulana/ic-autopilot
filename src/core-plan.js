@@ -1,17 +1,19 @@
 // ============================================================================
 // 3d. CORE PLAN (window.corePlan)
 // ============================================================================
-// Coordinator for wiki/core-game-plan.md: reads the game, says which stage (A-D) the Corporation is in and which of the start
+// Coordinator for wiki/guides/core-game-plan.md: reads the game, says which stage (A-D) the Corporation is in and which of the start
 // conditions S1-S7 and end conditions E1-E5 hold (with the reason for each that does not), and sends the few purchases it owns.
 //   corePlan.status() / corePlan.plan()        // what it sees and would do now (nothing is sent)
 //   corePlan.start({ dryRun: false })          // dry run unless told otherwise; Live resumes after a page reload (60 s to cancel)
 //   corePlan.stop() / hold(who) / release(who) // like earlyGame; CD Farm holds every registered module while it buys
 //   corePlan.duties()                          // what Autopilot still does that Core plan has not taken over
 // What it sends today (everything else is read-out only):
-//   - Hand-off at Plan done: the engine items go onto Autopilot's neverSell list and its CD booster is switched off (earlyGame.tune).
+//   - Hand-off at Plan done: the engine items go onto Autopilot's neverSell list and its CD booster is switched off (earlyGame.tune);
+//     then Autopilot is stopped once (earlyGame.stop), as Core plan resumes bill-paused groups itself (plan D-4, D7).
 //   - Unlock director: StartTech for Assembly Plant, then Retail Store, then Oil Rig, only when the research slot is idle, the previous
 //     unlock is in, the CD and the prototype items are in stock, and (Oil Rig) the retail checkpoint has passed.
 //   - Land, Stage A-B: an acre plus a Cotton Farm while (acre + Farm) / Cotton Farm income <= 20 h. Autopilot is held around it.
+//     Not while CD alone holds up the next unlock (Stage A, wiki 11.1), nor while buildout has a block to buy (Stage B, plan D-1).
 //   Stage C-D land and the engine build-out are shown (landRule) but not bought yet.
 // The pure part (corePlan._view / _decide) has no DOM, sockets or timers; the tests drive it with saved boards.
 // @@MODULE core-plan
@@ -38,17 +40,19 @@ try {
     cottonFarmHourly: 790,        // dollars per hour one Cotton Farm earns (wiki 4.6)
     landPaybackFraction: 1 / 3,   // Stage C-D: payback <= T_wall x this
     cashReserve: 0,               // cents kept on top of the other modules' money floors
-    ifReserve: 44,                // Iron Frames kept back for the prototypes (wiki 9)
+    ifReserve: 44,                // upper cap on the Iron Frames kept back for the prototypes and first builds (ifNeed counts what is still needed)
     bufferAcres: 16,              // acres kept free for the CD farm (my-plan.js cdBufferAcres)
     cyclesPerHour: 600,           // the CD rate the land rule assumes until a measured one exists
     handoff: true,                // at Plan done: engine items to Autopilot's neverSell, its CD booster off
+    handoffStopAutopilot: true,   // ... then stop Autopilot once (Core plan resumes bill-paused groups); a user restart is left alone
     unlocks: true, land: true,    // the two directors that send
     liveResume: true,             // after a reload Live resumes (60 s countdown); off = it comes back as a dry run
     resumeSeconds: 60,
   };
   const SESSION_ONLY = ['dryRun'];
   const cfg = { ...DEFAULTS };
-  const ENGINE_ITEMS = ['Wood', 'Planks', 'Iron Sheet', 'Concrete', 'Glass', 'Bookshelf', 'Table', 'Chair', 'Bench', 'Wooden Frame', 'Iron Frame'];
+  const ENGINE_ITEMS = ['Wood', 'Planks', 'Iron Sheet', 'Concrete', 'Glass', 'Bookshelf', 'Table', 'Chair', 'Bench', 'Wooden Frame', 'Iron Frame',
+    'Iron Ore', 'Coal', 'Limestone', 'Sand', 'Copper Ore', 'Copper Wire', 'Wired Frame'];   // cp-cadence NEVER plus the ores the kits use
   const UNLOCKS = ['Assembly Plant', 'Retail Store', 'Oil Rig'];   // in this order (wiki 9)
   const S2_NEEDS = ['Mine', 'Quarry', 'Sawmill', 'Smelter', 'Workshop', 'Kiln', 'Factory', 'Paper Mill', 'Manufacturing Lab'];
 
@@ -127,7 +131,25 @@ try {
   function landInput(v, ctx) {
     const o = (n) => v.owned(n);
     return { acres: v.acresOwned, acrePrice: v.nextAcreCents / 100, camps: o('Lumber Camp'), farms: o('Farm'), sawmills: o('Sawmill'), workshops: o('Workshop'),
-      docks: 0, pastures: 0, fixedAcres: v.fixedAcres, cyclesPerHour: ctx.cyclesPerHour ?? cfg.cyclesPerHour, cdBufferAcres: cfg.bufferAcres };
+      docks: 0, pastures: 0, fixedAcres: v.fixedAcres,
+      // v.fixedAcres already holds a built Retail Store (3 acres) and Assembly Plant (5): only the unbuilt ones are extra
+      fixedExtra: (v.owned('Retail Store') ? 0 : 3) + (v.owned('Assembly Plant') ? 0 : 5), cyclesPerHour: ctx.cyclesPerHour ?? cfg.cyclesPerHour, cdBufferAcres: cfg.bufferAcres };
+  }
+  // Iron Frames (or `item`) the three unlocks still need (wiki 9): the prototype until its research starts, the first build until the building
+  // stands. `except` is the building being bought now: its own first build is not kept back from itself.
+  function ifNeed(v, except, item = 'Iron Frame') {
+    const ifId = v.idI(item);
+    if (ifId == null) return 0;
+    const queued = (v.st.research_queue ?? []).map((q) => q.building);
+    let n = 0;
+    for (const name of UNLOCKS) {
+      const b = v.idB(name);
+      if (b == null) continue;
+      const per = (v.bld(b).build_items ?? []).find((i) => i.item === ifId)?.amount ?? 0;
+      if (!v.unlocked(name) && v.research?.building !== b && !queued.includes(b)) n += per;
+      if (v.owned(name) === 0 && name !== except) n += per;
+    }
+    return n;
   }
   function endConditions(v, rule, ctx) {
     const retail = v.owned('Retail Store') >= 1;
@@ -160,7 +182,7 @@ try {
   function unlockAction(v, ctx, nx) {
     if (!nx) return { wait: 'all three unlocks are in' };
     const why = 'unlock ' + nx.name;
-    if (nx.name === 'Oil Rig' && ctx.retailOk !== true && ctx.retailDecided !== true) return { wait: why + ': waits for the retail checkpoint' };   // a failed checkpoint caps the engine, the plan carries on
+    if (nx.name === 'Oil Rig' && ctx.retailOk !== true) return { wait: why + ': waits for the retail checkpoint' + (ctx.retailOk === false ? ' (failed: a new run measures the capped output)' : '') };   // only on a pass, of either run (plan D-2)
     if (ctx.apNextTech) return { wait: why + ': Autopilot still owns "' + ctx.apNextTech.name + '"' };
     if (!nx.prereqsMet) return { wait: why + ': ' + nx.note };
     if (v.research) return { wait: why + ': research slot busy' };
@@ -172,8 +194,10 @@ try {
       steps: [{ msg: { type: 'StartTech', building: nx.b, region: REGION }, until: (x) => x.research?.building === nx.b || x.unlocked(nx.name) }] } };
   }
   // Stage A-B land: an acre plus a Cotton Farm while (acre + Farm) / hourly income <= cfg.landPaybackAB; one purchase per call.
-  function landAction(v, stage, floorCents) {
+  // block: why another use of the cash goes first (B1, B2).
+  function landAction(v, stage, floorCents, block) {
     if (stage !== 'A' && stage !== 'B') return { wait: 'land: stage ' + stage + ' land is bought by the buildout director with its blocks' };
+    if (block) return { wait: 'land: ' + block };
     if (!v.cottonGroup) return { wait: 'land: no running Cotton Farm group to add to' };
     if (v.acresOwned >= ACRE_CAP) return { wait: 'land: Heartland cap (' + ACRE_CAP + ' acres)' };
     const farm = v.idB('Farm'), farmCents = P.price(v.bld(farm).cost, v.owned('Farm'), 0);
@@ -195,14 +219,23 @@ try {
     const ids = ENGINE_ITEMS.map((n) => v.idI(n)).filter((i) => i != null);
     const never = ctx.ap.neverSell ?? [];
     const lacking = ids.filter((i) => !never.includes(i));
-    if (!lacking.length && ctx.ap.cdBooster === false) return null;
+    if (!lacking.length && ctx.ap.cdBooster === false) {
+      // Then stop Autopilot (plan D-4), only once Core plan resumes bill-paused groups (D7), and only once: a restart by the user is left alone.
+      const m = ctx.mem?.('handoff');
+      if (!m || m.get().stopped || cfg.handoffStopAutopilot === false) return null;
+      if (!directors.some((d) => d.name === 'resume') || cfg.dir_resume === false) return null;
+      const on = !!ctx.ap.running;   // not running: only recorded, so a later start by the user is not stopped either
+      return { id: 'handoff:stop', text: on ? 'hand-off: stop Autopilot (Core plan resumes bill-paused groups now)' : 'hand-off: Autopilot is not running; recorded (a later start is left alone)',
+        run: async () => { if (on) { if (!W.earlyGame?.stop) return false; W.earlyGame.stop(); } m.set({ stopped: ctx.now ?? Date.now() }); return true; } };
+    }
     return { id: 'handoff', text: 'hand-off: ' + (lacking.length ? lacking.length + ' engine items to Autopilot neverSell' : '') + (ctx.ap.cdBooster !== false ? (lacking.length ? ', ' : '') + 'CD booster off' : ''),
       patch: { neverSell: ids, cdBooster: false } };
   }
 
   // ---- plug-in directors (steps 5-10 live in their own files: src/cp-*.js) ------------------------------------------------
-  // A director is { name, order, defaults?, context?(v, ctx), decide(v, ctx, out) -> { action?, actions?, wait?, readout? }, duties?() }.
-  //   context: adds facts to ctx before any director decides (e.g. the retail sampler sets ctx.retailOk).
+  // A director is { name, order, always?, defaults?, context?(v, ctx), decide(v, ctx, out) -> { action?, actions?, wait?, readout? }, duties?() }.
+  //   always: it also decides when no stage holds (out.stage null).
+  //   context(v, ctx, stage): adds facts to ctx before any director decides (e.g. the retail sampler sets ctx.retailOk).
   //   decide: pure; an action is { id, text, steps: [{ msg, until(view) }], hold? } or { id, text, run: async () => true|false|null }.
   //   defaults: cfg keys (validated and saved like the built-in ones). ctx.mem(name) is a small saved object per director.
   const directors = [];
@@ -220,21 +253,40 @@ try {
   function decide(v, ctx = {}) {
     const S = startConditions(v, ctx);
     const stage = stageOf(v, S);
+    for (const dir of directors) { try { dir.context?.(v, ctx, stage); } catch (e) { console.error('[corePlan] ' + dir.name + '.context', e); } }
+    // After the directors' context: a failed retail checkpoint (ctx.retailFail) caps the planks at the furniture blocks sales carry (plan A2).
     let rule = null;
-    try { rule = M.landRule(landInput(v, ctx), v.C, { cyclesPerHour: ctx.cyclesPerHour ?? cfg.cyclesPerHour }); } catch (e) { console.error(e); }
-    for (const dir of directors) { try { dir.context?.(v, ctx); } catch (e) { console.error('[corePlan] ' + dir.name + '.context', e); } }
+    try {
+      const planksCap = ctx.retailFail && typeof ctx.retailCap === 'number' ? ctx.retailCap / M.engineModel(v.C).wsPerPlank : undefined;
+      rule = M.landRule(landInput(v, ctx), v.C, { cyclesPerHour: ctx.cyclesPerHour ?? cfg.cyclesPerHour, planksCap });
+    } catch (e) { console.error(e); }
     const E = endConditions(v, rule, ctx);
-    const out = { stage, S, E, rule, actions: [], waits: [], nextUnlock: null, finished: stage === 'D' && E.every((c) => c.ok) };
+    const out = { stage, S, E, rule, actions: [], waits: [], nextUnlock: null, finished: stage === 'D' && E.every((c) => c.ok), readouts: {} };
     if (out.finished) out.stage = 'END';
-    if (!stage) { out.waits.push('stage: start conditions do not hold (' + S.filter((c) => c.ok === false).map((c) => c.id + ': ' + c.why).join('; ') + ')'); return out; }
+    if (!stage) { out.waits.push('stage: start conditions do not hold (' + S.filter((c) => c.ok === false).map((c) => c.id + ': ' + c.why).join('; ') + ')'); return decideDirectors(v, ctx, out, true); }
     out.nextUnlock = nextUnlock(v);
-    out._ifId = v.idI('Iron Frame'); out._wfId = v.idI('Wooden Frame'); out._plId = v.idI('Planks');
+    out._ifId = v.idI('Iron Frame'); out._ifNeed = ifNeed(v); out._wfId = v.idI('Wooden Frame'); out._plId = v.idI('Planks');
+    out._failPath = !!ctx.retailFailPath;
+    try { out._wfKeep = W.corePlan._buildout?.wfKeep?.(v, ctx) ?? null; } catch { out._wfKeep = null; }   // null: the reserve keeps every frame
     const ho = ctx.planDone === true ? handoffAction(v, ctx) : null;
     if (ho) out.actions.push(ho);
-    if (cfg.unlocks) { const u = unlockAction(v, ctx, out.nextUnlock); if (u.action) out.actions.push(u.action); else out.waits.push(u.wait); }
-    if (cfg.land) { const l = landAction(v, stage, ctx.floorCents ?? 0); if (l.action) out.actions.push(l.action); else out.waits.push(l.wait); }
-    out.readouts = {};
+    if (ctx.ap?.running && ctx.mem?.('handoff')?.get?.()?.stopped) out.readouts.handoff = { alert: 'Autopilot was started again after the hand-off: left running (it also sells and resumes groups)' };
+    const u = unlockAction(v, ctx, out.nextUnlock);
+    if (cfg.unlocks) { if (u.action) out.actions.push(u.action); else out.waits.push(u.wait); }
+    let block = null;
+    // B2 (wiki 11.1): Stage A, the next unlock waits on CD alone (it would start with the CD in hand): no cash into Cotton Farms
+    if (stage === 'A' && !u.action && out.nextUnlock && unlockAction({ ...v, cd: Infinity }, ctx, out.nextUnlock).action) block = 'CD is the bottleneck: cash goes to the CD farm';
+    // B1 (plan D-1): Stage B, a block buildout can buy now goes before an acre + Cotton Farm
+    if (stage === 'B' && cfg.dir_buildout !== false && W.corePlan._buildout?.nextBuildStep) {
+      try { const nb = W.corePlan._buildout.nextBuildStep(v, ctx, rule, stage); if (nb?.pick) block = 'build-out goes first (' + nb.why + ')'; } catch (e) { console.error('[corePlan] buildout.nextBuildStep', e); }
+    }
+    if (cfg.land) { const l = landAction(v, stage, ctx.floorCents ?? 0, block); if (l.action) out.actions.push(l.action); else out.waits.push(l.wait); }
+    return decideDirectors(v, ctx, out, false);
+  }
+  // Directors in order; with no stage only those marked always (D7 resume) decide.
+  function decideDirectors(v, ctx, out, noStage) {
     for (const dir of directors) {
+      if (noStage && !dir.always) continue;
       if (cfg['dir_' + dir.name] === false) { out.waits.push(dir.name + ': off'); continue; }
       let r = null;
       try { r = dir.decide(v, ctx, out); } catch (e) { console.error('[corePlan] ' + dir.name, e); out.waits.push(dir.name + ': error ' + (e.message ?? e)); continue; }
@@ -268,7 +320,7 @@ try {
     for (const [n, x] of Object.entries(others?.by ?? {})) if (n !== 'corePlan') floor = Math.max(floor, x.moneyFloor ?? 0);
     return {
       planDone: apRes ? apRes.phase === 'done' : null,
-      ap: ap?.cfg ? { neverSell: [...(ap.cfg.neverSell ?? [])], cdBooster: ap.cfg.cdBooster } : null,
+      ap: ap?.cfg ? { neverSell: [...(ap.cfg.neverSell ?? [])], cdBooster: ap.cfg.cdBooster, running: !!ap.running } : null,
       apNextTech: apRes?.nextTech && ap?.busy ? apRes.nextTech : null,
       cashDelta10: cashDelta10(), floorCents: floor + cfg.cashReserve,
       retailOk: null,   // set by the retail director's checkpoint sampler (ctx is mutable for directors' context())
@@ -401,8 +453,6 @@ try {
       { duty: 'engine items kept off the shelf (neverSell, CD booster)', owner: 'Core plan', done: true },
       { duty: 'unlocks: Assembly Plant, Retail Store, Oil Rig', owner: 'Core plan', done: true },
       { duty: 'Stage A-B land and Cotton Farms', owner: 'Core plan', done: true },
-      { duty: 'resume groups paused by an unpaid bill', owner: 'Autopilot', done: false },
-      { duty: 'floor upgrades (furniture designs included)', owner: 'Autopilot', done: false },
       ...directors.flatMap((d) => { try { return d.duties?.() ?? []; } catch { return []; } }),
     ];
   }
@@ -440,8 +490,12 @@ try {
       // Before the store: Iron Frames for the prototypes. Once it is built: every Wooden Frame and Plank, so CD Farm's planner never
       // burns them on Mines / Quarries (wiki 11.4, the $294-per-CD mistake).
       const items = {};
-      if (last.stage === 'D' || last.stage === 'END') { for (const id of [last._wfId, last._plId]) if (id != null) items[id] = Infinity; }
-      else if (ifId != null && cfg.ifReserve > 0) items[ifId] = cfg.ifReserve;
+      // Retail fail path (plan A2): Wooden Frames only down to their keep line and Planks free, so CD Farm cycles the frames above it.
+      if (last.stage === 'D' || last.stage === 'END') {
+        if (last._failPath) { if (last._wfId != null) items[last._wfId] = last._wfKeep ?? Infinity; }
+        else for (const id of [last._wfId, last._plId]) if (id != null) items[id] = Infinity;
+      }
+      else if (ifId != null) { const k = Math.min(cfg.ifReserve, last._ifNeed ?? Infinity); if (k > 0) items[ifId] = k; }
       return { moneyFloor: 0, items, nextTech: v ? { b: v.b, name: v.name, cd: v.cd, prereqsMet: v.prereqsMet, note: v.note } : null, phase: null };
     },
     busy: () => running && !cfg.dryRun,
@@ -455,7 +509,7 @@ try {
     importCfg(o) { const r = apply(o?.cfg ?? o); save(); return r; },
     exportCfg() { return { cfg: Object.fromEntries(Object.entries(cfg).filter(([k]) => !SESSION_ONLY.includes(k))) }; },
     resetCfg() { Object.assign(cfg, DEFAULTS); save(); },
-    _view: view, _decide: decide, _step: step, _names: names, _startConditions: startConditions, _endConditions: endConditions, _nextUnlock: nextUnlock, _setPacer(p) { pacer = p; },
+    _ifNeed: ifNeed, _view: view, _decide: decide, _step: step, _names: names, _startConditions: startConditions, _endConditions: endConditions, _nextUnlock: nextUnlock, _setPacer(p) { pacer = p; },
     _unload() { unloaded = true; running = false; clearInterval(loopTimer); cancelResume(); loopTimer = 0; core.reserves?.unregister('corePlan'); dropLock(); },
   };
 

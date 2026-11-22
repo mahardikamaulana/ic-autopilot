@@ -1,14 +1,15 @@
 // ============================================================================
 // CORE PLAN DIRECTOR: 5. Engine build-out and Farm conversion
 // ============================================================================
-// Director "buildout" (wiki/core-game-plan.md 4.2-4.5, 4.8, 8.1, 11.2-11.3, 14 R8). One message (or one purchase) per step:
+// Director "buildout" (wiki/guides/core-game-plan.md 4.2-4.5, 4.8, 8.1, 11.2-11.3, 14 R8). One message (or one purchase) per step:
 //   - pool tidy: own Camps / Sawmills / Workshops left in the pool go into their group (never cdFarm's units), named groups get their recipe;
 //   - Kiln stock gate: unpause / switch the Kiln until Glass and Concrete reach their gates, pause again after;
+//   - Wooden Frame gate: pause Frame Timber at the WF keep line (Rivet use for cfg.ftKeepHours), resume below half (plan D-3);
 //   - Stage B-D: spare Frame Timber Workshops switch to furniture (split from the retail board), keeping 1 on Frame Timber;
 //   - Stage C-D: Farms go in 4 waves 3 h apart (UnassignBuildings + DemolishBuilding), only when the last wave's acres are built and running;
 //   - build-out toward core-math landRule: a consumer only when its supplier covers it, each buy gated by acre, kit, wood (R8), bill floor
-//     and the money floor; Stage C-D buys the acre too while the land rule is open.
-// Pure helpers for tests: corePlan._buildout.furnitureSplit / nextBuildStep / waveState.
+//     and the money floor; Stage C-D buys the acre too while the land rule is open, Stage B while (acre + $1,200) / $1,444 <= 20 h (plan D-1).
+// Pure helpers for tests: corePlan._buildout.furnitureSplit / nextBuildStep / waveState / waveStep; wfKeep is the keep line Core plan's reserve uses.
 // @@MODULE cp-buildout
 try {
 (() => {
@@ -21,6 +22,7 @@ try {
   const FLOOR = { 'Lumber Camp': 3, Sawmill: 2, Workshop: 5 }; // floor rate the plan assumes (wiki 4.5)
   const ENGINE = ['Lumber Camp', 'Sawmill', 'Workshop'];
   const HOUR = 3600000;
+  const BLOCK_SHARE = 1200, BLOCK_HOURLY = 1444;               // dollars: a block's buildings per acre, and what an engine acre earns an hour (plan D-1)
 
   const DEFAULTS = {
     keepFrameTimber: 1,          // Workshops kept on Frame Timber (wiki 4.8 step 1)
@@ -34,6 +36,8 @@ try {
     woodRunsPerSawmill: 2,       // R8: Wood stock >= Sawmills x this x Wood per run before more Sawmills
     glassGate: 100,              // Kiln: Glass before the store research ends (wiki 4.8 step 6)
     concreteGate: 400,           // Kiln: Concrete by the gate
+    ftKeepHours: 2,              // Wooden Frame keep line: this many hours of Rivet use (plan D-3); Frame Timber pauses at it, resumes below half
+    ftKeepMax: 19,               // ... capped here, so stock settles under 20 and E3 can hold (a Rivet Workshop takes 6 per wave start)
   };
 
   // ---- small pure helpers ------------------------------------------------------------------------------------------------------
@@ -105,8 +109,9 @@ try {
     const woodPerCamp = (R.wood.outputs[0]?.amount ?? 1) * runsH(R.wood, rateNow(R.wood));
     const wsPlanksH = (r) => amt(r.inputs, planksId) * runsH(r, ratePlan(r, 'Workshop'));
     const live = (g) => !g.paused && g.count > 0;
+    const ftHeld = new Set(ctx.mem?.('buildout')?.get?.()?.ftMine ?? []);   // Frame Timber the WF gate paused comes back: its planks stay spoken for
     const planksSupply = sum(groupsOf(id.saw, R.planks).filter(live)) * planksPerSaw;
-    const planksDemand = wsGroups.filter(live).reduce((a, g) => a + g.count * (C.recipes[g.recipe] ? wsPlanksH(C.recipes[g.recipe]) : 0), 0);
+    const planksDemand = wsGroups.filter((g) => live(g) || (ftHeld.has(g.id) && g.count > 0)).reduce((a, g) => a + g.count * (C.recipes[g.recipe] ? wsPlanksH(C.recipes[g.recipe]) : 0), 0);
     const woodSupply = sum(groupsOf(id.camp, R.wood).filter(live)) * woodPerCamp;
     const woodDemand = sum(groupsOf(id.saw, R.planks).filter(live)) * woodPerSaw;
     const kitOf = (b, r) => [...(v.bld(b).build_items ?? []), ...((r && layout(r)?.bom) ?? v.bld(b).default_kit ?? [])];
@@ -122,14 +127,21 @@ try {
   };
   const billNeed = (v, newMW) => newMW * 2000 + (v.st.subscriptions?.[REGION]?.power ?? 0) * 12000;   // cents: $20 per new MW + 2 h of bills ($60/MW/h)
 
+  // A measured retail fail: per good, the keep the fail path cuts to (ceil of its capBy, as cp-retail failAction), so buildout never adds
+  // above it and the two never undo each other. Goods not on the measured shelf keep `want`.
+  function failKeep(ctx, want) {
+    const by = ctx.retailFail ? ctx.retail?.capDecision?.capBy : null;
+    return by ? Object.fromEntries(FURN.map(([k, n]) => [k, n in by ? Math.min(want[k], Math.ceil(by[n] - 1e-9)) : want[k]])) : want;
+  }
   // Targets: Camps / Sawmills from the land rule, Workshops from the furniture split of the rule's planks, capped by ctx.retailCap.
   function targets(v, ctx, rule, e) {
     const split = furnitureSplit(ctx.retailBoard, rule.planksH, v.C);
     const furn = { bookshelf: split.bookshelf, table: split.table, chair: split.chair };
     let ft = cfg.keepFrameTimber;
-    if (typeof ctx.retailCap === 'number' && split.total > ctx.retailCap) {
-      // Over the retail cap: keep the board's mix inside the cap and send the planks left over to Frame Timber.
-      const capped = split.alloc(Math.max(0, Math.floor(ctx.retailCap)));
+    const kept = failKeep(ctx, furn);
+    if (kept !== furn || (typeof ctx.retailCap === 'number' && split.total > ctx.retailCap)) {
+      // Over the retail cap: the per-good keep on a measured fail, else the board's mix inside the cap; the planks left over go to Frame Timber.
+      const capped = kept !== furn ? kept : split.alloc(Math.max(0, Math.floor(ctx.retailCap)));
       const extra = Object.keys(furn).reduce((a, k) => a + (furn[k] - capped[k]) * split.planksPerWs[k], 0);
       Object.assign(furn, capped);
       ft += Math.ceil(extra / e.wsPlanksH(e.R.ft) - 1e-9);
@@ -175,7 +187,7 @@ try {
   // Same checks as the switch, so a Workshop the switch freed is never sent back to Frame Timber while the switch still wants it.
   function poolWorkshopRecipe(v, ctx, e, tg, n) {
     const furnTotal = FURN.reduce((a, [k]) => a + e.furnNow[k], 0);
-    const want = tg ? tg.furn : furnitureSplit(ctx.retailBoard, 0, v.C).alloc(furnTotal + n);
+    const want = failKeep(ctx, tg ? tg.furn : furnitureSplit(ctx.retailBoard, 0, v.C).alloc(furnTotal + n));
     const headroom = e.planksSupply - e.planksDemand;
     const gaps = FURN.map(([k]) => ({ k, gap: want[k] - e.furnNow[k] })).filter((x) => x.gap > 0).sort((a, b) => b.gap - a.gap);
     const ok = gaps.find((x) => !floorMissing(e, e.R[x.k]) && headroom + 1e-9 >= e.wsPlanksH(e.R[x.k]));
@@ -206,6 +218,7 @@ try {
     return null;
   }
 
+  const confirmed = (a, fn) => { const u = a.steps[0].until; a.steps[0].until = (x) => { const ok = u(x); if (ok) fn(); return ok; }; return a; };
   // 2. Kiln stock gate: Glass >= glassGate and Concrete >= concreteGate, then pause.
   // Only Kilns this director paused are resumed (ids in mem kilnMine, written when the pause is confirmed); a Kiln the user resumed after
   // that is left alone for good (kilnUser, from context()). A resume also needs the bill floor and the money floor for its draw.
@@ -220,7 +233,6 @@ try {
       if (add) s.add(gid); else s.delete(gid);
       m.set({ kilnMine: [...s] });
     };
-    const confirmed = (a, fn) => { const u = a.steps[0].until; a.steps[0].until = (x) => { const ok = u(x); if (ok) fn(); return ok; }; return a; };
     const manual = [];
     const want = { [e.R.glass.id]: v.has('Glass') < cfg.glassGate, [e.R.concrete.id]: v.has('Concrete') < cfg.concreteGate };
     const making = (rid) => kilns.some((g) => !g.paused && g.recipe === rid);
@@ -244,6 +256,46 @@ try {
       }
     }
     return { wait: (manual.length ? manual.join('; ') + '; ' : '') + 'Glass ' + Math.floor(v.has('Glass')) + '/' + cfg.glassGate + ', Concrete ' + Math.floor(v.has('Concrete')) + '/' + cfg.concreteGate };
+  }
+
+  // Wooden Frame keep line (plan D-3): what the running Rivet Workshops eat in cfg.ftKeepHours, plus the frames the unlocks' prototypes and
+  // first builds still need (corePlan ifNeed), at most cfg.ftKeepMax (E3: stock < 20). Buildout never buys Mines or Quarries, so their 4 frames each are not in it.
+  function wfKeep(v, ctx = {}, e = engine(v, ctx)) {
+    if (e.missing) return null;
+    const rivetH = e.sum(e.groupsOf(e.id.ws, e.R.rivet).filter((g) => !g.paused)) * runsH(e.R.rivet, e.rateNow(e.R.rivet)) * amt(e.R.rivet.inputs, v.idI('Wooden Frame'));
+    return Math.min(cfg.ftKeepMax, Math.ceil(rivetH * cfg.ftKeepHours) + cp._ifNeed(v, null, 'Wooden Frame'));
+  }
+  // 2b. Wooden Frame gate: pause Frame Timber at or above the keep line, resume below half of it (planks above the line are worth more as
+  // furniture, wiki 11.4). Kiln-gate bookkeeping: only groups paused here come back (mem ftMine), one the user resumed is left alone
+  // (ftUser, from context()). On the retail fail path after a pass CD Farm burns the frames above the line: nothing is paused, ours come
+  // back. That holds only while the ladder has a CD need (ctx.ladderNeed) and CD Farm runs Auto; otherwise the gate bounds the frames.
+  function ftStep(v, ctx, e) {
+    const keep = wfKeep(v, ctx, e), wf = v.has('Wooden Frame');
+    const km = ctx.mem?.('buildout')?.get?.() ?? {};
+    const mine = new Set(km.ftMine ?? []), user = new Set(km.ftUser ?? []);
+    const note = (gid, add) => () => {   // runs when the server confirms the pause / resume
+      const m = ctx.mem?.('buildout'); if (!m) return;
+      const s = new Set(m.get().ftMine ?? []);
+      if (add) s.add(gid); else s.delete(gid);
+      m.set({ ftMine: [...s] });
+    };
+    const line = 'Wooden Frame ' + Math.floor(wf) + ', keep line ' + keep;
+    const paused = v.groups.filter((g) => mine.has(g.id) && g.paused && g.count > 0);
+    // a paused group the switch or the retail fail path moved off Frame Timber comes back at once
+    const cf = ctx.mods?.cdFarm?.cfg;   // CD Farm farms (the ladder's Oil Rig / Refinery need) only after a pass, with Auto on
+    const burn = !!(ctx.retailFailPath && ctx.retailOk === true && ctx.ladderNeed && typeof ctx.ladderNeed === 'object' && cf?.building === 'auto' && cf.autoStart);
+    const back = paused.find((g) => g.recipe !== e.R.ft.id) ?? (burn || wf < keep / 2 ? paused[0] : null);
+    if (back) {
+      const mw = (v.bld(back.building).draws?.power ?? 0) * back.count, bill = billNeed(v, mw), floor = ctx.floorCents ?? 0;
+      if (v.money < floor + bill) return { wait: 'WF gate: resume group ' + back.id + ' waits: cash ' + usd(v.money) + ' < ' + usd(floor + bill) + ' (money floor + ' + mw + ' MW bills)' };
+      return { action: confirmed(pauseAction(v, back, false, 'Wooden Frame gate (' + line + ')'), note(back.id, false)) };
+    }
+    if (burn) return { wait: line + ' (retail fail path after a pass: CD Farm burns the frames above it)' };
+    if (!(keep > 0) || wf < keep) return { wait: line };
+    if (!ctx.boMemOk) return { wait: line + ': Frame Timber not paused, browser storage does not save (a pause it forgets would starve Rivet)' };
+    const g = e.groupsOf(e.id.ws, e.R.ft).find((x) => !x.paused && x.count > 0 && !user.has(x.id));
+    if (!g) return { wait: line };
+    return { action: confirmed(pauseAction(v, g, true, 'Wooden Frame gate (' + line + ')'), note(g.id, true)) };
   }
 
   // 3. Spare Frame Timber Workshops to furniture (Stage B on), keeping cfg.keepFrameTimber (and the Rivet group, never touched).
@@ -311,7 +363,7 @@ try {
     const cap = typeof ctx.retailCap === 'number' ? Math.max(0, Math.floor(ctx.retailCap)) : Infinity;
     const n = Math.min(furnTotal + spare, cap);
     if (n <= furnTotal) return { wait: 'switch: furniture at the retail cap (' + cap + '), spare Frame Timber stays' };
-    const want = split.alloc(n);
+    const want = failKeep(ctx, split.alloc(n));   // a measured fail: never above the per-good keep the fail path cuts to
     const gaps = FURN.map(([k]) => ({ k, gap: want[k] - e.furnNow[k] })).filter((x) => x.gap > 0).sort((a, b) => b.gap - a.gap);
     if (!gaps.length) return null;
     // Planks cap: a switch may not push plank use past what the Sawmills make (a Bookshelf eats more than Frame Timber).
@@ -356,10 +408,11 @@ try {
     return { base, waves, size, wave: m.wave ?? 0, at: m.at ?? null, farms: cottonFarms(v, e), targetAfter: (k) => Math.max(0, base - (k + 1) * size) };
   }
   function blocksRunning(v, ctx, e) {
+    const ftHeld = new Set(ctx.mem?.('buildout')?.get?.()?.ftMine ?? []);   // paused by the WF gate on purpose
     for (const bn of ENGINE) {
       const b = v.idB(bn);
       if (e.ownPool(b) > 0) return v.bld(b).name + ' in the pool';
-      const g = v.groups.find((x) => x.building === b && x.count > 0 && (x.paused || (x.equipped ?? x.count) < x.count));
+      const g = v.groups.find((x) => x.building === b && x.count > 0 && !ftHeld.has(x.id) && (x.paused || (x.equipped ?? x.count) < x.count));
       if (g) return 'group ' + g.id + ' (' + (g.name ?? v.bld(b).name) + ') ' + (g.paused ? 'paused' : 'equipped ' + g.equipped + '/' + g.count);
     }
     return null;
@@ -392,6 +445,8 @@ try {
     }
     if (!w.farms) return { status: 'conversion done (0 cotton Farms)' };
     if (w.wave >= w.waves) return { status, wait: 'conversion: all ' + w.waves + ' waves done, ' + w.farms + ' Farms left' };
+    if (ctx.retailOk === false) return { status, wait: 'retail checkpoint failed: remaining Farms stay on Cotton' };   // plan A2: any fail, measured or not; the capped engine needs no more acres
+    if (ctx.retailFail) return { status, wait: 'retail fail path: Farms stay on Cotton' };   // a pass of the re-run proves only the capped output sells
     if (ctx.boCdBusy) return { status, wait: 'conversion: CD Farm is running' };
     // Fail closed: without saved wave memory every step would look like wave 1 and demolish another quarter of the Farms.
     if (!ctx.boMemOk || ctx.mem?.('buildout')?.get?.()?.base == null) return { status, wait: 'conversion: wave memory not saved (browser storage), no wave' };
@@ -441,12 +496,20 @@ try {
     if (!pick) return { wait: held.length ? held.join('; ') : 'build-out at target (' + e.camps + ' Camps, ' + e.saws + ' Sawmills, ' + e.workshops + ' Workshops)', done: !held.length };
     const b = v.idB(pick.bn), bd = v.bld(b);
     const why = 'next ' + pick.label;
-    // Acre: keep the CD-farm buffer free; Stage C-D buys acres while the land rule is open, Stage B only builds on free land.
-    const acres = Math.max(0, cfg.bufferAcres + bd.acres - v.freeAcres);
+    // Acre: keep the CD-farm buffer free; Stage C-D buys acres while the land rule is open, Stage B while the Stage A-B payback rule holds
+    // for the dearest acre bought (plan D-1: a block earns more an acre than a Cotton Farm).
+    // Stage B buys only the block's own acres (like the land director: the buffer is never used, nor refilled here).
+    const acres = stage === 'B' ? Math.max(0, bd.acres - Math.max(0, v.freeAcres - cfg.bufferAcres)) : Math.max(0, cfg.bufferAcres + bd.acres - v.freeAcres);
     let landCents = 0;
     if (acres > 0) {
-      if (stage !== 'C' && stage !== 'D') return { wait: why + ': no free acre (stage ' + stage + ' builds on free land only, ' + v.freeAcres + ' free, buffer ' + cfg.bufferAcres + ')' };
-      if (v.acresOwned + acres > Math.min(rule.lastAcre, ACRE_CAP)) return { wait: why + ': no free acre and the land rule closes at #' + Math.min(rule.lastAcre, ACRE_CAP) };
+      if (stage === 'B') {
+        const last = cp._acrePriceCents(v.landBought + acres - 1), pb = (last / 100 + BLOCK_SHARE) / BLOCK_HOURLY;
+        if (pb > cfg.landPaybackAB) return { wait: why + ': acre #' + (v.acresOwned + acres) + ' ' + usd(last) + ' + block ' + usd(BLOCK_SHARE * 100) + ' pays back in ' + pb.toFixed(1) + ' h > ' + cfg.landPaybackAB + ' h (Stage A-B rule closed)' };
+        if (v.acresOwned + acres > ACRE_CAP) return { wait: why + ': no free acre and Heartland is at its cap (' + ACRE_CAP + ' acres)' };
+      } else {
+        if (stage !== 'C' && stage !== 'D') return { wait: why + ': no free acre (stage ' + stage + ' builds on free land only, ' + v.freeAcres + ' free, buffer ' + cfg.bufferAcres + ')' };
+        if (v.acresOwned + acres > Math.min(rule.lastAcre, ACRE_CAP)) return { wait: why + ': no free acre and the land rule closes at #' + Math.min(rule.lastAcre, ACRE_CAP) };
+      }
       for (let i = 0; i < acres; i++) landCents += cp._acrePriceCents(v.landBought + i);
     }
     const lack = short(v, e.kitOf(b, pick.r));
@@ -479,6 +542,7 @@ try {
   const dir = {
     name: 'buildout', order: 40, defaults: DEFAULTS,
     furnitureSplit, nextBuildStep, waveState: (v, ctx) => waveState(v, ctx, engine(v, ctx)), allocate,
+    waveStep: (v, ctx, rule, stage) => waveStep(v, ctx, engine(v, ctx), null, rule, stage), wfKeep: (v, ctx) => wfKeep(v, ctx ?? {}),
     waveGate: (v, ctx, rule, stage, n) => waveGate(v, ctx, engine(v, ctx), rule, stage, n),
     buyAction: (v, ctx, s) => buyAction(v, engine(v, ctx), s),
     context(v, ctx) {
@@ -497,6 +561,11 @@ try {
       const mine = m.get().kilnMine ?? [];
       const resumed = mine.filter((id) => { const g = v.groups.find((x) => x.id === id); return !g || g.building !== kilnId || !g.paused; });
       if (resumed.length) m.set({ kilnMine: mine.filter((id) => !resumed.includes(id)), kilnUser: [...new Set([...(m.get().kilnUser ?? []), ...resumed])] });
+      // Frame Timber the WF gate paused: one running again on Frame Timber was resumed by the user (hands off); one gone, emptied or
+      // running on another recipe just drops out (a paused one on another recipe stays: ftStep resumes it).
+      const ftR = v.idR('Frame Timber'), ftMine = m.get().ftMine ?? [], ftKeep = [], ftUser = [];
+      for (const id of ftMine) { const g = v.groups.find((x) => x.id === id); if (g && g.count > 0 && g.paused) ftKeep.push(id); else if (g && g.recipe === ftR) ftUser.push(id); }
+      if (ftKeep.length !== ftMine.length) m.set({ ftMine: ftKeep, ...(ftUser.length ? { ftUser: [...new Set([...(m.get().ftUser ?? []), ...ftUser])] } : {}) });
       // Wave bookkeeping from state (right under chaos, dry run and reloads): base at the first Stage C look, a wave counts once the
       // cotton Farms are at or below its target, and its time is when that is first seen.
       if (!conversionStage(v)) return;
@@ -530,6 +599,9 @@ try {
       const k = kilnStep(v, ctx, e);
       readout.kiln = k.wait ?? k.action?.text;
       if (k.action) return done(k.action);
+      const fs = ftStep(v, ctx, e);
+      readout.frames = fs.wait ?? fs.action?.text;
+      if (fs.action) return done(fs.action);
       // Furniture floors first (wiki 4.5: Workshop v1 = x5, scored live): a switch or a furniture Workshop needs its recipe's floor.
       const fl = floorStep(v, ctx, e, tg);
       if (fl?.action) return done(fl.action);
@@ -551,7 +623,7 @@ try {
     },
     duties: () => [
       { duty: 'Stage C-D land, engine build-out, Farm conversion', owner: 'Core plan', done: true },
-      { duty: 'spare Frame Timber Workshops to furniture, Kiln Glass / Concrete gate', owner: 'Core plan', done: true },
+      { duty: 'spare Frame Timber Workshops to furniture, Kiln Glass / Concrete gate, Wooden Frame gate', owner: 'Core plan', done: true },
     ],
   };
   cp.addDirector(dir);

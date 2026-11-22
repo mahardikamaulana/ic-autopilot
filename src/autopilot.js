@@ -3,7 +3,7 @@
 // ============================================================================
 // @@MODULE early-game (test/early-game-sim.js evals everything from this line down)
 //
-// IdleCorp early-game autopilot: plays wiki/early-game-plan.md, Phase 1 → Phase 5, over the game WebSocket.
+// IdleCorp early-game autopilot: plays wiki/guides/early-game-plan.md, Phase 1 → Phase 5, over the game WebSocket.
 // Install as a userscript (Tampermonkey / Violentmonkey) and open "Autopilot" in the game's sidebar,
 // or paste into the DevTools console on https://idlecorp.net (logged in). Console API:
 //
@@ -519,7 +519,7 @@ try {
 
   // ---- floorplans ----------------------------------------------------------------
 
-  // Best known designs (found with the game's scorer; see wiki/floorplan-search.md).
+  // Best known designs (found with the game's scorer; see wiki/dev/floorplan-search.md).
   // Cells as "x,y:item:rot". Pieces: 113 Furnace, 114 Cutter, 116 Assembler, 121 Digging Eq.,
   // 122 Field Eq., 123 Conveyor, 126 Splitter, 127 Merger, 128 Crossing.
   // Library designs never change: unpack each string once and freeze it, so cellsKey can remember its key too.

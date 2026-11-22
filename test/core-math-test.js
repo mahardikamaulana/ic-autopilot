@@ -153,6 +153,11 @@ t('edge: missing optional state fields use the spec defaults (600 cycles/h, buff
   assert.ok(Number.isFinite(r.tWall) && r.tWall > 0);
 });
 
+t('fixedExtra: acres of the Retail Store / Assembly Plant not built yet replace the default 8', () => {
+  assert.strictEqual(CM.landRule({ ...state, fixedExtra: 5 }, catalog).fixedAcres, state.fixedAcres + 5);
+  assert.strictEqual(CM.landRule({ ...state, fixedExtra: 0 }, catalog).fixedAcres, state.fixedAcres);
+});
+
 t('determinism and no input mutation', () => {
   const s = JSON.stringify(state), c = JSON.stringify(catalog);
   const a = CM.landRule(state, catalog), b = CM.landRule(state, catalog);

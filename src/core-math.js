@@ -1,10 +1,11 @@
 // ============================================================================
 // CORE MATH (window.idleCore.coreMath)
 // ============================================================================
-// Pure fixed-point model of the Core Game Plan (scripts/core-plan/my-plan.js, wiki/core-game-plan.md 4.2, 4.3, 4.6, 11.4):
+// Pure fixed-point model of the Core Game Plan (scripts/core-plan/my-plan.js, wiki/guides/core-game-plan.md 4.2, 4.3, 4.6, 11.4):
 // the Farm/Camp/Dock/Pasture CD ladder, the engine constants from the live catalog, and the land rule
 // (income -> T_wall -> last acre inside the rule -> engine acres -> income). No DOM, sockets or timers.
 // Money is in dollars (like the spec script). opts.cyclesPerHour overrides the state's CD rate (a measured CD-farm rate).
+// opts.planksCap (planks per hour, a failed retail checkpoint): the engine, its Camps / Sawmills and the last acre stop at those planks.
 // @@MODULE core-math
 try {
 (() => {
@@ -85,13 +86,14 @@ try {
     return c;
   };
 
-  // The engine target and land rule as data. state: acres, acrePrice, camps, sawmills, workshops, fixedAcres, cyclesPerHour, cdBufferAcres.
+  // The engine target and land rule as data. state: acres, acrePrice, camps, sawmills, workshops, fixedAcres, fixedExtra (acres of the Retail Store / Assembly Plant not built yet, default 8), cyclesPerHour, cdBufferAcres.
   function landRule(state, catalog, opts = {}) {
     const m = engineModel(catalog);
     const st = state;
     const cycles = opts.cyclesPerHour ?? st.cyclesPerHour ?? 600;
-    const fixed = (st.fixedAcres ?? 0) + FIXED_EXTRA, buffer = st.cdBufferAcres ?? 16;
-    let E = 150, rule = null;
+    const fixed = (st.fixedAcres ?? 0) + (st.fixedExtra ?? FIXED_EXTRA), buffer = st.cdBufferAcres ?? 16;
+    const Ecap = opts.planksCap != null ? m.acresOf(Math.max(0, opts.planksCap)) : Infinity;   // engine acres the capped planks need
+    let E = Math.min(150, Ecap), rule = null;
     for (let it = 0; it < 40; it++) {
       const planks = m.planksFor(E), income = planks * m.perPlank;
       const b = bestBatch('farm', 0, income, cycles), tWall = WALL_CD / b.cdH;
@@ -102,10 +104,11 @@ try {
         price = Math.floor(price * 100 * 41 / 40) / 100;
       }
       rule = { planks, income, b, tWall, last };
-      const Enew = Math.max(0, Math.max(last, st.acres) - fixed - buffer);
+      const Enew = Math.min(Ecap, Math.max(0, Math.max(last, st.acres) - fixed - buffer));
       if (Math.abs(Enew - E) < 0.5) { E = Enew; break; }
       E = (E + Enew) / 2;
     }
+    if (Ecap < Infinity) rule.last = Math.min(rule.last, Math.max(st.acres, Math.ceil(Ecap + fixed + buffer)));   // no acre the capped engine cannot fill
     const acreN = Math.max(rule.last, st.acres);
     const planks = m.planksFor(E);
     const camps = Math.ceil(planks * m.woodPerPlank / m.campWoodH), saws = Math.ceil(planks / m.smPlanksH);
