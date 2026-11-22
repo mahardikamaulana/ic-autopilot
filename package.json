@@ -1,0 +1,13 @@
+{
+  "name": "ic-autopilot",
+  "private": true,
+  "version": "0.0.0",
+  "description": "IC Autopilot: userscript toolkit for idlecorp.net (build + tests; the shipped file is ic-autopilot.user.js)",
+  "scripts": {
+    "build": "bun build.js",
+    "check": "bun build.js --check",
+    "release": "bun build.js --bump",
+    "test": "bun build.js --check && bun test/toolkit-test.js && bun test/early-game-sim.js all 44",
+    "ui": "bun test/ui-harness.js check"
+  }
+}

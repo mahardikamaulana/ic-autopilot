@@ -1,0 +1,5 @@
+.DS_Store
+node_modules/
+.omc/
+# hash of the last local build, used only to spot hand edits of the built file
+src/.built-sha
