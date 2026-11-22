@@ -59,7 +59,10 @@ try {
   // ---- socket listener ----------------------------------------------------------
   // muts counts Diffs that carry a newer ssi.last_user_mutation_tick, i.e. the server applying
   // one of the player's commands (not production updates).
-  const sock = { ws: null, textMsgs: 0, diffs: 0, muts: 0, mutTick: 0, tick: 0, tickAt: 0 };
+  // sendAt / ackAt: performance.now() at ws.send and when the first player-mutation Diff after it arrived
+  // (sub-millisecond, unlike the confirm poll): their difference is the command's round trip.
+  const sock = { ws: null, textMsgs: 0, diffs: 0, muts: 0, mutTick: 0, tick: 0, tickAt: 0, sendAt: 0, ackAt: 0 };
+  const hrNow = () => globalThis.performance?.now?.() ?? Date.now();
   const wakers = new Set();
   function seeTick(t) { if (typeof t === 'number' && t > sock.tick) { sock.tick = t; sock.tickAt = Date.now(); } }
   function onMessage(e) {
@@ -70,7 +73,7 @@ try {
       seeTick(m.tick ?? m.diff?.tick);
       if (m.kind === 'Diff') sock.diffs++;
       const u = m.diff?.ssi?.last_user_mutation_tick;
-      if (typeof u === 'number' && u > sock.mutTick) { sock.mutTick = u; sock.muts++; for (const w of [...wakers]) w(); }
+      if (typeof u === 'number' && u > sock.mutTick) { sock.mutTick = u; sock.muts++; if (sock.sendAt && !sock.ackAt) sock.ackAt = hrNow(); for (const w of [...wakers]) w(); }
     } catch {}
   }
   function attach(ws) {
@@ -82,7 +85,9 @@ try {
   // Server tick now: last tick seen plus elapsed time (2 ticks/s), so checks work between messages.
   const nowTick = () => (sock.tick ? sock.tick + Math.floor((Date.now() - sock.tickAt) / 500) : 0);
   // Call right before ws.send: only a later mutation confirms this command. Returns the Diff count to wait past.
-  function markSend(stMutTick) { sock.mutTick = Math.max(sock.mutTick, stMutTick || 0); return sock.muts; }
+  function markSend(stMutTick) { sock.mutTick = Math.max(sock.mutTick, stMutTick || 0); sock.sendAt = hrNow(); sock.ackAt = 0; return sock.muts; }
+  // Round trip of the last marked command in ms (float), or null while its acknowledgement has not been seen.
+  const lastRtt = () => (sock.sendAt && sock.ackAt >= sock.sendAt ? sock.ackAt - sock.sendAt : null);
   // Sleep that ends early when the server applies a player command (yours, or one you click yourself).
   function sleepWake(ms) {
     return new Promise((res) => {
@@ -97,7 +102,7 @@ try {
   // neither alone is proof. If the socket has never delivered a text frame the acknowledgement
   // can't be seen at all (e.g. the game moved to binary frames): then the state must hold steadily
   // for STEADY_MS instead of passing on the first look, and the first time is logged.
-  const STEADY_MS = 1500;
+  const tune = { steadyMs: 1500, pollMs: 100 };   // tests shorten both: the steady hold and the poll step
   let warnedBlind = false;
   async function waitConfirm({ read, pred, d0, timeoutMs, closed }) {
     const t0 = Date.now();
@@ -109,13 +114,13 @@ try {
         if (sock.textMsgs > 0) { if (sock.muts > d0) return r; }
         else {
           okSince ||= Date.now();
-          if (Date.now() - okSince >= STEADY_MS) {
-            if (!warnedBlind) { warnedBlind = true; console.warn('[idleCore] no text frames seen on the game socket: confirming from state alone (held for ' + STEADY_MS + ' ms)'); }
+          if (Date.now() - okSince >= tune.steadyMs) {
+            if (!warnedBlind) { warnedBlind = true; console.warn('[idleCore] no text frames seen on the game socket: confirming from state alone (held for ' + tune.steadyMs + ' ms)'); }
             return r;
           }
         }
       } else okSince = 0;
-      await sleep(100);
+      await sleep(tune.pollMs);
     }
     return null;
   }
@@ -221,7 +226,7 @@ try {
   function stopAll(why = 'stop-all') {
     const live = [];
     try { if (W.earlyGame?.running) { W.earlyGame.stop(); live.push('Autopilot'); } } catch (e) { console.error(e); }
-    try { if (W.cdFarm?.running) { W.cdFarm.stop(); live.push('CD Farm'); } } catch (e) { console.error(e); }
+    try { if (W.cdFarm?.running) { W.cdFarm.stop(); live.push('CD Farm'); } else if (W.cdFarm?.pauseAuto?.()) live.push('CD Farm Auto'); } catch (e) { console.error(e); }
     try { if (W.labRunner?.running) { W.labRunner.stop(); live.push('Lab'); } } catch (e) { console.error(e); }
     try { if (W.autoSell?.running) { W.autoSell.stop(); live.push('Auto ship'); } } catch (e) { console.error(e); }
     try { if (W.autoUtil?.running) { W.autoUtil.stop(); live.push('Auto utilities'); } } catch (e) { console.error(e); }
@@ -690,7 +695,7 @@ fieldset.idc-form:disabled .idc-field,fieldset.idc-form:disabled .idc-check,fiel
 
   W.idleCore = {
     version: 1,
-    walk, sleep, sleepWake, waitConfirm, markSend, nowTick, seeTick, sock,
+    walk, sleep, sleepWake, waitConfirm, tune, markSend, lastRtt, nowTick, seeTick, sock,
     h, makeDraggable, toast, ledger: ledgerApi, ui,
     setBadge, notify, askNotify, notifyPerm, stopAll,
     exportConfig, importConfig, exportFile, importFile, missingFields,

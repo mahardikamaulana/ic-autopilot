@@ -17,12 +17,20 @@ const asSrc = full.slice(full.indexOf('// @@MODULE autosell'), full.indexOf('// 
 
 let failed = 0;
 const quietLog = console.log, quietWarn = console.warn;
+// bun test/toolkit-test.js --shard=k/N runs every N-th test (k from 0); no flag runs all.
+const SHARD = (process.argv.find((a) => a.startsWith('--shard=')) || '').slice(8).split('/').map(Number);
+let testNo = 0;
 async function t(name, fn) {
+  if (SHARD.length === 2 && testNo++ % SHARD[1] !== SHARD[0]) return;
   console.log = () => {}; console.warn = () => {};
-  try { await fn(); console.log = quietLog; console.warn = quietWarn; quietLog('ok   ' + name); }
+  const t0 = Date.now();
+  try { await fn(); console.log = quietLog; console.warn = quietWarn; quietLog('ok   ' + name + (process.env.TEST_TIMES ? '  [' + (Date.now() - t0) + ' ms]' : '')); }
   catch (e) { console.log = quietLog; console.warn = quietWarn; failed++; quietLog('FAIL ' + name + '\n     ' + (e.stack || e).split('\n').slice(0, 4).join('\n     ')); }
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Poll a condition instead of sleeping a guessed time: returns as soon as it holds (or false after ms).
+const waitFor = async (cond, ms = 4000, step = 10) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (cond()) return true; await sleep(step); } return !!cond(); };
+const settled = (m) => waitFor(() => !m.running && !m.active, 3000);   // a runner has finished its current step after stop()
 const fresh = () => { globalThis.idleCore?._unload?.(); globalThis.labRunner?._unload?.(); globalThis.idleCore = undefined; globalThis.earlyGame = undefined; globalThis.cdFarm = undefined; globalThis.labRunner = undefined; };
 
 function loadBoth() {
@@ -113,26 +121,27 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
 
   await t('waitConfirm: needs a newer mutation when the socket talks; holds steady when it never does', async () => {
     const { core } = loadBoth();
+    core.tune.steadyMs = 150; core.tune.pollMs = 10;   // the code under test is the logic, not the 1.5 s hold
     const closed = () => { throw new Error('closed'); };
     // Socket has delivered frames: a true state alone is not enough, a later mutation is.
     core.sock.textMsgs = 5; core.sock.muts = 3;
     let reads = 0;
     const read = () => { reads++; return { wsOpen: true }; };
-    setTimeout(() => { core.sock.muts = 4; }, 250);
+    setTimeout(() => { core.sock.muts = 4; }, 60);
     const t0 = Date.now();
     const r = await core.waitConfirm({ read, pred: () => true, d0: 3, timeoutMs: 3000, closed });
-    assert.ok(r && Date.now() - t0 >= 240 && Date.now() - t0 < 1500, 'waited for the mutation, ' + (Date.now() - t0) + ' ms');
-    assert.strictEqual(await core.waitConfirm({ read, pred: () => true, d0: 99, timeoutMs: 400, closed }), null, 'times out without one');
+    assert.ok(r && Date.now() - t0 >= 50 && Date.now() - t0 < 1500, 'waited for the mutation, ' + (Date.now() - t0) + ' ms');
+    assert.strictEqual(await core.waitConfirm({ read, pred: () => true, d0: 99, timeoutMs: 120, closed }), null, 'times out without one');
     // Blind socket (no text frames ever): the state must hold for ~1.5 s.
     core.sock.textMsgs = 0;
     const t1 = Date.now();
     assert.ok(await core.waitConfirm({ read, pred: () => true, d0: 0, timeoutMs: 6000, closed }));
-    assert.ok(Date.now() - t1 >= 1450, 'steady wait was ' + (Date.now() - t1) + ' ms');
+    assert.ok(Date.now() - t1 >= core.tune.steadyMs - 10, 'steady wait was ' + (Date.now() - t1) + ' ms');
     // ...and a state that flickers never confirms.
     let n = 0;
-    assert.strictEqual(await core.waitConfirm({ read, pred: () => (n++ % 8) !== 7, d0: 0, timeoutMs: 3000, closed }), null);
+    assert.strictEqual(await core.waitConfirm({ read, pred: () => (n++ % 2) === 0, d0: 0, timeoutMs: 400, closed }), null);   // alternates every poll: never two true in a row, whatever the load
     // A closed socket throws through the caller's hook.
-    await assert.rejects(core.waitConfirm({ read: () => ({ wsOpen: false }), pred: () => true, d0: 0, timeoutMs: 500, closed }), /closed/);
+    await assert.rejects(core.waitConfirm({ read: () => ({ wsOpen: false }), pred: () => true, d0: 0, timeoutMs: 200, closed }), /closed/);
   });
 
   await t('stopAll stops whatever is running and says so', () => {
@@ -218,20 +227,21 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     try {
       // Dry run: decides, writes to the log, sends nothing.
       ap.start({ dryRun: true });
-      await sleep(600);
+      await waitFor(() => globalThis.idleCore.ledger.list().length > 0 && ap.stats?.cycles !== 0, 1500);   // it has looked at the world at least once
+      await sleep(120);                                                                                   // ...and a few more loops: still nothing sent
       assert.strictEqual(ws.sent.length, 0, 'dry run sent ' + JSON.stringify(ws.sent[0]));
-      ap.stop(); await sleep(300);
+      ap.stop(); await settled(ap);
       assert.ok(!ap.running && !ap.active);
 
       // Live: the server never applies anything, so every action fails: the pace halves and the log says so.
       ap.cfg.dryRun = false;
       ap.start();
-      await sleep(2500);
+      await waitFor(() => /not confirmed|slowing down/.test(globalThis.idleCore.ledger.text()), 4000);
       assert.ok(ws.sent.length >= 1, 'live sent nothing');
       assert.ok(ws.sent[0].type, 'sent ' + JSON.stringify(ws.sent[0]));
       const led = globalThis.idleCore.ledger.text();
       assert.ok(/not confirmed|slowing down/.test(led), 'ledger: ' + led);
-      ap.stop(); await sleep(800);
+      ap.stop(); await settled(ap);
       assert.ok(!ap.running && !ap.active, 'stopped');
 
       // Game data that no longer looks right: Live is refused and falls back to a dry run.
@@ -240,12 +250,12 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       ap.cfg.dryRun = false;
       ap.start();
       assert.strictEqual(ap.cfg.dryRun, true, 'Live must be refused');
-      await sleep(400);
+      await sleep(100);
       assert.strictEqual(ws.sent.length, 0);
       assert.ok(/Live refused/.test(globalThis.idleCore.ledger.text()));
-      ap.stop(); await sleep(300);
+      ap.stop(); await settled(ap);
     } finally {
-      ap.stop(); await sleep(200);
+      ap.stop(); await settled(ap);
       ap._unload(); globalThis.idleCore._unload(); globalThis.idleCore = undefined; globalThis.earlyGame = undefined;
       delete globalThis.document; delete globalThis.WebSocket;
     }
@@ -291,9 +301,9 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       assert.ok(core.sock.tick > 0 && core.nowTick() >= core.sock.tick, 'server tick tracked');
       assert.strictEqual(typeof line.dMoney, 'number', 'ledger line carries a cash change');
       assert.ok(!/not confirmed/.test(core.ledger.text()), core.ledger.text());
-      ap.stop(); await sleep(500);
+      ap.stop(); await settled(ap);
     } finally {
-      ap.stop(); await sleep(200);
+      ap.stop(); await settled(ap);
       ap._unload(); core._unload(); globalThis.idleCore = undefined; globalThis.earlyGame = undefined;
       delete globalThis.document; delete globalThis.WebSocket;
     }
@@ -559,7 +569,8 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       // Dry run (the default): says what it would send, once, and sends nothing.
       assert.strictEqual(lab.cfg.dryRun, true);
       lab.start();
-      await sleep(400);
+      await waitFor(() => core.ledger.list().filter((e) => e.mod === 'LAB' && /would send/.test(e.text)).length >= 3, 2000);   // all three steps logged
+      await sleep(100);
       assert.strictEqual(arrived.length, 0, 'dry run sent ' + JSON.stringify(arrived[0]?.msg));
       const would = core.ledger.list().filter((e) => e.mod === 'LAB' && /would send/.test(e.text)).map((e) => e.text.match(/"type":"(\w+)"/)[1]);
       assert.deepStrictEqual(would, ['ClaimResearch', 'StartResearch', 'StartResearch'], 'one line per step, logged once rather than at every look');
@@ -570,7 +581,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       lab.cfg.dryRun = false;
       lab.start();
       await until(() => arrived.length >= 3);
-      await sleep(300);     // anything more would show up
+      await sleep(120);     // anything more would show up
       assert.deepStrictEqual(arrived.map((x) => x.msg), [{ type: 'ClaimResearch', tick: 40 }, startMsg(IRON_FRAME, 0, 2, 0), startMsg(WOODEN_FRAME, 0, 1, 1)]);
       assert.deepStrictEqual(arrived.map((x) => [x.pending, x.running]), [[1, 0], [0, 0], [0, 1]], 'claim applied before the first start, first start before the second');
       const lines = core.ledger.list().filter((e) => e.mod === 'LAB' && e.kind === 'action').map((e) => e.text);
@@ -580,7 +591,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       assert.match(lines[2], /^started Wooden Frame · Process study · Tier II in Industrial Basin/);
       assert.deepStrictEqual(lab.mem.counts, { [IRON_FRAME]: 1, [WOODEN_FRAME]: 1 });
       // Both slots busy: it only watches.
-      await sleep(300);
+      await sleep(120);
       assert.strictEqual(arrived.length, 3);
       assert.ok(lab.running);
 
@@ -628,7 +639,8 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     core.ledger.clear();
     try {
       lab.start();
-      await sleep(1500);
+      await waitFor(() => core.ledger.list().filter((e) => e.mod === 'LAB' && e.kind === 'fail').length >= 2, 4000);
+      await sleep(150);   // a retry before the back-off ends would show up here
       assert.deepStrictEqual(sent.map((m) => m.type), ['ClaimResearch', 'StartResearch'], 'the claim that did not take is not retried before its back-off ends, and does not block the start');
       const fails = core.ledger.list().filter((e) => e.mod === 'LAB' && e.kind === 'fail').map((e) => e.text);
       assert.strictEqual(fails.length, 2, fails.join(' | '));
@@ -644,7 +656,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       lab.cfg.dryRun = false;
       lab.start();
       assert.strictEqual(lab.cfg.dryRun, true, 'Live must be refused');
-      await sleep(300);
+      await sleep(100);
       assert.strictEqual(sent.length, 0);
       assert.ok(/Live refused/.test(core.ledger.text()));
       await halt(lab);
@@ -790,7 +802,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     void props;
     (0, eval)(coreSrc + '\n' + asSrc);
     const as = globalThis.autoSell, core = globalThis.idleCore;
-    Object.assign(as.cfg, { cycleMs: 40, confirmMs: 300, jitterMs: 0 });
+    Object.assign(as.cfg, { cycleMs: 40, confirmMs: 3000, jitterMs: 0 });   // wide: a slow machine must not read as "not confirmed"
     core.ledger.clear();
     try {
       courierBusy = 100000;                                  // after the first send the courier stays busy
@@ -890,7 +902,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     globalThis.document.getElementById('root').__reactContainer$x.memoizedState.next.next = { memoizedState: deals, next: null };
     (0, eval)(coreSrc + '\n' + asSrc);
     const as = globalThis.autoSell, core = globalThis.idleCore;
-    Object.assign(as.cfg, { cycleMs: 40, confirmMs: 300, jitterMs: 0 });
+    Object.assign(as.cfg, { cycleMs: 40, confirmMs: 3000, jitterMs: 0 });   // wide: a slow machine must not read as "not confirmed"
     core.ledger.clear();
     try {
       assert.ok(expectCost > 0, 'Iron Sheet has a recipe cost');
@@ -902,7 +914,8 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       assert.strictEqual(j.profit, 0);
       assert.strictEqual(j.estProfit, Math.round(300 * (6000 - expectCost)), 'estimate before the first send: margin x the open lot');
       await until(() => sent.length >= 1);
-      await sleep(150);
+      // booked (after the confirm) and the open lot re-read by the next cycle: both come from timers, so wait for them, not for a guessed time
+      await until(() => { const x = as.jobs().find((y) => y.deal === 5); return x.revenue > 0 && x.estProfit > x.profit; }, 8000);
       j = as.jobs().find((x) => x.deal === 5);
       assert.strictEqual(sent[0].amount, null, 'the whole lot');
       assert.strictEqual(j.revenue, 300 * 6000);
@@ -919,7 +932,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       disk['autoSell.v1'] = JSON.stringify({ jobs: [...JSON.parse(disk['autoSell.v1']).jobs, { deal: 6, item: COTTON, region: 0, unit: 150, left: null, sold: 12, keep: 0, fullLoads: false, expiresAt: 5000 }] });
       (0, eval)(asSrc);
       const as2 = globalThis.autoSell;
-      Object.assign(as2.cfg, { cycleMs: 40, confirmMs: 300, jitterMs: 0 });
+      Object.assign(as2.cfg, { cycleMs: 40, confirmMs: 3000, jitterMs: 0 });
       const back = as2.jobs().find((x) => x.deal === 5);
       assert.deepStrictEqual([back.revenue, back.cost, back.profit], [before.revenue, before.cost, before.profit], 'profit survives a reload');
       const old = as2.jobs().find((x) => x.deal === 6);
@@ -1069,7 +1082,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     props.contracts = [];
     (0, eval)(coreSrc + '\n' + utSrc());
     const ut = globalThis.autoUtil, core = globalThis.idleCore;
-    Object.assign(ut.cfg, { confirmMs: 150, backoffMs: 0, cycleMs: 1e9 });       // the test drives the steps itself, with its own clock
+    Object.assign(ut.cfg, { confirmMs: 3000, backoffMs: 0, cycleMs: 1e9 });       // the test drives the steps itself, with its own clock
     core.ledger.clear();
     const T0 = 1e12, MIN = 60000;
     try {
@@ -1129,6 +1142,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       wsNow.readyState = 1;
       // Failed changes count "in a row": a quiet step in between starts the count again.
       apply = false;
+      ut.cfg.confirmMs = 150;   // from here the server ignores us: a short window keeps the test quick
       await ut._step(T0 + 16 * MIN - 20000);
       await ut._step(T0 + 16 * MIN - 10000);
       assert.match(ut.status(), /2\/3/);
@@ -1157,9 +1171,10 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       assert.strictEqual(JSON.parse(disk['autoUtil.v1']).power.on, false);
       // The server ignoring the change: 3 tries, then that utility switches itself off.
       const ut2 = globalThis.autoUtil;
-      Object.assign(ut2.cfg, { confirmMs: 150, backoffMs: 0, cycleMs: 1e9 });
+      Object.assign(ut2.cfg, { confirmMs: 3000, backoffMs: 0, cycleMs: 1e9 });
       ut2.set('power', true);
       apply = false;
+      ut2.cfg.confirmMs = 150;
       st.groups = { 1: run(WORKSHOP, 9, chair) }; st.subscriptions = { 0: { power: 1 } };
       const before = sent.length;
       for (let i = 0; i < 4; i++) await ut2._step(T0 + (20 + i) * MIN);

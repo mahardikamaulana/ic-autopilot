@@ -199,7 +199,7 @@ try {
   const cooling = (key) => (cooldowns.get(key)?.until ?? 0) > nowMs();
 
   // ---- CD Farm coordination -------------------------------------------------
-  // CD Farm (the module above) builds and demolishes Lumber Camps; any unassigned camp above its
+  // CD Farm (the module above) builds and demolishes Lumber Camps or Farms (its Building setting); any unassigned one above its
   // baseline is treated as its own. So: while it runs (or finishes a step) we send nothing;
   // while it has an interrupted run, its leftover pool camps are never assigned and no new
   // camps/farms are built (they would look like its camps). window.cdFarm is re-read every time,
@@ -209,12 +209,14 @@ try {
   function farmInfo() {
     const f = W.cdFarm;
     if (!f) return null;
-    return { busy: !!(f.running || f.active), resumable: !!f.resumable, baseline: f.stats?.baselinePool ?? 0, f };
+    return { busy: !!(f.running || f.active), resumable: !!f.resumable, baseline: f.stats?.baselinePool ?? 0, building: f.building ?? B.CAMP, units: f.farmUnits ?? null, f };
   }
-  // Unassigned Lumber Camps that belong to a running or interrupted CD Farm run.
-  function farmCamps(s) {
+  // Unassigned buildings (Lumber Camps or Farms, whichever the run cycles) that belong to a running or interrupted CD Farm run.
+  function farmCamps(s, b = B.CAMP) {
     const fi = farmInfo();
-    return fi && (fi.busy || fi.resumable) ? Math.max(0, (s.pool[B.CAMP] ?? 0) - fi.baseline) : 0;
+    if (!fi || !(fi.busy || fi.resumable)) return 0;
+    if (fi.units) return fi.units[b] ?? 0;   // CD Farm Auto: units of every type it holds above the baseline
+    return b === fi.building ? Math.max(0, (s.pool[b] ?? 0) - fi.baseline) : 0;
   }
   let farmSeenBusyAt = -Infinity;   // last time CD Farm was seen running (a gap before the booster restarts it)
   function heldReason() {
@@ -434,7 +436,14 @@ try {
     if (paused.length) return ` — nothing is making it: "${paused[0].name}" is paused${userPaused.has(paused[0].id) ? ' by you' : ''}`;
     return ` — nothing is making it: "${makers[0].name}" has no floor kit yet`;
   }
-  const usd = (c) => '$' + (c / 100).toLocaleString('en-US', { maximumFractionDigits: 2 });
+  // "$1,234.5": same text as toLocaleString('en-US', { maximumFractionDigits: 2 }) without its cost (it was 30% of a simulation).
+  const usd = (c) => {
+    if (!Number.isFinite(c)) return '$' + (c / 100).toLocaleString('en-US', { maximumFractionDigits: 2 });
+    const cents = Math.round(Math.abs(c)), whole = Math.floor(cents / 100), rem = cents % 100;
+    let s = String(whole).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    if (rem) s += '.' + (rem < 10 ? '0' + rem : rem % 10 ? rem : rem / 10);
+    return '$' + (c < 0 && cents ? '-' : '') + s;
+  };
   const iname = (s, i) => s.catalog.items[i]?.name ?? `item ${i}`;
   const bname = (s, b) => s.bld(b)?.name ?? `building ${b}`;
 
@@ -513,10 +522,19 @@ try {
   // Best known designs (found with the game's scorer; see wiki/floorplan-search.md).
   // Cells as "x,y:item:rot". Pieces: 113 Furnace, 114 Cutter, 116 Assembler, 121 Digging Eq.,
   // 122 Field Eq., 123 Conveyor, 126 Splitter, 127 Merger, 128 Crossing.
-  const unpack = (str) => Object.fromEntries(str.split(' ').map((t) => {
-    const [x, y, item, rot] = t.split(/[,:]/).map(Number);
-    return [`${x},${y}`, { item, rot }];
-  }));
+  // Library designs never change: unpack each string once and freeze it, so cellsKey can remember its key too.
+  const unpackCache = new Map();
+  const unpack = (str) => {
+    let o = unpackCache.get(str);
+    if (!o) {
+      o = Object.freeze(Object.fromEntries(str.split(' ').map((t) => {
+        const [x, y, item, rot] = t.split(/[,:]/).map(Number);
+        return [`${x},${y}`, Object.freeze({ item, rot })];
+      })));
+      unpackCache.set(str, o);
+    }
+    return o;
+  };
   const X3_MERGE = (eq) => unpack(`0,0:${eq}:0 0,1:${eq}:0 1,0:123:0 1,1:123:0 2,0:127:0 2,1:123:3 3,0:123:0 4,0:123:0 4,1:${eq}:0`);
   const SMELT_X3 = '0,0:123:1 0,1:127:1 0,2:123:1 0,3:123:0 1,0:113:0 1,2:123:3 1,3:126:0 2,3:123:0 3,0:123:0 3,2:123:0 3,3:126:0 4,0:123:0 4,1:113:0 4,3:123:0 5,0:123:0 5,3:123:0 6,0:123:0 6,1:123:0 6,2:113:0 7,0:123:0 7,1:123:0';
   const FLOOR_LIBRARY = [
@@ -539,7 +557,15 @@ try {
       cells: '0,0:123:0 0,1:123:1 0,2:123:1 0,3:123:1 0,4:123:0 1,0:123:0 1,4:123:0 10,1:123:0 10,2:123:0 10,4:123:0 11,1:123:0 11,2:123:0 11,4:123:0 12,1:123:0 12,2:116:0 12,4:123:0 13,1:123:0 13,4:123:0 14,1:123:0 14,4:123:0 15,0:116:0 15,2:123:0 15,3:116:0 16,2:123:0 17,2:123:0 2,0:126:0 2,1:123:1 2,2:126:1 2,3:123:0 2,4:123:0 3,0:123:0 3,2:123:0 3,3:114:0 3,4:123:0 4,0:114:0 4,2:114:0 4,4:123:0 5,3:123:0 5,4:123:0 6,0:123:0 6,2:123:0 6,3:127:0 6,4:123:3 7,0:123:1 7,1:123:1 7,2:127:0 7,3:123:3 8,2:123:0 9,1:123:0 9,2:126:0 9,3:123:1 9,4:123:0' },
   ];
 
-  const cellsKey = (cells) => JSON.stringify(Object.entries(cells ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+  // Only a frozen set of cells (a library design) can be remembered: the game's own cells may change in place.
+  const keyCache = new WeakMap();
+  const cellsKey = (cells) => {
+    const frozen = cells && Object.isFrozen(cells);
+    if (frozen) { const k = keyCache.get(cells); if (k !== undefined) return k; }
+    const k = JSON.stringify(Object.entries(cells ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+    if (frozen) keyCache.set(cells, k);
+    return k;
+  };
   // Parts per building = sum of each piece's materials (matches the game's bom on every saved design).
   function bomOf(s, cells) {
     const out = {};
@@ -858,7 +884,7 @@ try {
     // 3b. Unassigned plan buildings → their group (non-plan buildings are left alone).
     for (const [bs, total] of Object.entries(s.pool)) {
       const b = +bs;
-      const n = total - (boosterLeft[b] ?? 0) - (b === B.CAMP ? farmCamps(s) : 0);
+      const n = total - (boosterLeft[b] ?? 0) - farmCamps(s, b);
       if (n <= 0) continue;
       const r = poolRecipe(s, b);
       if (r == null) continue;
@@ -967,7 +993,7 @@ try {
       const opts = {
         targetCd: tech.cost, budget: 'reserve', minMoney: Math.ceil(keep / 100), batch: cfg.boosterBatch,
         reserveAcres: 0, fullBatch: false, existingPool: 'keep', maxSpendPerMin: Infinity,
-        runOnly: true, by: `Autopilot: CD for ${bname(s, nt.b)}`,
+        building: B.CAMP, runOnly: true, by: `Autopilot: CD for ${bname(s, nt.b)}`,
       };
       const a = act('booster:cdfarm', `CD booster via CD Farm: farm ${tech.cost - s.cd} CD for ${bname(s, nt.b)} (keeps ${usd(keep)})`);
       a.call = () => { fi.f.start(opts); return !!W.cdFarm?.running; };
@@ -1354,6 +1380,35 @@ try {
   }
 
   function keepPaused(id) { keptPaused.add(+id); billPaused.delete(+id); save(); console.log(`[earlyGame] group ${id} will never be auto-resumed`); }
+
+  // What the next planned steps need, for CD Farm's Auto mode: the power-bill money floor (cents), items it must not
+  // use (floor kits owed to unequipped buildings, an hour of what running groups eat, the next unlock's prototype),
+  // and the next unlock with the CD it costs and whether everything else for it is ready. null until the game state is read.
+  function reserve() {
+    const s = read();
+    if (!s) return null;
+    const items = {};
+    const add = (item, n) => { if (n > 0) items[item] = (items[item] ?? 0) + n; };
+    for (const [item, n] of Object.entries(s.kitOwed)) add(item, n);
+    for (const [item, perMin] of Object.entries(s.eatPerMin)) add(item, Math.ceil(perMin * 60));
+    let next = null;
+    const nt = nextTech(s);
+    const tech = nt && s.catalog.techs.find((t) => t.building === nt.b);
+    if (tech) {
+      const proto = s.bld(nt.b).build_items ?? [];
+      for (const p of proto) add(p.item, p.amount);
+      const gate = nt.gate ? nt.gate(s) : true;
+      const missing = proto.find((p) => s.has(p.item) < p.amount);
+      const note = gate !== true ? gate : tech.requires != null && !s.unlocked(tech.requires) ? `${bname(s, tech.requires)} to be unlocked`
+        : missing ? `the ${iname(s, missing.item)} prototype` : '';
+      next = { b: nt.b, name: bname(s, nt.b), cd: tech.cost, prereqsMet: !note, note };
+    }
+    // What Autopilot's own selling keeps: wood and floor reserves, and the build items of its next two plan builds.
+    add(WOOD, cfg.woodReserve);
+    for (const item of [WOOD, ...Object.keys(s.eatPerMin).map(Number)]) add(item, floorReserve(s, item));
+    for (const t of criticalTargets(s).slice(0, 2)) for (const p of s.bld(t.b).build_items ?? []) add(p.item, p.amount);
+    return { moneyFloor: Math.max(moneyFloor(s), cfg.boosterKeepCash * 100), items, nextTech: next, phase: phaseOf(s) };
+  }
 
   // Pause after the current step (resolves once nothing is being sent), e.g. CD Farm before it
   // takes its baseline of unassigned camps. Holds live in memory only; release() lifts one.
@@ -1814,7 +1869,7 @@ try {
   // ---- load ---------------------------------------------------------------------------
 
   W.earlyGame = {
-    start, stop, plan, status, floors, offline, keepPaused, panel, read, decide, cfg, hold, release, exportCfg, importCfg, resetCfg,
+    start, stop, plan, status, floors, offline, keepPaused, panel, read, decide, cfg, hold, release, reserve, exportCfg, importCfg, resetCfg,
     get stalled() { return stalled; },
     get running() { return running; },
     get active() { return active; },

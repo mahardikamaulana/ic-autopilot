@@ -7,7 +7,9 @@
     "build": "bun build.js",
     "check": "bun build.js --check",
     "release": "bun build.js --bump",
-    "test": "bun build.js --check && bun test/toolkit-test.js && bun test/early-game-sim.js all 44",
+    "test": "bun test/run-all.js --all",
+    "test:fast": "bun test/run-all.js --fast --all",
+    "test:changed": "bun test/run-all.js",
     "ui": "bun test/ui-harness.js check"
   }
 }

@@ -31,8 +31,16 @@ button.primary{background:var(--accent);border-color:transparent;color:#fff}butt
 <main><div class="topbar"><div class="topbar-tools"><span class="tip-anchor"></span></div></div><div style="flex:1;padding:24px">Game content</div></main></div></body></html>`;
 
 const INIT = (data) => {
-  class FakeWS { constructor() { this.readyState = 1; this.sent = []; } addEventListener() {} removeEventListener() {} send(m) { this.sent.push(m); } }
+  class FakeWS {
+    constructor() { this.readyState = 1; this.sent = []; this.l = []; }
+    addEventListener(t, f) { if (t === 'message') this.l.push(f); }
+    removeEventListener(t, f) { this.l = this.l.filter((x) => x !== f); }
+    send(m) { this.sent.push(m); }
+    emit(o) { for (const f of this.l) f({ data: JSON.stringify(o) }); }   // a server frame
+  }
   window.WebSocket = FakeWS;
+  // CD Farm's Auto mode starts itself when the engine needs CD: keep it off in the fake page unless a test turns it on.
+  try { if (!localStorage.getItem('cdFarm.v1')) localStorage.setItem('cdFarm.v1', JSON.stringify({ cfg: { autoStart: false, pace: 'balanced' } })); } catch {}
   const ws = new FakeWS();
   window.__ws = ws;
   const st = { ssi: { corp_id: 1, last_user_mutation_tick: 0 }, items: { 0: 5000000, 24: 1200, 111: 0 }, stock: { 0: {} }, groups: {}, building_pool: { 0: {} }, next_group_id: 0, research: null, research_queue: [], unlocked_buildings: [], land_bought: { 0: 0 } };
@@ -67,17 +75,218 @@ async function load(page) {
 }
 
 let failed = 0;
-const ok = (cond, name, extra = '') => { if (!cond) failed++; console.log((cond ? 'ok   ' : 'FAIL ') + name + (cond ? '' : '  ' + extra)); };
+let lastOk = Date.now();   // TEST_TIMES=1: milliseconds since the previous check, to find the slow ones
+const ok = (cond, name, extra = '') => { if (!cond) failed++; const now = Date.now(); console.log((cond ? 'ok   ' : 'FAIL ') + name + (cond ? '' : '  ' + extra) + (process.env.TEST_TIMES ? '  [+' + (now - lastOk) + ' ms]' : '')); lastOk = now; };
 
-async function checks() {
-  const { browser, page, errors } = await open(1280, 800);
-  await load(page);
-  const q = (sel) => page.$(sel);
-  const attr = (sel, a) => page.$eval(sel, (e, a) => e.getAttribute(a), a);
-  const count = (sel) => page.$$eval(sel, (n) => n.length);
-  const visible = (sel) => page.$eval(sel, (e) => !!(e.offsetWidth || e.offsetHeight));
-  const ui = (k) => page.evaluate((k) => JSON.parse(localStorage.getItem(k) || '{}'), k);
+// CD Farm Auto against a fake server (see below). Takes the page after load().
+const count = (page, sel) => page.$$eval(sel, (e) => e.length);
+// Wait for what the next check looks at, not for a guessed time. A timeout does not throw: the check after it reports the failure.
+const until = (page, fn, arg, ms = 4000) => page.waitForFunction(fn, arg, { timeout: ms, polling: 20 }).catch(() => {});
 
+// CD Farm Auto: a fake server ... (see the comment inside); returns the helpers the Auto groups share.
+async function autoSetup(page) {
+  // CD Farm Auto: a fake server that charges the catalog price, gives CD, refunds half on demolish, sells land, and acknowledges
+  // every command with a mutation Diff ~10 ms later (so round trips are measured). The page's own state is the game state.
+  await page.evaluate(() => {
+    const st = window.__st, ws = window.__ws, cat = window.__fiber.memoizedProps.catalog, B = Object.fromEntries(cat.buildings.map((b) => [b.id, b]));
+    const sent = [];
+    let tick = st.ssi.last_user_mutation_tick;
+    const owned = (b) => (st.building_pool[0][b] ?? 0) + Object.values(st.groups).filter((g) => g.building === b).reduce((a, g) => a + g.count, 0);
+    const price = (b, i) => Math.floor(B[b].cost * (20 + owned(b) + i) / 20);
+    const orig = ws.send;
+    const mode = { ackMs: 10, ignoreBuy: false, ignoreDemolishOnce: false, lateDemolishMs: 0, lateBuyMs: 0, priceMult: 1 };   // knobs for the failure tests
+    ws.send = (m) => {
+      const o = JSON.parse(m); sent.push(o);
+      const pool = st.building_pool[0];
+      if (o.type === 'BuyBuilding') {
+        if (mode.ignoreBuy) return;
+        const applyBuy = () => {
+          let c = 0; for (let i = 0; i < o.amount; i++) c += price(o.building, i);
+          st.items[0] -= Math.round(c * mode.priceMult); pool[o.building] = (pool[o.building] ?? 0) + o.amount; st.items[24] += o.amount * window.idleCore.planner.cdOf(cat, o.building);
+        };
+        if (mode.lateBuyMs) { const ms = mode.lateBuyMs; mode.lateBuyMs = 0; setTimeout(applyBuy, ms); return; }   // delivered after the client gave up
+        applyBuy();
+      } else if (o.type === 'DemolishBuilding') {
+        if (mode.ignoreDemolishOnce) { mode.ignoreDemolishOnce = false; return; }
+        const apply = () => { pool[o.building] = (pool[o.building] ?? 0) - o.amount; st.items[0] += Math.floor(B[o.building].cost / 2) * o.amount; };
+        if (mode.lateDemolishMs) { const ms = mode.lateDemolishMs; mode.lateDemolishMs = 0; setTimeout(apply, ms); return; }   // applied after the client gave up
+        apply();
+      } else if (o.type === 'BuyLand') {
+        for (let i = 0; i < o.amount; i++) { let p = 5000; for (let j = 0; j < st.land_bought[0]; j++) p = Math.floor(p * 41 / 40); st.items[0] -= p; st.land_bought[0]++; }
+      }
+      setTimeout(() => { tick += 4; st.ssi.last_user_mutation_tick = tick; ws.emit({ kind: 'Diff', diff: { ssi: { last_user_mutation_tick: tick } } }); }, mode.ackMs);
+    };
+    window.__fake = { sent, mode, restore: () => { ws.send = orig; } };
+    window.cdFarm._setPacer(window.idleCore.pacer({ medianMs: { before: 3, step: 3, cycle: 3, poll: 10, reconnect: 10 }, minMs: 1, maxMs: 30, cmdsPerMin: 1e6, thinkP: 0 }));
+    window.idleCore.tune.pollMs = 15;   // confirm polling: 100 ms by default, which would dominate a fake server that answers in 10 ms
+  });
+  const reset = (extra = '') => page.evaluate((x) => {
+    const st = window.__st, cf = window.cdFarm;
+    window.__fake.sent.length = 0;
+    Object.assign(window.__fake.mode, { ackMs: 10, ignoreBuy: false, ignoreDemolishOnce: false, lateDemolishMs: 0, lateBuyMs: 0, priceMult: 1 });
+    cf._hist.slopes = { money: 0, cd: 0 }; cf._waitMax(1200); cf._graceMs(2000);
+    for (const k of Object.keys(cf._quarantine)) delete cf._quarantine[k];
+    st.groups = {}; st.building_pool[0] = {}; st.items[0] = 5000000; st.items[24] = 1200; st.land_bought[0] = 0; st.stock[0] = {}; st.unlocked_buildings = [];
+    Object.assign(cf.cfg, { building: 'auto', pace: 'fast', land: 'plan', targetCd: Infinity, reserveAcres: 0, autoStart: false, dryRun: false, timeoutMs: 8000 });
+    cf.reset(); window.idleCore.ledger.clear();
+    if (x) new Function('st', 'cf', x)(st, cf);
+  }, extra);
+  const logLines = () => page.evaluate(() => window.idleCore.ledger.list().map((e) => e.text ?? e.msg ?? JSON.stringify(e)));
+  return { reset, logLines };
+}
+
+async function autoGroup1(page, { reset, logLines }) {
+  // 1. a target: it builds and demolishes starter types only, ends exactly on the need, and says so
+  await reset('cf.cfg.targetCd = 1212;');
+  await page.evaluate(() => window.cdFarm.start({ by: 'test' }));
+  let a1 = await page.evaluate(() => ({ sent: window.__fake.sent, pool: window.__st.building_pool[0], cd: window.__st.items[24], stats: { ...window.cdFarm.stats }, auto: window.cdFarm.cfg.autoStart }));
+  ok(a1.sent.length > 0 && a1.sent.every((m) => ['BuyBuilding', 'DemolishBuilding'].includes(m.type) && [0, 10].includes(m.building)), 'Auto: only Lumber Camp / Farm buys and demolishes when nothing else is unlocked', JSON.stringify(a1.sent.slice(0, 4)));
+  ok(a1.cd === 1212 && Object.values(a1.pool).every((n) => n === 0), 'Auto: stops exactly on the need and leaves nothing in the pool', JSON.stringify([a1.cd, a1.pool, await logLines()]));
+  ok((await logLines()).some((t) => /no CD needed/.test(t)), 'Auto: the log says why it stopped (no CD needed)');
+  ok(a1.stats.cycles >= 1 && Object.keys(a1.stats.byType).every((b) => [0, 10].includes(+b)), 'Auto: per-type stats are kept', JSON.stringify(a1.stats.byType));
+  ok(await page.evaluate(() => window.idleCore.measure.get('rtt').n > 3 && window.idleCore.measure.get('rtt').median > 0), 'Auto: round trips are measured from send to the confirming Diff');
+
+  // 2. a Mine unlocked with Wooden Frames in surplus and no running recipe using them: the Mine is the cheaper CD
+  await reset('st.unlocked_buildings = [1]; st.stock[0] = { 41: 100 }; cf.cfg.targetCd = 1208;');
+  await page.evaluate(() => window.cdFarm.start({ by: 'test' }));
+  const a2 = await page.evaluate(() => window.__fake.sent.filter((m) => m.type === 'BuyBuilding'));
+  ok(a2.length === 1 && a2[0].building === 1 && a2[0].amount === 1, 'Auto: picks the Mine (8 CD) when its Wooden Frames are in surplus', JSON.stringify(a2));
+
+  // 3. items the economy uses are not free: once a running group eats Wooden Frames the Mine is not chosen, and the log says why
+  const flip = await page.evaluate(() => {
+    const st = window.__st, cf = window.cdFarm, cat = window.__fiber.memoizedProps.catalog;
+    const rec = cat.recipes.find((r) => r.inputs.some((i) => i.item === 41));
+    cf.cfg.targetCd = 1300;
+    const before = cf.evaluate().plan.units[0]?.b;
+    st.groups = { 1: { building: cat.buildings.find((b) => b.operations.some((o) => rec.op === o || true)).id, region: 0, count: 1, recipe: rec.id } };
+    return { before, after: cf.evaluate().plan.units[0]?.b, rec: !!rec };
+  });
+  ok(flip.rec && flip.before === 1 && flip.after !== 1, 'Auto: a running group that eats Wooden Frames makes the Mine too dear', JSON.stringify(flip));
+  ok((await logLines()).some((t) => /Wooden Frame is now worth/.test(t)), 'Auto: the log explains the change in item value');
+
+  // 4. dry run sends nothing
+  await reset('cf.cfg.targetCd = 1212;');
+  await page.evaluate(() => window.cdFarm.start({ by: 'test', dryRun: true }));
+  ok(await page.evaluate(() => window.__fake.sent.length) === 0 && (await logLines()).some((t) => /dry run: would build/.test(t)), 'Auto: a dry run logs the plan, sends nothing, and ends by itself');
+  await reset('st.building_pool[0] = { 0: 25 }; cf.cfg.targetCd = 1203; cf._hist.slopes = { money: 5e7, cd: 0 };');
+  await page.evaluate(() => window.cdFarm.start({ by: 'test', dryRun: true }));
+  ok(await page.evaluate(() => window.__fake.sent.length === 0 && window.__st.land_bought[0] === 0), 'Auto: a dry run never buys land');
+
+  // 5. no free acre: it buys land (inside Autopilot's land wall, income known) and then builds
+  await reset('st.building_pool[0] = { 0: 25 }; cf.cfg.targetCd = 1203; cf._hist.slopes = { money: 5e7, cd: 0 }; cf._hist.at = Date.now() + 120000;');
+  await page.evaluate(() => window.cdFarm.start({ by: 'test' }));
+  const a5 = await page.evaluate(() => ({ sent: window.__fake.sent.map((m) => m.type), land: window.__st.land_bought[0], pool: window.__st.building_pool[0][0] }));
+  ok(a5.sent[0] === 'BuyLand' && a5.land >= 1 && a5.sent.includes('BuyBuilding') && a5.pool === 25, 'Auto: with no free acre it buys land first, then builds, and the baseline camps stay', JSON.stringify(a5));
+  await reset('st.building_pool[0] = { 0: 25 }; cf.cfg.targetCd = 1203; cf.cfg.land = "off"; cf._hist.slopes = { money: 5e7, cd: 0 }; cf._hist.at = Date.now() + 120000;');
+  await page.evaluate(() => window.cdFarm.start({ by: 'test' }));
+  ok(await page.evaluate(() => window.__fake.sent.length === 0 && window.__st.land_bought[0] === 0), 'Auto: Buy land = Off never buys land');
+
+  // 6. pressing Stop on an Auto run switches Auto off; the controller starts it again when it is switched on
+  await reset('cf.cfg.targetCd = 1260;');
+  await page.evaluate(() => { setTimeout(() => window.cdFarm.stop(), 400); return window.cdFarm.start({ by: 'test' }); });
+  ok(await page.evaluate(() => window.cdFarm.cfg.autoStart) === false, 'Auto: stopping a run switches Auto off');
+  await reset('cf.cfg.targetCd = 1203; cf.cfg.autoStart = true; cf._skipWaits();');
+  await page.waitForFunction(() => window.cdFarm.running || window.cdFarm.stats.cycles > 0, null, { timeout: 40000 });
+  await page.waitForFunction(() => !window.cdFarm.running && !window.cdFarm.active, null, { timeout: 20000 });
+  ok(await page.evaluate(() => window.__st.items[24] >= 1203), 'Auto: with Run by itself on, the controller starts a run when CD is needed');
+}
+
+async function autoGroup2(page, { reset, logLines }) {
+  // 7. measurement: the round trip follows the server's latency (send to the confirming Diff, sub-millisecond clock)
+  await reset('cf.cfg.targetCd = 1210; window.idleCore.measure.get("rtt").load({ values: [] }); window.__fake.mode.ackMs = 40;');
+  await page.evaluate(() => window.cdFarm.start({ by: 'test' }));
+  const rtt = await page.evaluate(() => ({ n: window.idleCore.measure.get('rtt').n, med: window.idleCore.measure.get('rtt').median, t: window.cdFarm.evaluate().t }));
+  ok(rtt.n >= 5 && rtt.med > 38 && rtt.med < 52, 'Auto: with a 40 ms server the measured round trip is about 40 ms', JSON.stringify(rtt));
+
+  // 8. a server that ignores Buy: three unconfirmed commands open the breaker; it cleans up, waits, and Stop is honoured
+  await reset('cf.cfg.targetCd = 1260; cf.cfg.timeoutMs = 250; window.__fake.mode.ignoreBuy = true;');
+  await page.evaluate(() => { window.__run = window.cdFarm.start({ by: 'test' }); });
+  await page.waitForFunction(() => window.idleCore.ledger.list().some((e) => /unconfirmed commands in a row/.test(e.text ?? e.msg ?? '')), null, { timeout: 30000 });
+  ok(await page.evaluate(() => Object.values(window.__st.building_pool[0]).every((n) => n === 0) && /breaker/.test(window.cdFarm._debug().phase)), 'Auto: three unconfirmed commands open the breaker, nothing is left in the pool');
+  await page.evaluate(() => window.cdFarm.stop());
+  await page.waitForFunction(() => !window.cdFarm.running && !window.cdFarm.active, null, { timeout: 20000 });
+
+  // 9. prices that do not match the catalog: skip that type, a second mismatch stops with an error, and the pool is cleaned
+  await reset('cf.cfg.targetCd = 1260; cf._graceMs(300); window.__fake.mode.priceMult = 2;');
+  await page.evaluate(() => window.cdFarm.start({ by: 'test' }));
+  if (process.env.TEST_TIMES) console.log(JSON.stringify(await page.evaluate(() => window.idleCore.ledger.list().map((e) => [e.t % 100000, e.text.slice(0, 70)]))));
+  const a9 = await page.evaluate(() => ({ pool: window.__st.building_pool[0], log: window.idleCore.ledger.list().map((e) => e.text ?? e.msg ?? ''), last: window.__fake.sent.at(-1)?.type }));
+  ok(a9.log.some((t) => /did not match the catalog twice/.test(t) || /stopped: error: prices or CD/.test(t)) && Object.values(a9.pool).every((n) => n === 0) && a9.last === 'DemolishBuilding', 'Auto: a second price mismatch stops the run with an error and takes the batch down', JSON.stringify(a9));
+
+  // 10. a lost Demolish is retried once, nothing is left behind
+  await reset('cf.cfg.targetCd = 1203; cf.cfg.timeoutMs = 300; cf._graceMs(300); window.__fake.mode.ignoreDemolishOnce = true;');
+  await page.evaluate(() => window.cdFarm.start({ by: 'test' }));
+  const a10 = await page.evaluate(() => ({ pool: window.__st.building_pool[0], types: window.__fake.sent.map((m) => m.type).join() }));
+  ok(Object.values(a10.pool).every((n) => n === 0) && /DemolishBuilding,DemolishBuilding/.test(a10.types), 'Auto: a Demolish the server ignored is retried and the pool ends empty', JSON.stringify(a10));
+
+  // 11. what Autopilot reserves for Auto: money floor, items, and the next unlock with its CD cost and readiness
+  const rsv = await page.evaluate(() => window.earlyGame.reserve());
+  ok(rsv && typeof rsv.moneyFloor === 'number' && typeof rsv.items === 'object' && rsv.nextTech?.b === 4 && rsv.nextTech.cd === 5 && rsv.nextTech.prereqsMet === false, 'Autopilot: reserve() names the next unlock (Sawmill, 5 CD) and that its prototype is missing', JSON.stringify(rsv));
+
+  // 12. a Demolish the server applies after the client gave up: the retry must wait, then find nothing left to take
+  await reset('st.building_pool[0] = { 0: 25 }; cf.cfg.targetCd = 1203; cf.cfg.timeoutMs = 300; cf._graceMs(500); window.__fake.mode.lateDemolishMs = 500;');
+  await page.evaluate(() => window.cdFarm.start({ by: 'test' }));
+  const a12 = await page.evaluate(() => ({ camps: window.__st.building_pool[0][0], dem: window.__fake.sent.filter((m) => m.type === 'DemolishBuilding').length, buys: window.__fake.sent.filter((m) => m.type === 'BuyBuilding').length }));
+  ok(a12.camps === 25 && a12.dem === a12.buys, 'Auto: a late-applied Demolish is not retried on top of your own buildings', JSON.stringify(a12));
+}
+
+async function autoGroup3(page, { reset, logLines }) {
+  // 13. every type quarantined: the controller does not start a run that can only spin
+  await reset('cf.cfg.targetCd = 1260; cf.cfg.autoStart = true; cf._skipWaits(); cf._quarantine[0] = Date.now() + 1800000; cf._quarantine[10] = Date.now() + 1800000;');
+  await page.evaluate(async () => { for (let i = 0; i < 3; i++) await window.cdFarm._tick(); });
+  ok(await page.evaluate(() => !window.cdFarm.running && window.__fake.sent.length === 0), 'Auto: with every type quarantined the controller stays idle');
+
+  // 14b. a Buy the server delivers after the timeout: it is found and demolished, and the user's own camps stay
+  await reset('st.building_pool[0] = { 0: 25 }; cf.cfg.targetCd = 1260; cf.cfg.timeoutMs = 250; window.__fake.mode.lateBuyMs = 600;');
+  await page.evaluate(() => { setTimeout(() => window.cdFarm.stop(), 2000); return window.cdFarm.start({ by: 'test' }); });
+  const a14 = await page.evaluate(() => ({ camps: window.__st.building_pool[0][0], farms: window.__st.building_pool[0][10] ?? 0 }));
+  ok(a14.camps === 25 && a14.farms === 0, 'Auto: a Buy delivered after the timeout is demolished, your own camps stay', JSON.stringify(a14));
+
+  // 14. a late Buy: the unit that arrives after the timeout is taken down, not left in the pool
+  await reset('cf.cfg.targetCd = 1260; cf.cfg.timeoutMs = 250; window.__fake.mode.ackMs = 600;');
+  await page.evaluate(() => { setTimeout(() => window.cdFarm.stop(), 1500); return window.cdFarm.start({ by: 'test' }); });
+  ok(await page.evaluate(() => Object.values(window.__st.building_pool[0]).every((n) => n === 0)), 'Auto: nothing is left in the pool after a stop with late replies');
+
+  // 15. the default path: no Target CD, Autopilot live. The controller starts by itself on Autopilot's next-tech need,
+  // holds Autopilot for the run, stops on the tech cost, and lets Autopilot go.
+  await page.evaluate(() => {
+    const e = window.earlyGame, orig = { busy: Object.getOwnPropertyDescriptor(e, 'busy'), reserve: e.reserve, hold: e.hold, release: e.release };
+    window.__egOrig = orig; window.__holds = { hold: 0, release: 0 };
+    Object.defineProperty(e, 'busy', { get: () => true, configurable: true });
+    e.reserve = () => ({ moneyFloor: 0, items: {}, nextTech: { b: 4, name: 'Sawmill', cd: 1208, prereqsMet: true, note: '' }, phase: 'early' });
+    e.hold = async (w) => { window.__holds.hold++; return orig.hold.call(e, w); };
+    e.release = (w) => { window.__holds.release++; return orig.release.call(e, w); };
+    return true;
+  });
+  await reset('cf.cfg.autoStart = true; cf._skipWaits();');
+  await page.waitForFunction(() => window.__st.items[24] >= 1208 && !window.cdFarm.running && !window.cdFarm.active, null, { timeout: 60000 });
+  const a15 = await page.evaluate(() => ({ cd: window.__st.items[24], pool: window.__st.building_pool[0], holds: window.__holds, log: window.idleCore.ledger.list().map((e) => e.text ?? e.msg ?? '') }));
+  ok(a15.cd === 1208 && Object.values(a15.pool).every((n) => n === 0) && a15.holds.hold >= 1 && a15.holds.hold === a15.holds.release && a15.log.some((t) => /no CD needed/.test(t)), 'Auto: with Autopilot live and no Target CD it starts by itself, stops on the next tech cost, and releases Autopilot', JSON.stringify(a15));
+  await page.evaluate(() => { const e = window.earlyGame, o = window.__egOrig; if (o.busy) Object.defineProperty(e, 'busy', o.busy); else delete e.busy; e.reserve = o.reserve; e.hold = o.hold; e.release = o.release; window.cdFarm.cfg.autoStart = false; });
+
+  // 16. Autopilot as a dry run is not live: Auto stays idle
+  await reset('cf.cfg.autoStart = true; cf._skipWaits();');
+  await page.evaluate(async () => { for (let i = 0; i < 3; i++) await window.cdFarm._tick(); });
+  ok(await page.evaluate(() => !window.cdFarm.running && window.__fake.sent.length === 0), 'Auto: with Autopilot not live (dry run) and no Target CD it sends nothing');
+
+  await page.evaluate(() => { window.__fake.restore(); const st = window.__st; st.groups = {}; st.building_pool[0] = {}; st.items[0] = 5000000; st.items[24] = 1200; st.land_bought[0] = 0; st.stock[0] = {}; st.unlocked_buildings = []; Object.assign(window.cdFarm.cfg, { targetCd: Infinity, autoStart: false, pace: 'balanced', land: 'plan', reserveAcres: 10 }); window.cdFarm.reset(); window.cdFarm._waitMax(600000); });
+}
+
+// Helpers every main-page section uses.
+function mainCtx(page) {
+  return {
+    q: (sel) => page.$(sel),
+    attr: (sel, a) => page.$eval(sel, (e, a) => e.getAttribute(a), a),
+    count: (sel) => page.$$eval(sel, (n) => n.length),
+    visible: (sel) => page.$eval(sel, (e) => !!(e.offsetWidth || e.offsetHeight)),
+    ui: (k) => page.evaluate((k) => JSON.parse(localStorage.getItem(k) || '{}'), k),
+  };
+}
+
+
+// ---- shards of check ---------------------------------------------------------------------------------
+// Each shard is independent (own browser page, own fake game) so the runner can run them side by side.
+async function sectionChrome(page, { q, attr, count, visible, ui }) {
   // chrome
   ok(await count('.egp-tab') === 1 && await count('.cdf-tab') === 1 && await count('.lab-tab') === 1 && await count('.egp-chip') === 1 && await count('.cdf-chip') === 1 && await count('.lab-chip') === 1, 'sidebar tabs and top-bar chips mounted once each');
   const navOrder = (await page.$$eval('.primary-navigation .page-tab', (n) => n.map((e) => (e.querySelector('.nav-text') || e).textContent.trim().split(/\s/)[0]))).join();
@@ -87,16 +296,16 @@ async function checks() {
 
   // React re-renders the sidebar and top bar inside #root: the tab and chip must come back, once each, with the right label
   await page.evaluate(() => { document.querySelector('.egp-tab').remove(); document.querySelector('.cdf-chip').remove(); });
-  await page.waitForTimeout(300);
+  await until(page, () => document.querySelectorAll('.egp-tab').length === 1 && document.querySelectorAll('.cdf-chip').length === 1);
   ok(await count('.egp-tab') === 1 && await count('.cdf-chip') === 1, 'removed sidebar tab and chip are re-inserted exactly once');
   ok((await page.$eval('.cdf-chip', (e) => e.textContent.trim())).endsWith('CD'), 'and come back already showing their current text');
 
   // No repaint loop: with a quiet page the chrome must not keep scheduling frames (the observer must not trigger itself)
-  await page.waitForTimeout(1500);
+  await page.waitForTimeout(300);
   const raf0 = await page.evaluate(() => window.__raf);
-  await page.waitForTimeout(2500);
+  await page.waitForTimeout(700);
   const raf1 = await page.evaluate(() => window.__raf);
-  ok(raf1 - raf0 < 20, 'chrome does not re-trigger its own MutationObserver (frames requested in 2.5 s)', String(raf1 - raf0));
+  ok(raf1 - raf0 < 12, 'chrome does not re-trigger its own MutationObserver (frames requested in 0.7 s: a loop asks for ~40)', String(raf1 - raf0));
 
   // Autopilot opens by default: start from both closed
   ok(await count('.egp-panel') === 1 && await count('.cdf-panel') === 0, 'Autopilot opens by default, CD Farm does not');
@@ -157,7 +366,7 @@ async function checks() {
   // log tab: filter + clear with undo
   await page.evaluate(() => { const L = window.idleCore.ledger; L.add('AP', 'action', 'built a thing'); L.add('AP', 'fail', 'it broke'); L.add('CD', 'alert', 'heads up'); });
   await page.click('.egp-panel [id$="-t-log"]');
-  await page.waitForTimeout(1200);
+  await until(page, () => document.querySelectorAll('.egp-panel .idc-ll').length === 3);
   ok(await count('.egp-panel .idc-ll') === 3, 'log shows the ledger lines');
   await page.click('.egp-panel .idc-quicks button:has-text("Problems")');
   ok(await count('.egp-panel .idc-ll') === 2 && await count('.egp-panel .idc-ll.k-fail') === 1, 'Problems filter keeps fail + alert only');
@@ -167,26 +376,26 @@ async function checks() {
   await page.click('.egp-panel button:has-text("Clear log")');
   ok(await count('.egp-panel .idc-ll') === 0, 'Clear log empties the view');
   await page.click('.idc-toast:last-child button');
-  await page.waitForTimeout(1200);
+  await until(page, () => document.querySelectorAll('.egp-panel .idc-ll').length === 3);
   ok(await count('.egp-panel .idc-ll') === 3, 'Undo restores the log');
 
   // log DOM is left alone when nothing new arrived (selection survives), and Undo keeps lines logged meanwhile
   await page.evaluate(() => { window.__row = document.querySelector('.egp-panel .idc-ll'); });
-  await page.waitForTimeout(1300);
+  await page.waitForTimeout(1100);   // one render tick (1 s) must pass for this to mean anything
   ok(await page.evaluate(() => window.__row === document.querySelector('.egp-panel .idc-ll')), 'log rows are not rebuilt while nothing new is logged');
   ok(await page.evaluate(() => !document.querySelector('.egp-panel [role=log]')), 'log list is not a live region');
   await page.click('.egp-panel button:has-text("Clear log")');
   await page.evaluate(() => window.idleCore.ledger.add('AP', 'info', 'logged during the undo window'));
   await page.click('.idc-toast:last-child button');
-  await page.waitForTimeout(1300);
+  await until(page, () => document.querySelectorAll('.egp-panel .idc-ll').length === 4);
   ok(await count('.egp-panel .idc-ll') === 4, 'Undo of Clear log keeps lines logged in between', String(await count('.egp-panel .idc-ll')));
 
   // unseen-problem dot on the Log tab while another tab is showing
   await page.click('.egp-panel [id$="-t-status"]');
   await page.evaluate(() => window.idleCore.ledger.add('AP', 'fail', 'new failure'));
-  await page.waitForTimeout(1200);
+  await until(page, () => { const d = document.querySelector('.egp-panel [id$="-t-log"] .idc-tabdot'); return d && !d.hidden; });
   ok(await page.$eval('.egp-panel [id$="-t-log"] .idc-tabdot', (e) => !e.hidden), 'Log tab flags a new problem');
-  await page.click('.egp-panel [id$="-t-log"]'); await page.waitForTimeout(1200);
+  await page.click('.egp-panel [id$="-t-log"]'); await until(page, () => document.querySelector('.egp-panel [id$="-t-log"] .idc-tabdot')?.hidden);
   ok(await page.$eval('.egp-panel [id$="-t-log"] .idc-tabdot', (e) => e.hidden), 'and clears it once viewed');
 
   // toasts stack to 3
@@ -235,27 +444,70 @@ async function checks() {
   // dry run start/stop through the footer button; pill appears
   await page.click('.egp-chip');
   await page.click('.egp-panel .idc-foot .primary');
-  await page.waitForTimeout(1500);
+  await until(page, () => window.earlyGame.running && document.querySelector('.egp-tab .idc-pill'));
   ok(await page.evaluate(() => window.earlyGame.running), 'Start dry run starts');
   ok(await visible('.egp-tab .idc-pill'), 'sidebar pill shows while running');
   await page.click('.egp-panel .idc-foot .primary');
-  await page.waitForTimeout(800);
+  await until(page, () => !window.earlyGame.running);
   ok(!(await page.evaluate(() => window.earlyGame.running)), 'Stop stops');
+}
 
+async function sectionCdFarm(page, { q, attr, count, visible, ui }) {
   // CD Farm: modified + reset, advanced persisted
   await page.click('.cdf-chip');
   await page.click('.cdf-panel [id$="-t-settings"]');
+  ok(await visible('.cdf-panel input[aria-label="Extra money floor"]') && !(await visible('.cdf-panel input[aria-label="Money floor"]')), 'CD Farm: Auto is the default and shows the Auto settings, not the budget modes');
+  await page.click('.cdf-panel .idc-seg button:has-text("Lumber Camp")');
+  ok(await page.evaluate(() => window.cdFarm.cfg.building) === 0, 'CD Farm: Building seg picks Lumber Camp');
   await page.fill('.cdf-panel input[aria-label="Money floor"]', '75k');
-  ok(await count('.cdf-panel .idc-rst:not([hidden])') === 1, 'CD Farm: changed floor shows a reset button');
-  await page.click('.cdf-panel .idc-field .idc-rst:not([hidden])');
+  const floorRst = '.cdf-panel .idc-field:has(input[aria-label="Money floor"]) .idc-rst:not([hidden])';
+  ok(await count(floorRst) === 1, 'CD Farm: changed floor shows a reset button');
+  await page.click(floorRst);
   ok(await page.evaluate(() => window.cdFarm.cfg.minMoney) === 30000, 'CD Farm: reset restores the default floor');
   await page.click('.cdf-panel .idc-seg button:has-text("Income only")');
   ok(await page.evaluate(() => window.cdFarm.cfg.budget) === 'income', 'CD Farm: seg picks a budget mode');
-  await page.focus('.cdf-panel .idc-seg button[aria-checked=true]');
+  await page.focus('.cdf-panel .idc-seg:has(button:has-text("Income only")) button[aria-checked=true]');
   await page.keyboard.press('ArrowRight');
   ok(await page.evaluate(() => window.cdFarm.cfg.budget) === 'reserve', 'CD Farm: arrow key moves the seg');
   await page.evaluate(() => { window.cdFarm.cfg.budget = 'reserve'; });
+  await page.click('.cdf-panel .idc-seg button:has-text("Farm")');
+  ok(await page.evaluate(() => window.cdFarm.cfg.building === 10 && window.cdFarm.building === 10), 'CD Farm: Building seg picks Farm');
+  ok(await count('.cdf-panel .idc-rst:not([hidden])') === 1, 'CD Farm: a changed building shows a reset button');
+  ok((await page.$eval('.cdf-panel', (e) => e.textContent)).includes('Builds up to 10 farms'), 'CD Farm: the plan names the chosen building');
+  await page.click('.cdf-panel .idc-field .idc-rst:not([hidden])');
+  ok(await page.evaluate(() => window.cdFarm.cfg.building) === 'auto', 'CD Farm: reset restores Auto');
+  await page.evaluate(() => window.cdFarm.panel(false)); // the taller panel would sit over the Lab chip
 
+  // CD Farm engine: with Building = Farm it buys and demolishes Farms only, on the Farm's own price curve.
+  const farm = await page.evaluate(async () => {
+    const st = window.__st, ws = window.__ws, cf = window.cdFarm, sent = [], orig = ws.send, keep = { ...cf.cfg };
+    st.groups = { 1: { building: 10, region: 0, count: 4, recipe: 0 } };   // 4 Farms at work: they raise the price of the next one
+    st.items[0] = 5000000; st.building_pool[0] = { 0: 2 };                 // and 2 idle Lumber Camps the run must not touch
+    ws.send = (m) => {
+      const o = JSON.parse(m); sent.push(o);
+      const pool = st.building_pool[o.region];
+      if (o.type === 'BuyBuilding') { pool[o.building] = (pool[o.building] ?? 0) + o.amount; st.items[24] += o.amount; }
+      if (o.type === 'DemolishBuilding') pool[o.building] = (pool[o.building] ?? 0) - o.amount;
+      st.ssi.last_user_mutation_tick += 4;
+    };
+    cf._setPacer(window.idleCore.pacer({ medianMs: { before: 3, step: 3, cycle: 3, poll: 10, reconnect: 10 }, minMs: 1, maxMs: 30, cmdsPerMin: 1e6, thinkP: 0 }));
+    await cf.start({ building: 10, batch: 3, cycles: 2, fullBatch: true, budget: 'floor', minMoney: 1000, reserveAcres: 0 });
+    ws.send = orig;
+    const out = { sent, stats: { ...cf.stats }, pool: { ...st.building_pool[0] }, runBuilding: cf.stats.building };
+    Object.assign(cf.cfg, keep); cf.cfg.cycles = Infinity; cf.cfg.maxSpend = Infinity;
+    out.cfgBuilding = cf.cfg.building;
+    st.groups = {}; st.building_pool[0] = {}; st.items[24] = 1200;
+    cf.reset();
+    return out;
+  });
+  ok(farm.sent.length === 4 && farm.sent.every((m) => m.building === 10), 'CD Farm: Building = Farm sends only Farm (id 10) buys and demolishes', JSON.stringify(farm.sent));
+  ok(farm.sent.map((m) => m.type).join() === 'BuyBuilding,DemolishBuilding,BuyBuilding,DemolishBuilding', 'CD Farm: each cycle buys a batch, then demolishes it', farm.sent.map((m) => m.type).join());
+  ok(farm.pool[10] === 0 && farm.pool[0] === 2, 'CD Farm: the Farm batch is gone and the idle Lumber Camps were left alone', JSON.stringify(farm.pool));
+  ok(Math.abs(farm.stats.spent - 2 * 41 * (24 + 25 + 26) / 20) < 0.01, 'CD Farm: price follows the Farms owned (4 at work), not the camps', String(farm.stats.spent));
+  ok(farm.runBuilding === 10 && farm.cfgBuilding === 'auto', 'CD Farm: the run kept its building; the setting is back to Auto afterwards', JSON.stringify([farm.runBuilding, farm.cfgBuilding]));
+}
+
+async function sectionLab(page, { q, attr, count, visible, ui }) {
   // Lab runner: panel, status, settings, custom list editor, dry run / live start. The game is fake: nothing leaves this page.
   ok(await page.evaluate(() => window.labRunner.cfg.dryRun === true && !window.labRunner.running) && await count('.lab-panel') === 0, 'Lab: starts as a dry run, not running, panel closed');
   await page.evaluate(() => {   // a Heartland Lab; groups making Planks, Iron Frame and Wood; 36,000 MD, 3 RD
@@ -267,7 +519,7 @@ async function checks() {
   await page.click('.lab-chip');
   ok(await visible('.lab-panel') && await count('.lab-panel [role=tab]') === 3 && await count('.lab-panel [role=tabpanel]') === 3, 'Lab: the chip opens a panel with three tabs');
   ok(await attr('.lab-chip', 'aria-expanded') === 'true' && await attr('.lab-tab', 'aria-expanded') === 'true', 'Lab: chip and tab report expanded');
-  await page.waitForTimeout(1200);
+  await until(page, () => document.querySelectorAll('.lab-panel [id$="-p-status"] .idc-row').length > 2);
   const rowsOf = () => page.$$eval('.lab-panel [id$="-p-status"] .idc-row', (r) => r.map((e) => e.textContent));
   let rows = await rowsOf();
   ok((await page.$eval('.lab-chip', (e) => e.textContent.trim())) === 'Lab 0/1' && (await page.$eval('.lab-panel .idc-big', (e) => e.textContent)) === '0 of 1', 'Lab: chip and hero count busy Labs');
@@ -275,7 +527,7 @@ async function checks() {
   ok(rows.includes('MD36,000 · keeps 5,000') && rows.includes('RD3') && rows.includes('Results waiting0'), 'Lab: Status shows MD, RD and waiting results', JSON.stringify(rows));
   ok((await page.$eval('.lab-panel .idc-badge', (e) => e.textContent)) === 'Dry run', 'Lab: header badge says Dry run');
   await page.evaluate(() => { window.__st.mfg_research = { 0: { product: 9, context: 0, tier: 0, remaining: 3840 } }; window.__st.pending_results = [{ tick: 5, product: 41, context: 1, tier: 1, reward: 'x' }]; });
-  await page.waitForTimeout(1200);
+  await until(page, () => [...document.querySelectorAll('.lab-panel [id$="-p-status"] .idc-row')].some((e) => /32m left/.test(e.textContent)));
   rows = await rowsOf();
   ok(rows.includes('HeartlandPlanks · Process study · Tier I · 32m left') && rows.includes('Results waiting1') && (await page.$eval('.lab-panel .idc-big', (e) => e.textContent)) === '1 of 1', 'Lab: a running project shows product, focus, tier and time left', JSON.stringify(rows));
   await page.evaluate(() => { window.__st.mfg_research = {}; window.__st.pending_results = []; });
@@ -293,7 +545,7 @@ async function checks() {
   await page.selectOption('.lab-panel select[aria-label="Focus, entry 2"]', '2');
   await page.selectOption('.lab-panel select[aria-label="Tier, entry 2"]', '3');
   await page.selectOption('.lab-panel select[aria-label="Product, entry 2"]', { label: 'Planks' });
-  await page.waitForTimeout(1300);
+  await page.waitForTimeout(1100);   // one render tick (1 s): the next check is that it did not rebuild the select under you
   const l2 = await page.evaluate(() => window.labRunner.cfg.list);
   ok(JSON.stringify(l2[1]) === JSON.stringify({ product: 9, focus: 2, tier: 3 }) && JSON.stringify(l2[0]) === JSON.stringify(l1[0]), 'Lab: each row\'s selects edit that entry only', JSON.stringify(l2));
   ok(await page.evaluate(() => window.__sel === document.querySelector('.lab-panel select[aria-label="Focus, entry 2"]')), 'Lab: rows are not rebuilt while you choose in a select');
@@ -343,11 +595,12 @@ async function checks() {
   await page.check('.lab-panel .idc-check:has-text("Dry run") input');
   const before = await page.evaluate(() => window.__ws.sent.length);
   await page.click(main);
-  await page.waitForTimeout(1500);
+  await until(page, () => window.labRunner.running && document.querySelector('.lab-tab .idc-pill')?.textContent === 'Dry run');
+  await page.waitForTimeout(150);   // a dry run that sent something would have by now
   ok(await page.evaluate(() => window.labRunner.running) && (await page.$eval('.lab-tab .idc-pill', (e) => e.textContent)) === 'Dry run' && (await page.evaluate(() => window.__ws.sent.length)) === before, 'Lab: a dry run runs and sends nothing');
   await page.click('.lab-panel [id$="-t-log"]');
   await page.evaluate(() => window.idleCore.ledger.add('CD', 'action', 'a farm line, not the Lab\'s'));
-  await page.waitForTimeout(1200);
+  await until(page, () => [...document.querySelectorAll('.lab-panel .idc-ll')].some((e) => /started \(live\)/.test(e.textContent)));
   const lines = await page.$$eval('.lab-panel .idc-ll', (r) => r.map((e) => [e.querySelector('.idc-tag').textContent, e.textContent]));
   ok(lines.length > 0 && lines.every(([tag]) => tag === 'LAB') && lines.some(([, t]) => /would send/.test(t)) && lines.some(([, t]) => /started \(live\)/.test(t)), 'Lab: the Log tab shows Lab lines only, dry-run and live', JSON.stringify(lines));
   await page.click(main);
@@ -356,7 +609,7 @@ async function checks() {
   // Reset settings (two-step, with Undo) and Escape
   await page.click('.lab-panel [id$="-t-settings"]');
   await page.evaluate(() => { window.labRunner.cfg.mdReserve = 7777; });
-  await page.waitForTimeout(1200);
+  await page.waitForTimeout(1100);   // one render tick (1 s) shows the new value in the panel
   const labReset = '.lab-panel [id$="-p-settings"] button.danger';
   await page.click(labReset);
   ok(await page.$eval(labReset, (e) => e.classList.contains('armed')) && (await page.evaluate(() => window.labRunner.cfg.mdReserve)) === 7777, 'Lab: Reset settings arms on the first click');
@@ -368,7 +621,9 @@ async function checks() {
   await page.focus('.lab-panel .idc-tabbtn[aria-selected=true]');
   await page.keyboard.press('Escape');
   ok(await count('.lab-panel') === 0 && await page.evaluate(() => document.activeElement === document.querySelector('.lab-chip')), 'Lab: Escape closes the panel and focus returns to the chip');
+}
 
+async function sectionNarrow() {
   // header chips switch menus: opening a panel closes the other panels; clicking the open one closes it
   {
     const n = await open(760, 700);
@@ -389,7 +644,9 @@ async function checks() {
     ok(n.errors.length === 0, 'no errors in the narrow window', JSON.stringify(n.errors));
     await n.browser.close();
   }
+}
 
+async function sectionMotion() {
   // motion on (the checks above run with reduced motion): panels fade in, closed ones leave a fading copy, minimize animates height
   {
     const n = await open(1280, 800, true);
@@ -405,12 +662,14 @@ async function checks() {
     const live = await n.page.$$eval('.idc-panel:not(.idc-ghost)', (p) => p.length);
     const ghosts = await n.page.$$eval('.idc-ghost', (p) => p.length);
     ok(live === 1 && ghosts === 1, 'motion: switching leaves one live panel and one fading copy', live + '/' + ghosts);
-    await n.page.waitForTimeout(700);
+    await until(n.page, () => document.querySelectorAll('.idc-ghost').length === 0, null, 2000);
     ok(await n.page.$$eval('.idc-ghost', (p) => p.length) === 0 && await n.page.$$eval('.idc-panel', (p) => p.length) === 1, 'motion: the fading copy is removed afterwards');
     ok(n.errors.length === 0, 'no errors with motion on', JSON.stringify(n.errors));
     await n.browser.close();
   }
+}
 
+async function sectionUtilities(page, { q, attr, count, visible, ui }) {
   // Auto utilities: the "Auto" switch sits on the Load tile (power) and the Supply tile (water) of the Utilities pages
   {
     const gridHtml = (labels) => '<div class="stat-grid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px">' + labels.map((l) => '<div class="tile" style="background:var(--surface-2);padding:12px;border-radius:8px"><div class="label">' + l + '</div><div class="value">0</div></div>').join('') + '</div>';
@@ -456,17 +715,47 @@ async function checks() {
     ok(true, 'Auto utilities: leaving the Utilities page removes the switch');
     await page.evaluate(() => window.autoUtil.stop());
   }
+}
 
+async function sectionUnload(page, { q, attr, count, visible, ui }) {
   // unload leaves nothing behind
   await page.evaluate(() => { window.earlyGame._unload(); window.cdFarm._unload(); window.labRunner._unload(); window.autoUtil._unload(); window.idleCore._unload(); });
-  await page.waitForTimeout(300);
+  await until(page, () => !document.querySelector('.idc-panel, .idc-chip, .idc-tab, .idc-toasts, #idc-style, .au-sw, .au-note, #au-style'));
   ok(await page.evaluate(() => !document.querySelector('.idc-panel, .idc-chip, .idc-tab, .idc-toasts, #idc-style, .au-sw, .au-note, #au-style')), 'unload removes panels, chrome, toasts and the stylesheet');
+}
 
-  ok(errors.length === 0, 'no console / page errors', JSON.stringify(errors));
-  await browser.close();
+const SHARDS = {
+  chrome: { main: [sectionChrome] },
+  cdfarm: { main: [sectionCdFarm] },
+  lab: { main: [sectionLab] },
+  utilities: { main: [sectionUtilities, sectionUnload] },
+  narrow: { own: sectionNarrow },
+  motion: { own: sectionMotion },
+  'auto-a': { auto: autoGroup1 },
+  'auto-b': { auto: autoGroup2 },
+  'auto-c': { auto: autoGroup3 },
+};
+
+async function runShard(name) {
+  const sh = SHARDS[name];
+  if (!sh) throw new Error('unknown shard ' + name + ' (one of ' + Object.keys(SHARDS).join(', ') + ')');
+  if (sh.own) return sh.own();
+  const { browser, page, errors } = await open(1280, 800);
+  try {
+    await load(page);
+    if (sh.auto) await sh.auto(page, await autoSetup(page));
+    else { const h = mainCtx(page); for (const fn of sh.main) await fn(page, h); }
+    ok(errors.length === 0, 'no console / page errors (' + name + ')', JSON.stringify(errors));
+  } finally { await browser.close(); }
+}
+
+// Every shard one after another: the old "check", for a quick look without the runner.
+async function checks(only) {
+  for (const name of Object.keys(SHARDS).filter((n) => !only || n === only || n.startsWith(only + '-'))) await runShard(name);
   console.log(failed ? '\n' + failed + ' FAILED' : '\nall passed');
   process.exit(failed ? 1 : 0);
 }
+
 
 
 // Lab panel shots: its own pass, since its default place is CD Farm's (the CD Farm card would sit on top of it).
@@ -501,7 +790,9 @@ async function shotsLab(page, out) {
 
 const mode = process.argv[2];
 (async () => {
-  if (mode === 'check') return checks();
+  if (mode === 'check') return checks(process.argv[3]);   // bun test/ui-harness.js check [shard]
+  if (mode === 'auto') return checks('auto');                // the three Auto shards
+
   if (mode === 'shots') {
     const out = process.argv[3]; const w = +process.argv[4] || 1280, hgt = +process.argv[5] || 800;
     fs.mkdirSync(out, { recursive: true });
