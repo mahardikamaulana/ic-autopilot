@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IC Autopilot
 // @namespace    idlecorp-toolkit
-// @version      2.8.4
+// @version      2.8.5
 // @author       XPARAD0X
 // @description  Early-game Autopilot, CD Farm (Construction Data by building and demolishing buildings; Auto picks the cheapest source itself), Lab runner (keeps the Manufacturing Labs researching), Auto ship (an "Auto ship" button on every distributor bid) and Auto utilities (an "Auto" switch that keeps the power and water subscriptions at what the groups need) for IdleCorp, each with a panel, menu or switch in the game UI.
 // @homepageURL  https://github.com/mahardikamaulana/ic-autopilot
@@ -7897,7 +7897,7 @@ try {
   };
   const R = {
     FELL_WOOD: 0, MINE_IRON: 1, MINE_COAL: 2, LIMESTONE: 5, SAW_PLANKS: 8, IRON_SHEET: 9,
-    FRAME_TIMBER: 37, RIVET: 38, GROW_COTTON: 79, MINE_GOLD: 95,
+    FRAME_TIMBER: 37, RIVET: 38, GROW_COTTON: 79, MINE_GOLD: 95, MIX_CONCRETE: 13,
   };
   const TASK = {
     [B.CAMP]: R.FELL_WOOD, [B.FARM]: R.GROW_COTTON, [B.SAWMILL]: R.SAW_PLANKS,
@@ -7907,6 +7907,7 @@ try {
     [R.FELL_WOOD]: 'Fell Wood', [R.GROW_COTTON]: 'Grow Cotton', [R.SAW_PLANKS]: 'Planks',
     [R.FRAME_TIMBER]: 'Frame Timber', [R.RIVET]: 'Iron Frames', [R.MINE_IRON]: 'Iron', [R.MINE_COAL]: 'Coal',
     [R.MINE_GOLD]: 'Gold', [R.LIMESTONE]: 'Limestone', [R.IRON_SHEET]: 'Iron Sheet',
+    [R.MIX_CONCRETE]: 'Concrete',
   };
   // Items the plan makes itself: never bought for prototypes, never sold.
   const HOME_MADE = [WOOD, PLANKS, WFRAME, IFRAME];
@@ -7917,7 +7918,7 @@ try {
     sawmills: 6,             // once the Workshop is unlocked (1 before, 3 from 50 buildings); at least 2 per Frame Timber Workshop
     workshops: 2,            // on Frame Timber
     ironFrameWorkshops: 1,   // Phase 5: on Rivet Iron Frame, once the Smelter runs
-    ironMines: 4, coalMines: 2, quarries: 1, smelters: 1,
+    ironMines: 4, coalMines: 2, quarries: 1, smelters: 1, kilns: 1, labs: 1,
     goldMines: Infinity,     // leftover frames → Gold Mines (+8 CD each; the CD source for Smelter and Phase 5)
     dispatchOffice: false,   // Phase 5 optional unlock
     workshopPlanks: 205,     // planks before unlocking the Workshop (100 prototype + 100 build + 5 kit)
@@ -8207,7 +8208,7 @@ try {
       shipId: st.next_shipment_id ?? 0, standing: st.standing_fills ?? {},
       mutTick: st.ssi?.last_user_mutation_tick ?? 0,
     });
-    for (const [b, n] of Object.entries(pool)) if (n) owe(kitFor(+b, poolRecipe(s, +b)), n);
+    for (const [b, n] of Object.entries(pool)) { const r = poolRecipe(s, +b); if (n && r != null) owe(kitFor(+b, r), poolTake(s, +b, n)); }
     return s;
   }
 
@@ -8276,7 +8277,7 @@ try {
     { b: B.KILN, phase: 5 },
     { b: B.PAPER_MILL, phase: 5 },
     { b: B.LAB, phase: 5 },
-    ...(cfg.dispatchOffice ? [{ b: B.DISPATCH, phase: 5 }] : []),
+    ...(cfg.dispatchOffice ? [{ b: B.DISPATCH, phase: 5, optional: true }] : []),
   ];
 
   function nextTech(s) {
@@ -8311,7 +8312,13 @@ try {
     if (smelting(s) && s.running(B.WORKSHOP, R.RIVET) < cfg.ironFrameWorkshops) return R.RIVET;
     return R.FRAME_TIMBER;
   }
-  function poolRecipe(s, b) { return b === B.MINE ? mineRecipe(s) : b === B.WORKSHOP ? workshopRecipe(s) : TASK[b]; }
+  // Kilns: Autopilot keeps cfg.kilns on Concrete; any other Kiln is Core plan's and stays unassigned.
+  const kilnFree = (s) => Math.max(0, cfg.kilns - s.running(B.KILN, R.MIX_CONCRETE));
+  const poolTake = (s, b, n) => (b === B.KILN ? Math.min(n, kilnFree(s)) : n);
+  function poolRecipe(s, b) {
+    if (b === B.KILN) return kilnFree(s) > 0 ? R.MIX_CONCRETE : null;
+    return b === B.MINE ? mineRecipe(s) : b === B.WORKSHOP ? workshopRecipe(s) : TASK[b];
+  }
   // Unassigned Workshops count toward the recipe they'll be given.
   const workshopPool = (s, r) => ((s.pool[B.WORKSHOP] ?? 0) > 0 && workshopRecipe(s) === r ? s.pool[B.WORKSHOP] : 0);
 
@@ -8325,6 +8332,8 @@ try {
     add(B.MINE, R.MINE_COAL, cfg.coalMines, s.running(B.MINE, R.MINE_COAL));
     add(B.QUARRY, R.LIMESTONE, cfg.quarries, s.owned(B.QUARRY));
     add(B.SMELTER, R.IRON_SHEET, cfg.smelters, s.owned(B.SMELTER));
+    add(B.KILN, R.MIX_CONCRETE, cfg.kilns, s.owned(B.KILN));
+    add(B.LAB, null, cfg.labs, s.owned(B.LAB)); // no recipe: Core plan's Lab group takes it from the pool
     // Phase 5: Iron Frames once Iron Sheet is being made.
     if (smelting(s)) add(B.WORKSHOP, R.RIVET, cfg.ironFrameWorkshops, s.running(B.WORKSHOP, R.RIVET) + workshopPool(s, R.RIVET));
     const basicsDone = s.running(B.MINE, R.MINE_IRON) >= cfg.ironMines && s.running(B.MINE, R.MINE_COAL) >= cfg.coalMines
@@ -8496,13 +8505,23 @@ try {
     });
   }
 
+  // Plan done = Core game plan S2–S4, wiki/guides/core-game-plan.md 1.1.
+  function planDone(s) {
+    return techPlan().every((t) => t.optional || s.unlocked(t.b))
+      && (!s.research || s.research.building === B.DISPATCH)
+      && s.running(B.WORKSHOP, R.FRAME_TIMBER) >= 1
+      && s.running(B.WORKSHOP, R.RIVET) >= cfg.ironFrameWorkshops
+      && s.owned(B.MINE) >= 1 && s.owned(B.QUARRY) >= 1
+      && s.owned(B.KILN) >= 1 && s.owned(B.LAB) >= 1
+      && s.has(IFRAME) >= 16;
+  }
+
   function phaseOf(s) {
     if (s.owned(B.CAMP) + s.owned(B.FARM) < 2) return 1;
     if (!s.unlocked(B.SAWMILL) || s.owned(B.SAWMILL) < 1 || s.acresUsed < STARTER_ACRES) return 2;
     if (!s.unlocked(B.WORKSHOP)) return 3;
     if (!smelting(s)) return 4;
-    if (nextTech(s) || s.research || s.running(B.WORKSHOP, R.RIVET) < cfg.ironFrameWorkshops) return 5;
-    return 'done';
+    return planDone(s) ? 'done' : 5;
   }
 
 // continues the autopilot closure from autopilot-2.js (same try / IIFE)
@@ -8713,12 +8732,12 @@ try {
       if (n <= 0) continue;
       const r = poolRecipe(s, b);
       if (r == null) continue;
-      yield assignAction(s, b, r, b === B.MINE || b === B.WORKSHOP ? 1 : n);
+      yield assignAction(s, b, r, b === B.MINE || b === B.WORKSHOP ? 1 : poolTake(s, b, n));
     }
 
     // 4. Plan groups with no task.
     for (const g of s.groups) {
-      if (g.recipe != null) continue;
+      if (g.recipe != null || g.building === B.KILN) continue; // bare Kiln groups are Core plan's
       const r = poolRecipe(s, g.building);
       if (r == null) continue;
       yield act(`recipe:${g.id}`, `idle group "${g.name}" → ${NAMES[r]}`,

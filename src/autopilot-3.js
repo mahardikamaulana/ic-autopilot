@@ -206,12 +206,12 @@
       if (n <= 0) continue;
       const r = poolRecipe(s, b);
       if (r == null) continue;
-      yield assignAction(s, b, r, b === B.MINE || b === B.WORKSHOP ? 1 : n);
+      yield assignAction(s, b, r, b === B.MINE || b === B.WORKSHOP ? 1 : poolTake(s, b, n));
     }
 
     // 4. Plan groups with no task.
     for (const g of s.groups) {
-      if (g.recipe != null) continue;
+      if (g.recipe != null || g.building === B.KILN) continue; // bare Kiln groups are Core plan's
       const r = poolRecipe(s, g.building);
       if (r == null) continue;
       yield act(`recipe:${g.id}`, `idle group "${g.name}" → ${NAMES[r]}`,

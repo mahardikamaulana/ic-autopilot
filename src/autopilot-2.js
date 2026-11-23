@@ -90,7 +90,7 @@
       shipId: st.next_shipment_id ?? 0, standing: st.standing_fills ?? {},
       mutTick: st.ssi?.last_user_mutation_tick ?? 0,
     });
-    for (const [b, n] of Object.entries(pool)) if (n) owe(kitFor(+b, poolRecipe(s, +b)), n);
+    for (const [b, n] of Object.entries(pool)) { const r = poolRecipe(s, +b); if (n && r != null) owe(kitFor(+b, r), poolTake(s, +b, n)); }
     return s;
   }
 
@@ -159,7 +159,7 @@
     { b: B.KILN, phase: 5 },
     { b: B.PAPER_MILL, phase: 5 },
     { b: B.LAB, phase: 5 },
-    ...(cfg.dispatchOffice ? [{ b: B.DISPATCH, phase: 5 }] : []),
+    ...(cfg.dispatchOffice ? [{ b: B.DISPATCH, phase: 5, optional: true }] : []),
   ];
 
   function nextTech(s) {
@@ -194,7 +194,13 @@
     if (smelting(s) && s.running(B.WORKSHOP, R.RIVET) < cfg.ironFrameWorkshops) return R.RIVET;
     return R.FRAME_TIMBER;
   }
-  function poolRecipe(s, b) { return b === B.MINE ? mineRecipe(s) : b === B.WORKSHOP ? workshopRecipe(s) : TASK[b]; }
+  // Kilns: Autopilot keeps cfg.kilns on Concrete; any other Kiln is Core plan's and stays unassigned.
+  const kilnFree = (s) => Math.max(0, cfg.kilns - s.running(B.KILN, R.MIX_CONCRETE));
+  const poolTake = (s, b, n) => (b === B.KILN ? Math.min(n, kilnFree(s)) : n);
+  function poolRecipe(s, b) {
+    if (b === B.KILN) return kilnFree(s) > 0 ? R.MIX_CONCRETE : null;
+    return b === B.MINE ? mineRecipe(s) : b === B.WORKSHOP ? workshopRecipe(s) : TASK[b];
+  }
   // Unassigned Workshops count toward the recipe they'll be given.
   const workshopPool = (s, r) => ((s.pool[B.WORKSHOP] ?? 0) > 0 && workshopRecipe(s) === r ? s.pool[B.WORKSHOP] : 0);
 
@@ -208,6 +214,8 @@
     add(B.MINE, R.MINE_COAL, cfg.coalMines, s.running(B.MINE, R.MINE_COAL));
     add(B.QUARRY, R.LIMESTONE, cfg.quarries, s.owned(B.QUARRY));
     add(B.SMELTER, R.IRON_SHEET, cfg.smelters, s.owned(B.SMELTER));
+    add(B.KILN, R.MIX_CONCRETE, cfg.kilns, s.owned(B.KILN));
+    add(B.LAB, null, cfg.labs, s.owned(B.LAB)); // no recipe: Core plan's Lab group takes it from the pool
     // Phase 5: Iron Frames once Iron Sheet is being made.
     if (smelting(s)) add(B.WORKSHOP, R.RIVET, cfg.ironFrameWorkshops, s.running(B.WORKSHOP, R.RIVET) + workshopPool(s, R.RIVET));
     const basicsDone = s.running(B.MINE, R.MINE_IRON) >= cfg.ironMines && s.running(B.MINE, R.MINE_COAL) >= cfg.coalMines
@@ -379,12 +387,22 @@
     });
   }
 
+  // Plan done = Core game plan S2–S4, wiki/guides/core-game-plan.md 1.1.
+  function planDone(s) {
+    return techPlan().every((t) => t.optional || s.unlocked(t.b))
+      && (!s.research || s.research.building === B.DISPATCH)
+      && s.running(B.WORKSHOP, R.FRAME_TIMBER) >= 1
+      && s.running(B.WORKSHOP, R.RIVET) >= cfg.ironFrameWorkshops
+      && s.owned(B.MINE) >= 1 && s.owned(B.QUARRY) >= 1
+      && s.owned(B.KILN) >= 1 && s.owned(B.LAB) >= 1
+      && s.has(IFRAME) >= 16;
+  }
+
   function phaseOf(s) {
     if (s.owned(B.CAMP) + s.owned(B.FARM) < 2) return 1;
     if (!s.unlocked(B.SAWMILL) || s.owned(B.SAWMILL) < 1 || s.acresUsed < STARTER_ACRES) return 2;
     if (!s.unlocked(B.WORKSHOP)) return 3;
     if (!smelting(s)) return 4;
-    if (nextTech(s) || s.research || s.running(B.WORKSHOP, R.RIVET) < cfg.ironFrameWorkshops) return 5;
-    return 'done';
+    return planDone(s) ? 'done' : 5;
   }
 

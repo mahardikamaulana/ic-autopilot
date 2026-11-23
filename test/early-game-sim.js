@@ -375,6 +375,8 @@ function run(scenario, HOURS, quiet) {
     mark('P5 Kiln unlocked', st.unlocked_buildings.includes(6));
     mark('P5 Paper Mill unlocked', st.unlocked_buildings.includes(23));
     mark('P5 Manufacturing Lab unlocked', st.unlocked_buildings.includes(14));
+    mark('P5 Kiln built', owned(6) >= 1);
+    mark('P5 Lab built', owned(14) >= 1);
     mark('P5 all plan unlocks done', core.phaseOf(core.snapshot(st, C, deals, orders, tick)) === 'done');
     if (tick % 7200 < DT && tick > 1) {
       hourly.push({ t: fmtT(tick), money: Math.round(st.items[0] / 100), cd: st.items[24], bld: Object.values(st.groups).reduce((a, x) => a + x.count, 0),

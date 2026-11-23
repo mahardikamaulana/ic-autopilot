@@ -82,7 +82,7 @@ try {
   };
   const R = {
     FELL_WOOD: 0, MINE_IRON: 1, MINE_COAL: 2, LIMESTONE: 5, SAW_PLANKS: 8, IRON_SHEET: 9,
-    FRAME_TIMBER: 37, RIVET: 38, GROW_COTTON: 79, MINE_GOLD: 95,
+    FRAME_TIMBER: 37, RIVET: 38, GROW_COTTON: 79, MINE_GOLD: 95, MIX_CONCRETE: 13,
   };
   const TASK = {
     [B.CAMP]: R.FELL_WOOD, [B.FARM]: R.GROW_COTTON, [B.SAWMILL]: R.SAW_PLANKS,
@@ -92,6 +92,7 @@ try {
     [R.FELL_WOOD]: 'Fell Wood', [R.GROW_COTTON]: 'Grow Cotton', [R.SAW_PLANKS]: 'Planks',
     [R.FRAME_TIMBER]: 'Frame Timber', [R.RIVET]: 'Iron Frames', [R.MINE_IRON]: 'Iron', [R.MINE_COAL]: 'Coal',
     [R.MINE_GOLD]: 'Gold', [R.LIMESTONE]: 'Limestone', [R.IRON_SHEET]: 'Iron Sheet',
+    [R.MIX_CONCRETE]: 'Concrete',
   };
   // Items the plan makes itself: never bought for prototypes, never sold.
   const HOME_MADE = [WOOD, PLANKS, WFRAME, IFRAME];
@@ -102,7 +103,7 @@ try {
     sawmills: 6,             // once the Workshop is unlocked (1 before, 3 from 50 buildings); at least 2 per Frame Timber Workshop
     workshops: 2,            // on Frame Timber
     ironFrameWorkshops: 1,   // Phase 5: on Rivet Iron Frame, once the Smelter runs
-    ironMines: 4, coalMines: 2, quarries: 1, smelters: 1,
+    ironMines: 4, coalMines: 2, quarries: 1, smelters: 1, kilns: 1, labs: 1,
     goldMines: Infinity,     // leftover frames → Gold Mines (+8 CD each; the CD source for Smelter and Phase 5)
     dispatchOffice: false,   // Phase 5 optional unlock
     workshopPlanks: 205,     // planks before unlocking the Workshop (100 prototype + 100 build + 5 kit)
