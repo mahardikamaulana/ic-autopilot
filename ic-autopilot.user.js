@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IC Autopilot
 // @namespace    idlecorp-toolkit
-// @version      2.8.3
+// @version      2.8.4
 // @author       XPARAD0X
 // @description  Early-game Autopilot, CD Farm (Construction Data by building and demolishing buildings; Auto picks the cheapest source itself), Lab runner (keeps the Manufacturing Labs researching), Auto ship (an "Auto ship" button on every distributor bid) and Auto utilities (an "Auto" switch that keeps the power and water subscriptions at what the groups need) for IdleCorp, each with a panel, menu or switch in the game UI.
 // @homepageURL  https://github.com/mahardikamaulana/ic-autopilot
@@ -319,6 +319,7 @@ try {
     return paths.filter((p) => { let v = obj; for (const k of p.split('.')) { v = v?.[k]; if (v === undefined || v === null) return true; } return false; });
   }
 
+// continues the core closure from core-1.js (same try / IIFE)
   // ---- UI kit (core.ui): one stylesheet, panel shell, tabs, sidebar tab + top-bar chip, log view -------------
   // Both modules build their panels from this; each keeps only its own content and settings.
   const UI_CSS = `
@@ -771,6 +772,7 @@ body:has(>.idc-docked:not(.idc-ghost)) .idc-toasts{right:calc(var(--idc-dock,360
     };
   }
 
+// continues the core closure from core-2.js (same try / IIFE)
   // ---- reserves: what each spending module keeps back, shared by CD Farm Auto --------------------------------------
   // A provider is { reserve(): { moneyFloor (cents), items: {id: n}, nextTech, phase } | null, busy(): bool, hold?(who): Promise, release?(who) }.
   // Autopilot registers itself; Core plan registers its own. CD Farm reads the merged view instead of asking Autopilot alone:
@@ -1653,6 +1655,7 @@ try {
     save();
   }
 
+// continues the cd-farm closure from cd-farm-1.js (same try / IIFE)
   // ---- cycle -------------------------------------------------------------
 
   const netSpend = () => stats.spent - stats.refunded;
@@ -2192,6 +2195,7 @@ try {
     save();
   }
 
+// continues the cd-farm closure from cd-farm-2.js (same try / IIFE)
   // ---- always-on controller ----------------------------------------------
   // Every 2 s: when Auto is on and idle, look at the world; when the engine needs CD and the plan has
   // something to build, start a run. The run ends when the need is met or a gate closes, then a cooldown.
@@ -2422,6 +2426,7 @@ try {
     });
   }
 
+// continues the cd-farm closure from cd-farm-3.js (same try / IIFE)
   // ---- game UI -----------------------------------------------------------
   // Styled with the game's own CSS variables and button classes so it reads as
   // part of the app: a "CD Farm" tab in the sidebar, a chip in the top bar, and
@@ -2857,6 +2862,7 @@ try {
     removeEventListener('resize', onResize);
   }
 
+// continues the cd-farm closure from cd-farm-4.js (same try / IIFE)
   // ---- load --------------------------------------------------------------
 
   const saved = load();
@@ -3236,6 +3242,7 @@ try {
     return bad;
   }
 
+// continues the lab closure from lab-1.js (same try / IIFE)
   // ---- state access -----------------------------------------------------------------------------
   class ConnError extends Error {}
 
@@ -3471,6 +3478,7 @@ try {
     console.table(t);
   }
 
+// continues the lab closure from lab-2.js (same try / IIFE)
   // ---- game UI -------------------------------------------------------------------------------------
   // Same look as CD Farm (core.ui): a "Lab" tab in the sidebar, a chip in the top bar, and a card that
   // opens from either. Nothing here runs without a DOM, so the offline tests are unaffected.
@@ -3829,6 +3837,7 @@ try {
     removeEventListener('resize', onResize);
   }
 
+// continues the lab closure from lab-3.js (same try / IIFE)
   // ---- load ----------------------------------------------------------------------------------------
 
   W.labRunner = {
@@ -4136,6 +4145,7 @@ try {
     } finally { loopOn = false; renderAll(); }
   }
 
+// continues the autosell closure from autosell-1.js (same try / IIFE)
   // ---- public control ----------------------------------------------------------------------------------------
   function start({ deal, total = null, keep = 0, fullLoads = false } = {}) {
     const r = read();
@@ -4376,6 +4386,7 @@ try {
     document.querySelectorAll('.as-btn').forEach((b) => b.remove());
   }
 
+// continues the autosell closure from autosell-2.js (same try / IIFE)
   // ---- load ---------------------------------------------------------------------------------------------------------------
   W.autoSell = {
     start, stop, jobs: listJobs, status, items, open: openMenu, cfg,
@@ -4914,6 +4925,7 @@ try {
     };
   }
 
+// continues the core-plan closure from core-plan-1.js (same try / IIFE)
   // ---- start and end conditions, stage ----------------------------------------------------------------------------------------
   const cond = (id, ok, why) => ({ id, ok, why });
   function startConditions(v, ctx) {
@@ -5181,6 +5193,7 @@ try {
     return out;
   }
 
+// continues the core-plan closure from core-plan-2.js (same try / IIFE)
   // ---- reading the game, sending, confirming ---------------------------------------------------------------------------------
   let pacer = core.pacer ? core.pacer({ cmdsPerMin: cfg.cmdsPerMin }) : null;
   function read(fresh = false) {
@@ -5294,6 +5307,7 @@ try {
     } finally { stepping = false; }
   }
 
+// continues the core-plan closure from core-plan-3.js (same try / IIFE)
   // ---- lifecycle -------------------------------------------------------------------------------------------------------------------------
   const heartbeat = () => { try { sstore?.setItem(LIVE_KEY, JSON.stringify({ t: Date.now() })); } catch {} ; takeLock(); };
   const clearLive = () => { try { sstore?.removeItem(LIVE_KEY); } catch {} };
@@ -5604,6 +5618,7 @@ try {
   }
   const floorMissing = (e, r) => cfg.needFurnitureFloor && (FURN.some(([k]) => e.R[k].id === r.id) || r.id === e.R.bench?.id) && !e.layout(r);
 
+// continues the cp-buildout closure from cp-buildout-1.js (same try / IIFE)
   // ---- actions (one message, or one purchase with hold) ---------------------------------------------------------------------------
   const groupById = (x, id) => x.groups.find((g) => g.id === id);
   function assignAction(v, b, g, n, why) {
@@ -6024,6 +6039,7 @@ try {
     return { id: 'bo:buy:' + pick.bn + ':' + v.owned(pick.bn), text, steps, hold: true };
   }
 
+// continues the cp-buildout closure from cp-buildout-2.js (same try / IIFE)
   // ---- the director --------------------------------------------------------------------------------------------------------------
   const conversionStage = (v) => v.unlocked('Assembly Plant');   // Stage C or D
   const dir = {
@@ -7295,6 +7311,7 @@ try {
       } } };
   }
 
+// continues the cp-cadence closure from cp-cadence-1.js (same try / IIFE)
   // ---- cadence (wiki 13) -------------------------------------------------------------------------------------------------------------
   // Fires once per period; the clock is anchored at first sight, so a sleep gives one catch-up fire, not several.
   function tickPeriods(m, now) {
@@ -7486,6 +7503,7 @@ try {
     return { wait: waits.join(' | ') };
   }
 
+// continues the cp-cadence closure from cp-cadence-2.js (same try / IIFE)
   // ---- Auto utilities on from Stage A (plan D1, wiki 8.1 step 1, 8.2) ------------------------------------------------------------------
   // Like the ladder's autoStart: switched on once per Live session. Why it went off comes from autoUtil's ledger lines: "Auto <u> off" with no
   // stop-all line right after it is the user's (sticky until they switch it on again); with one it is Alt+Shift+X, and "switched off" is its
@@ -8097,6 +8115,7 @@ try {
     save();
   }
 
+// continues the autopilot closure from autopilot-1.js (same try / IIFE)
   // ---- socket listener ------------------------------------------------------
   // Shared with CD Farm (core.sock): command confirmation counters and the server tick.
   const seeTick = core.seeTick, nowTick = core.nowTick;
@@ -8486,6 +8505,7 @@ try {
     return 'done';
   }
 
+// continues the autopilot closure from autopilot-2.js (same try / IIFE)
   // ---- decide -----------------------------------------------------------------------
 
   // An action: { key, reason, steps: [{ msg, until(s), optional }] }.  A wait: { wait, final }.
@@ -8897,6 +8917,7 @@ try {
     return { wait: main + (extra.length ? ` | ${extra.slice(0, 2).join(' | ')}` : ''), waits };
   }
 
+// continues the autopilot closure from autopilot-3.js (same try / IIFE)
   // ---- execute -------------------------------------------------------------------
 
   const sleep = core.sleep;
@@ -9306,6 +9327,7 @@ try {
   }
 
 
+// continues the autopilot closure from autopilot-4.js (same try / IIFE)
   // ---- game UI ----------------------------------------------------------------------
   // Same look as CD Farm (the game's CSS variables and button classes): an "Autopilot" tab in the
   // sidebar, a chip in the top bar, and a draggable card that opens bottom-left (CD Farm's card
@@ -9681,6 +9703,7 @@ try {
     removeEventListener('resize', onResize);
   }
 
+// continues the autopilot closure from autopilot-5.js (same try / IIFE)
   // ---- load ---------------------------------------------------------------------------
 
   W.earlyGame = {

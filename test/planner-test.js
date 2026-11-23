@@ -6,11 +6,11 @@ const path = require('path');
 const assert = require('assert');
 
 const board = JSON.parse(fs.readFileSync(path.join(__dirname, 'live-board.json'), 'utf8'));
-const slice = (file, name) => {
-  const s = fs.readFileSync(path.join(__dirname, '..', 'src', file), 'utf8');
+const slice = (files, name) => {
+  const s = [].concat(files).map((file) => fs.readFileSync(path.join(__dirname, '..', 'src', file), 'utf8')).join('\n');
   return s.slice(s.indexOf('// @@MODULE ' + name), s.indexOf('// @@END ' + name));
 };
-(0, eval)(slice('core.js', 'core') + '\n' + slice('planner.js', 'planner'));
+(0, eval)(slice(['core-1.js', 'core-2.js', 'core-3.js'], 'core') + '\n' + slice('planner.js', 'planner'));
 const P = globalThis.idleCore.planner;
 
 let failed = 0;
@@ -24,8 +24,10 @@ const C = deepFreeze(P.normalize(board.catalog));
 const id = (name) => Object.values(C.buildings).find((b) => b.name === name).id;
 const item = (name) => Object.values(C.items).find((i) => i.name === name).id;
 const CAMP = 0, FARM = 10, MINE = id('Mine'), WF = item('Wooden Frame');
-const base = (over = {}) => ({ catalog: C, unlocked: [], owned: {}, usableAcres: 50, money: 1e9, floor: 0, stock: {}, reserve: {},
-  netSupply: {}, burn: {}, itemValue: {}, quarantine: {}, R: Infinity, T: 60, I: 0, ...over });
+const base = (over = {}) => ({
+  catalog: C, unlocked: [], owned: {}, usableAcres: 50, money: 1e9, floor: 0, stock: {}, reserve: {},
+  netSupply: {}, burn: {}, itemValue: {}, quarantine: {}, R: Infinity, T: 60, I: 0, ...over
+});
 const unitsOf = (r) => Object.fromEntries(r.units.map((u) => [u.b, u.n]));
 const total = (r) => r.units.reduce((a, u) => a + u.n, 0);
 
@@ -146,8 +148,10 @@ t('gates G2 / G3 / G4', () => {
 
 t('land: off notes the saving, plan mode buys only inside the plan and when it pays, wall and floor hold', () => {
   const farm = { cdTotal: 10, grossCents: 50000, binding: 'acres' };
-  const L = (over) => P.land(deepFreeze({ allow: 'plan', landBought: 0, firstAcre: 5000, wall: 1e9, hoursUntilBought: () => 1, paybackHours: 10,
-    plan: farm, unitNeed: { cd: 1, unitCost: 2050, acres: 1 }, R: 1000, T: 60, I: 100000, money: 1e7, floor: 0, usableAcres: 0, ...over }));
+  const L = (over) => P.land(deepFreeze({
+    allow: 'plan', landBought: 0, firstAcre: 5000, wall: 1e9, hoursUntilBought: () => 1, paybackHours: 10,
+    plan: farm, unitNeed: { cd: 1, unitCost: 2050, acres: 1 }, R: 1000, T: 60, I: 100000, money: 1e7, floor: 0, usableAcres: 0, ...over
+  }));
   const off = L({ allow: 'off' });
   assert.strictEqual(off.buy, 0);
   assert.ok(/^\d more acres? would save [\d.]+ h for \$[\d.]+$/.test(off.note), off.note);
@@ -202,8 +206,10 @@ t('determinism: same input twice -> same output, inputs untouched', () => {
 });
 
 // ---- Core plan: CD Farm Auto against the wiki's Farm ladder (§11.4) and the Wooden Frame guard ------------------
-const ladder = (over = {}) => base({ unlocked: [MINE, id('Quarry')], owned: { [CAMP]: 112, [FARM]: 0, [MINE]: 10, [id('Quarry')]: 4 }, usableAcres: 60,
-  I: 1e12, R: 755000, T: 6, minUnits: 1, maxBatch: 16, maxTypes: 1, stock: { [WF]: 5000 }, ...over });
+const ladder = (over = {}) => base({
+  unlocked: [MINE, id('Quarry')], owned: { [CAMP]: 112, [FARM]: 0, [MINE]: 10, [id('Quarry')]: 4 }, usableAcres: 60,
+  I: 1e12, R: 755000, T: 6, minUnits: 1, maxBatch: 16, maxTypes: 1, stock: { [WF]: 5000 }, ...over
+});
 const perCdDollars = (r) => r.perCdCents / 100;
 
 t('Auto planner: Stage D ladder picks Farm at the wiki batch costs ($/CD)', () => {

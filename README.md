@@ -15,7 +15,7 @@ If you ran an older copy of this toolkit (including the separate `cd-farm` and `
 | Path | What |
 |---|---|
 | `ic-autopilot.user.js` | **Built file, committed.** This is what auto-update downloads. Never edit it by hand. |
-| `src/` | The sources: `header.js` (metadata, version), `core.js`, `cd-farm.js`, `lab.js`, `autosell.js`, `utilities.js`, `autopilot.js` |
+| `src/` | The sources: `header.js` (metadata, version), `core-*.js`, `cd-farm-*.js`, `lab-*.js`, `autosell-*.js`, `utilities.js`, `core-plan-*.js`, `cp-buildout-*.js`, `cp-cadence-*.js`, `autopilot-*.js` (a module split into numbered fragments continues the same closure) |
 | `build.js` | Joins `src/` into the userscript |
 | `test/` | Offline sim, headless tests, browser UI harness, saved game board used by them |
 

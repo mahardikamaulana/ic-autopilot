@@ -1,4 +1,4 @@
-// Headless checks for Core plan (src/core-plan.js): the pure view / stage / conditions / directors on saved boards, and the runner
+// Headless checks for Core plan (src/core-plan-*.js): the pure view / stage / conditions / directors on saved boards, and the runner
 // against a small fake server that applies BuyLand / BuyBuilding / AssignBuildings / StartTech.
 //   bun test/core-plan-sim.js
 const fs = require('fs');
@@ -13,7 +13,7 @@ const SRCS = ['core', 'pacer', 'planner', 'core-math', 'core-plan'].map(slice).j
 let failed = 0;
 const quietLog = console.log, quietWarn = console.warn;
 async function t(name, fn) {
-  console.log = () => {}; console.warn = () => {};
+  console.log = () => { }; console.warn = () => { };
   try { await fn(); console.log = quietLog; console.warn = quietWarn; quietLog('ok   ' + name); }
   catch (e) { console.log = quietLog; console.warn = quietWarn; failed++; quietLog('FAIL ' + name + '\n     ' + (e.stack || e).split('\n').slice(0, 5).join('\n     ')); }
 }
@@ -121,12 +121,12 @@ function world(st, deals = cottonBidDeals(), { ignore = [] } = {}) {
   const ws = new FakeWS();
   const fiber = { memoizedState: { memoizedState: { current: ws }, next: { memoizedState: st, next: { memoizedState: deals, next: null } } }, memoizedProps: { catalog: board.catalog }, child: null, sibling: null };
   const root = { __reactContainer$x: fiber };
-  const el = () => ({ append() {}, remove() {}, addEventListener() {}, setAttribute() {}, style: {}, classList: { toggle() {} } });
+  const el = () => ({ append() { }, remove() { }, addEventListener() { }, setAttribute() { }, style: {}, classList: { toggle() { } } });
   globalThis.document = { body: el(), head: el(), title: 'game', getElementById: (id) => (id === 'root' ? root : null), createElement: el, querySelector: () => null, hidden: true };
   return { ws, st };
 }
 const mem = (disk = {}) => ({ getItem: (k) => disk[k] ?? null, setItem: (k, v) => { disk[k] = String(v); }, removeItem: (k) => { delete disk[k]; } });
-const fastPacer = () => ({ beforeCommand: async () => {}, noteConfirm() {}, noteResult() {} });
+const fastPacer = () => ({ beforeCommand: async () => { }, noteConfirm() { }, noteResult() { } });
 
 (async () => {
   await t('stage A: all start conditions read from a saved board, Cotton bid and cash trend unknown until sampled', () => {
@@ -340,7 +340,7 @@ const fastPacer = () => ({ beforeCommand: async () => {}, noteConfirm() {}, note
   await t('unlock director: waits with the missing thing, starts when everything is in, Oil Rig waits for the checkpoint, Autopilot owning the tech defers', () => {
     const { cp } = load();
     const ap = B('Assembly Plant'), want = (st, c) => cp._decide(view(cp, st), ctxOf(c));
-    const noLand = { }; 
+    const noLand = {};
     const st = stageA();
     st.items[CD] = 100;
     assert.ok(want(st).waits.some((w) => /unlock Assembly Plant: 100 \/ 20000 CD/.test(w)));
@@ -452,8 +452,10 @@ const fastPacer = () => ({ beforeCommand: async () => {}, noteConfirm() {}, note
     const st = stageA(); st.items[MONEY] = 1;
     const { core, cp, w } = boot(st);
     const tuned = [];
-    globalThis.earlyGame = { cfg: { neverSell: [5], cdBooster: true }, busy: false, reserve: () => ({ phase: 'done', moneyFloor: 0, items: {}, nextTech: null }),
-      tune(p) { tuned.push(p); this.cfg.neverSell = [...new Set([...this.cfg.neverSell, ...p.neverSell])]; this.cfg.cdBooster = p.cdBooster; return { applied: Object.keys(p), skipped: [] }; } };
+    globalThis.earlyGame = {
+      cfg: { neverSell: [5], cdBooster: true }, busy: false, reserve: () => ({ phase: 'done', moneyFloor: 0, items: {}, nextTech: null }),
+      tune(p) { tuned.push(p); this.cfg.neverSell = [...new Set([...this.cfg.neverSell, ...p.neverSell])]; this.cfg.cdBooster = p.cdBooster; return { applied: Object.keys(p), skipped: [] }; }
+    };
     cp.start({ dryRun: false });
     await cp._step(); await cp._step(); await cp._step();
     assert.strictEqual(tuned.length, 1);

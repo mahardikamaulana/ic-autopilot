@@ -7,13 +7,13 @@ const path = require('path');
 const assert = require('assert');
 
 const srcDir = path.join(__dirname, '..', 'src');
-const slice = (file, name) => {
-  const s = fs.readFileSync(path.join(srcDir, file), 'utf8');
+const slice = (files, name) => {
+  const s = [].concat(files).map((file) => fs.readFileSync(path.join(srcDir, file), 'utf8')).join('\n');
   return s.slice(s.indexOf('// @@MODULE ' + name), s.indexOf('// @@END ' + name));
 };
 globalThis.idleCore?._unload?.();
 globalThis.idleCore = undefined;
-(0, eval)(slice('core.js', 'core') + '\n' + slice('pacer.js', 'pacer'));
+(0, eval)(slice(['core-1.js', 'core-2.js', 'core-3.js'], 'core') + '\n' + slice('pacer.js', 'pacer'));
 const core = globalThis.idleCore;
 const { measure } = core;
 

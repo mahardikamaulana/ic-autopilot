@@ -1,4 +1,4 @@
-// Tests for src/cp-cadence.js: slot, sell, cadence, world events, offline, canSaveDesign, resume, utilities.
+// Tests for src/cp-cadence-*.js: slot, sell, cadence, world events, offline, canSaveDesign, resume, utilities.
 //   CP_FROM_SRC=1 bun test/cp-cadence-test.js
 const assert = require('assert');
 const F = require('./cp-fixtures');
@@ -188,7 +188,7 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
     const st = sellSt(), deals = sellDeals(), v = view(cpS, st, deals);
     const out = cpS._decide(v, F.ctxOf({ tick: T0, deals }));
     const jobs = [], started = [];
-    const as = { jobs: () => jobs, start: (o) => { started.push(o); jobs.push({ deal: o.deal, item: deals.find((d) => d.id === o.deal).item, keep: o.keep, left: o.total, fullLoads: o.fullLoads }); return o.deal; }, stop() {} };
+    const as = { jobs: () => jobs, start: (o) => { started.push(o); jobs.push({ deal: o.deal, item: deals.find((d) => d.id === o.deal).item, keep: o.keep, left: o.total, fullLoads: o.fullLoads }); return o.deal; }, stop() { } };
     const mm = F.ctxOf().mem;
     let r = XS.sellDecide(v, F.ctxOf({ tick: T0, deals, live: false, dryRun: true, mods: { autoSell: as }, sellJobs: jobs, mem: mm }), out);
     assert.ok(!r.action, 'dry run: no action');
@@ -212,7 +212,7 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
     const deals = sellDeals(), out = cpS._decide(view(cpS, st, deals), F.ctxOf({ tick: T0, deals }));
     const started = [];
     const jobs = [{ deal: 45, item: I('Gold Ore'), keep: 0, left: null, fullLoads: true }];
-    const as = { jobs: () => jobs, start: (o) => { started.push(o); jobs[0].keep = o.keep; return o.deal; }, stop() {} };
+    const as = { jobs: () => jobs, start: (o) => { started.push(o); jobs[0].keep = o.keep; return o.deal; }, stop() { } };
     const mm = F.ctxOf().mem; mm('sell').set({ mine: [45] });
     const cx = () => F.ctxOf({ tick: T0, deals, mods: { autoSell: as }, sellJobs: jobs, mem: mm });
     let r = XS.sellDecide(view(cpS, st, deals), cx(), out);
@@ -237,7 +237,7 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
     const deals = sellDeals(), out = cpS._decide(view(cpS, st, deals), F.ctxOf({ tick: T0, deals }));
     const started = [];
     const jobs = [{ deal: 47, from: 45, item: I('Gold Ore'), keep: 0, left: null, fullLoads: true }];
-    const as = { jobs: () => jobs, start: (o) => { started.push(o); jobs[0].keep = o.keep; return o.deal; }, stop() {} };
+    const as = { jobs: () => jobs, start: (o) => { started.push(o); jobs[0].keep = o.keep; return o.deal; }, stop() { } };
     const mm = F.ctxOf().mem; mm('sell').set({ mine: [45] });
     st.groups[7].recipe = Rc('Smelt Gold'); delete st.groups[7].work;
     const keep = XS.keepLine(view(cpS, st, deals), out.rule, I('Gold Ore'));
@@ -254,7 +254,7 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
   await t('sell: a job autoSell ended by itself cools down before that bid is tried again', () => {
     const st = sellSt(), deals = sellDeals();
     const mm = F.ctxOf().mem; mm('sell').set({ mine: [41] });
-    const as = { jobs: () => [], start() {}, stop() {} };
+    const as = { jobs: () => [], start() { }, stop() { } };
     const now = 1.8e12, cx = (n) => F.ctxOf({ now: n, tick: T0, deals, mods: { autoSell: as }, mem: mm });
     let d = cpS._decide(view(cpS, st, deals), cx(now));        // the sell context sees job 41 gone
     assert.deepStrictEqual(mm('sell').get().mine, []);
@@ -278,7 +278,7 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
   await t('cadence: over 24 h the hourly checks run 24 times and the 6-hour checks 4 times, each on its tick', () => {
     const st = plain(), { n, lab } = spy(st), v = view(cpS, st, []);
     cpS.cfg.dir_lab = false;                                    // the lab director also reads labRunner.running: keep it out of the spy count
-    const mm = F.ctxOf().mem, quiet = () => {};
+    const mm = F.ctxOf().mem, quiet = () => { };
     const t0 = 1.8e12 + 123457;
     let h = 0, s = 0, prev = null;
     for (let now = t0; now < t0 + 24 * 3600000; now += 7 * 60000) {
@@ -564,7 +564,7 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
     const eg = { running: true, stop() { stops++; this.running = false; } };
     globalThis.earlyGame = eg;
     const ap = (o) => ({ neverSell: [], cdBooster: true, running: eg.running, ...o });
-    const util = { conf: { power: { on: true }, water: { on: true } }, set() {} };   // Auto utilities power on (H-fix)
+    const util = { conf: { power: { on: true }, water: { on: true } }, set() { } };   // Auto utilities power on (H-fix)
     const ho = (o, cx = c) => cx._decide(v, F.ctxOf({ mem, ap: ap(o), mods: { autoUtil: util } })).actions.find((a) => a.id.startsWith('handoff'));
     const a1 = ho();
     assert.strictEqual(a1.id, 'handoff');
@@ -701,7 +701,7 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
     let stops = 0;
     globalThis.earlyGame = { running: true, stop() { stops++; this.running = false; } };
     const ids = c.ENGINE_ITEMS.map((n) => F.I(n));
-    const util = { conf: { power: { on: true }, water: { on: true } }, set() {} };
+    const util = { conf: { power: { on: true }, water: { on: true } }, set() { } };
     const noSave = () => { let o = {}; return { get: () => o, set: (p) => (o = { ...o, ...p }) }; };   // each handle starts empty, like memOf over storage that drops writes
     const d = c._decide(v, F.ctxOf({ mem: noSave, ap: { neverSell: ids, cdBooster: false, running: true }, mods: { autoUtil: util } }));
     assert.ok(!d.actions.some((a) => a.id === 'handoff:stop'), d.actions.map((a) => a.id).join(','));

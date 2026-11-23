@@ -1,4 +1,4 @@
-// Tests for the build-out director (src/cp-buildout.js): furniture split, Stage B switch, build order and gates, Farm conversion waves,
+// Tests for the build-out director (src/cp-buildout-*.js): furniture split, Stage B switch, build order and gates, Farm conversion waves,
 // Kiln gate, chaos, and a live purchase against the fake server.
 //   CP_FROM_SRC=1 bun test/cp-buildout-test.js
 const assert = require('assert');
@@ -609,7 +609,7 @@ const wsGroups = (st) => Object.values(st.groups).filter((g) => g.building === B
   });
 
   await F.t('runner without browser storage (or with a full one): no Farm wave at all, it says why', async () => {
-    for (const store of [null, { getItem: () => null, setItem: () => { throw new Error('QuotaExceededError'); }, removeItem() {} }]) {
+    for (const store of [null, { getItem: () => null, setItem: () => { throw new Error('QuotaExceededError'); }, removeItem() { } }]) {
       if (store) globalThis.localStorage = store; else delete globalThis.localStorage;
       const st = stageC(switched(liveReady()));
       const { cp, w } = F.boot(st, { modules: ['cp-buildout'], catalog: cat, deals, retail });
@@ -621,7 +621,7 @@ const wsGroups = (st) => Object.values(st.groups).filter((g) => g.building === B
       const types = w.ws.sent.map((m) => m.type);
       assert.ok(!types.includes('UnassignBuildings') && !types.includes('DemolishBuilding'), types.join());
       assert.strictEqual(st.groups[1].count, 88);
-      const d = cp._decide(cp._view(st, cat, deals), F.ctxOf({ retailBoard: retail, mem: () => ({ get: () => ({}), set() {} }) }));
+      const d = cp._decide(cp._view(st, cat, deals), F.ctxOf({ retailBoard: retail, mem: () => ({ get: () => ({}), set() { } }) }));
       assert.match(boWait(d), /conversion: wave memory not saved/);
       cp.stop(); F.unload();
     }
