@@ -1,4 +1,4 @@
-// Builds ic-autopilot.user.js from src/*.js (header, core, pacer, planner, cd-farm, lab, autosell, utilities, autopilot, in that order).
+// Builds ic-autopilot.user.js from src/*.js (header, core, pacer, planner, core-math, cd-farm, lab, autosell, utilities, core-plan, cp-*, autopilot, in that order).
 //
 //   bun build.js                          # write the userscript
 //   bun build.js --check                  # exit 1 if the userscript differs from what the sources build
@@ -19,7 +19,7 @@ const crypto = require('crypto');
 const SRC = path.join(__dirname, 'src');
 const OUT = path.join(__dirname, 'ic-autopilot.user.js');
 const STAMP = path.join(SRC, '.built-sha');          // local only (git-ignored): the hash of the last build, to spot hand edits
-const PARTS = ['header.js', 'core.js', 'pacer.js', 'planner.js', 'core-math.js', 'cd-farm.js', 'lab.js', 'autosell.js', 'utilities.js', 'core-plan.js', 'cp-buildout.js', 'cp-retail.js', 'cp-lab.js', 'cp-ladder.js', 'cp-cadence.js', 'autopilot.js'];
+const PARTS = ['header.js', 'core.js', 'pacer.js', 'planner.js', 'core-math.js', 'cd-farm.js', 'lab.js', 'autosell.js', 'utilities.js', 'core-plan.js', 'cp-buildout.js', 'cp-retail.js', 'cp-lab.js', 'cp-ladder.js', 'cp-cadence.js', 'cp-endgame.js', 'autopilot.js'];
 
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 const args = process.argv.slice(2);

@@ -153,6 +153,12 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
     c2._decide(c2._view(st, cat, []), ctx2);
     assert.strictEqual(ctx2.retail.chosen.length, 4);
     assert.ok(ctx2.retail.chosen.some((g) => g.name === 'Bench'));
+    // D4: the Bench Workshop buildout adds is shelved as soon as it runs, before any Bench is in stock
+    st.stock[0][I('Bench')] = 0;
+    st.groups[98] = { building: B('Workshop'), region: 0, count: 1, recipe: Rc('Make Bench'), modules: {} };
+    const ctx3 = F.ctxOf({ retailBoard: board() });
+    c2._decide(c2._view(st, cat, []), ctx3);
+    assert.ok(ctx3.retail.chosen.some((g) => g.name === 'Bench'), ctx3.retail.chosen.map((g) => g.name).join());
   });
 
   await t('malformed board: loud wait, nothing sent', () => {

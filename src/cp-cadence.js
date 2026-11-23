@@ -1,14 +1,16 @@
 // ============================================================================
-// CORE PLAN DIRECTORS 9-10: Cotton slot, sell jobs, cadence, offline checklist, endgame (corePlan directors)
+// CORE PLAN DIRECTORS 9-10: bill resume, utilities, Cotton slot, sell jobs, cadence, offline checklist (corePlan directors)
 // ============================================================================
-// Five directors on top of corePlan (wiki/guides/core-game-plan.md sections 5, 6, 8.1, 12, 13):
+// Five directors on top of corePlan (wiki/guides/core-game-plan.md sections 5, 6, 8.1, 8.2, 12, 13):
 //   resume   SetPaused false on a group an unpaid bill paused, once bills are affordable (plan D7, Autopilot's rule; yours stay paused).
+//   utilities  Auto utilities power on once per Live session, water while a running group draws water (plan D1); your switch-off is sticky.
 //   slot     KeepFilling on the best Heartland Cotton bid while Farms exist (5.1), then a surplus bid or nothing (5.2).
 //            Autopilot's autoShipCotton does the same job: while Autopilot runs with it on, this director only reads out.
 //   sell     autoSell jobs for ore, stone, sheets and saturated shelves above the keep line (section 6). Live only.
 //   cadence  hourly and 6-hour checklists (section 13); a browser alert only when a check newly fails.
-//   endgame  off by default (cfg.dir_endgame): StartTech Refinery once E1-E5 hold and 750,000 CD + the prototype are in hand.
-// Also: corePlan.offline(hours) (checklist before going away) and corePlan.canSaveDesign(st, recipe).
+// The endgame director (wiki 12) is in cp-endgame.js; it reads TARGETS from here.
+// Also: corePlan.offline(hours) (checklist before going away), corePlan.canSaveDesign(st, recipe) and corePlan.worldEvents() (the last
+// WorldEvents socket message, raw, plan D5).
 // The pure pieces are on corePlan._cadence for the tests.
 // @@MODULE cp-cadence
 try {
@@ -259,6 +261,9 @@ try {
     const builds = nextBuilds(v, r, cfg.kitWaveBuilds), kit = kitOf(v, builds);
     const short = Object.entries(kit).filter(([i, n]) => stockOf(v, +i) < n);
     c.push(chk('kit', !short.length, short.length ? 'next wave (' + builds.join(', ') + ') short of ' + short.map(([i, n]) => num(n - stockOf(v, +i)) + ' ' + itemName(v, +i)).join(', ') : 'kit stock covers the next ' + builds.length + ' builds'));
+    // shortcut: readout only, the payload shape is unverified; act on it once a live capture shows its fields.
+    const we = ctx.worldEvents, ago = we ? Math.max(0, (ctx.now ?? Date.now()) - we.at) : 0;
+    c.push(chk('world', null, we ? 'world events: last WorldEvents message ' + (ago < HOUR ? Math.round(ago / 60000) + ' min' : (ago / HOUR).toFixed(1) + ' h') + ' ago: ' + String(we.raw).slice(0, 200) : 'no WorldEvents message seen'));
     return c;
   }
   // Each check set runs when its period fires (and once on first sight); between fires the readout shows the saved results.
@@ -346,53 +351,41 @@ try {
     return offlinePlan(v, +hours, { retail, retailOk: cm.retailOk ?? null });
   }
 
-  // ---- endgame (wiki 12) ------------------------------------------------------------------------------------------------------------
-  function endgameDecide(v, ctx, out) {
-    const checklist = TARGETS.map(([n, want]) => ({ item: n, have: Math.floor(v.has(n)), want, ok: v.has(n) >= want }));
-    const finished = !!out.finished || (Array.isArray(out.E) && out.E.length > 0 && out.E.every((c) => c.ok));
-    if (!finished) return { wait: 'end conditions E1-E5 not all true', readout: { checklist } };
-    const b = v.idB('Refinery');
-    if (b == null) return { wait: 'manual: no building named Refinery', readout: { checklist } };
-    if (v.unlocked('Refinery')) return { wait: 'Refinery unlocked', readout: { checklist } };
-    const t = v.N.techs.find((x) => x.building === b), cost = t?.cost ?? 750000;
-    const preOk = !t?.requires || !!v.st.unlocked_buildings?.includes(t.requires);
-    if (v.research?.building !== b) out.cdNeed = { b, name: 'Refinery', cd: cost, prereqsMet: preOk, note: preOk ? '' : 'needs Oil Rig first' };
-    const proto = v.bld(b).build_items ?? [];
-    const lack = proto.filter((i) => stockOf(v, i.item) < i.amount);
-    const why = 'Refinery';
-    if (v.research?.building === b) return { wait: why + ': research running', readout: { checklist } };
-    if (!preOk) return { wait: why + ': needs Oil Rig first', readout: { checklist } };
-    if (v.research) return { wait: why + ': research slot busy', readout: { checklist } };
-    if (v.cd < cost) return { wait: why + ': ' + num(v.cd) + ' / ' + num(cost) + ' CD', readout: { checklist } };
-    if (lack.length) return { wait: why + ': need ' + lack.map((i) => Math.ceil(i.amount - stockOf(v, i.item)) + ' more ' + itemName(v, i.item)).join(', '), readout: { checklist } };
-    return { readout: { checklist }, action: { id: 'tech:' + b, text: 'unlock Refinery (' + num(cost) + ' CD + ' + proto.map((i) => i.amount + ' ' + itemName(v, i.item)).join(', ') + ')',
-      steps: [{ msg: { type: 'StartTech', building: b, region: REGION }, until: (x) => x.research?.building === b || x.unlocked('Refinery') }] } };
-  }
-
   // ---- resume groups paused by an unpaid bill (plan D7, D-4: Autopilot's observe() + resume step, moved here) -------------
   // A powered group seen running, then paused while cash is under ~2 bills (or the subscription is below the load), was paused by an
   // unpaid bill; any other pause, and a group already paused when first seen, is the user's and is never touched (Autopilot's rule).
+  // The load is the one before the pause (groups seen running last step): Auto utilities sizes the subscription to running groups, so
+  // counting paused ones would read every pause as a bill. Judged once, when the pause is first seen. A pause Core plan sent in the last
+  // cfg.resumeGraceMin minutes (ctx.pauseSent) is a director's even before its own mem says so (the Kiln / FT gates write on confirm).
   const lastPaused = new Map();                  // this session only, like Autopilot: a group paused before the load counts as yours
   const drawOf = (v, g) => v.bld(g.building).draws?.power ?? 0;
   const powerHave = (v) => v.st.subscriptions?.[REGION]?.power ?? 0;
-  function resumeObserve(v, m) {
-    const needAll = v.groups.reduce((a, g) => a + drawOf(v, g) * g.count, 0), have = powerHave(v);
-    const billShort = have < needAll || v.money < Math.max(have, needAll) * 1000 * 2;
+  function resumeObserve(v, m, ctx = {}) {
+    const before = v.groups.reduce((a, g) => a + (lastPaused.get(g.id) === false ? drawOf(v, g) * g.count : 0), 0), have = powerHave(v);
+    const billShort = have < before || v.money < Math.max(have, before) * 1000 * 2;
+    const sent = ctx.pauseSent ?? {}, grace = (cfg.resumeGraceMin ?? 2) * 60000;
     const o = m.get(), bill = new Set(o.bill ?? []), user = new Set(o.user ?? []);
     let changed = false;
     for (const g of v.groups) {
       const prev = lastPaused.get(g.id);
-      if (g.paused && prev !== true && !bill.has(g.id) && !user.has(g.id)) { (prev === false && billShort && drawOf(v, g) > 0 ? bill : user).add(g.id); changed = true; }
+      if (g.paused && prev !== true && !bill.has(g.id) && !user.has(g.id)) { (prev === false && billShort && drawOf(v, g) > 0 && !(ctx.now - sent[g.id] < grace) ? bill : user).add(g.id); changed = true; }
       if (!g.paused && (bill.delete(g.id) | user.delete(g.id))) changed = true;
       lastPaused.set(g.id, !!g.paused);
     }
     if (changed) m.set({ bill: [...bill], user: [...user] });
   }
+  // Groups Autopilot's earlyGame.keepPaused(id) marked: never resumed. Autopilot does not expose the list; it saves it in localStorage
+  // 'earlyGame.v2' (.keptPaused). Read at call time; a missing key, bad JSON or a non-array is an empty list.
+  function keptPaused() {
+    try { const a = JSON.parse(W.localStorage?.getItem('earlyGame.v2') ?? 'null')?.keptPaused; return Array.isArray(a) ? a.map(Number) : []; } catch { return []; }
+  }
   // One SetPaused false per step once the bills are affordable: cash >= Autopilot's floor (1 h of bills, min $100, the group counted)
-  // + one bill for it, and the subscription covers the load with it. Groups a director paused on purpose (Kiln gate, WF gate) stay.
+  // + one bill for it, and the subscription covers the load with it. Groups a director paused on purpose (Kiln gate, WF gate,
+  // endgame stock gate) and Autopilot's kept-paused ones stay.
   function resumeDecide(v, ctx) {
     if (!ctx.mem) return null;
-    const bo = ctx.mem('buildout').get(), mine = new Set([...(bo.kilnMine ?? []), ...(bo.ftMine ?? [])]);
+    const bo = ctx.mem('buildout').get(), em = ctx.mem('endgame').get();
+    const mine = new Set([...(bo.kilnMine ?? []), ...(bo.ftMine ?? []), ...(em.egMine ?? []), ...(ctx.apKept ?? [])]);
     const bill = new Set(ctx.mem('resume').get().bill ?? []);
     const list = v.groups.filter((g) => g.paused && g.count > 0 && bill.has(g.id) && !mine.has(g.id));
     if (!list.length) return null;
@@ -410,15 +403,85 @@ try {
     return { wait: waits.join(' | ') };
   }
 
+  // ---- Auto utilities on from Stage A (plan D1, wiki 8.1 step 1, 8.2) ------------------------------------------------------------------
+  // Like the ladder's autoStart: switched on once per Live session. Why it went off comes from autoUtil's ledger lines: "Auto <u> off" with no
+  // stop-all line right after it is the user's (sticky until they switch it on again); with one it is Alt+Shift+X, and "switched off" is its
+  // own 3-failure stop: both wait for Core plan's next Live session.
+  // The ledger is read only while Core plan steps. A switch-off while it was stopped, whose line has left the ledger, is read from state at
+  // the start of a Live session: power off, no ledger line why, and mem says Core plan had switched it on (cpOn) = the user's (sticky).
+  // Never switched on by Core plan: it is switched on.
+  const UTIL_LOAD = Math.random().toString(36).slice(2, 8);
+  let utilSession = 0, utilLiveAt = 0;
+  function utilOffWhy(util, list) {
+    let stopAt = 0;
+    for (let i = list.length - 1; i >= 0; i--) {
+      const e = list[i];
+      if (e.mod === '--' && /^stop all/.test(e.text)) { stopAt = e.t; continue; }
+      if (e.mod !== 'AU') continue;
+      if (e.text === 'Auto ' + util + ' on') return null;
+      if (e.text.startsWith('Auto ' + util + ' switched off')) return 'error';
+      if (e.text === 'Auto ' + util + ' off') return stopAt && stopAt - e.t < 5000 ? 'pause' : 'user';
+    }
+    return null;   // no switch-off in the ledger
+  }
+  // Reading the ledger is not pure: done here, and the switch-off kept in mem (the ledger holds 300 lines) until the switch is seen on.
+  function utilContext(v, ctx) {
+    const gap = 3 * (cfg.intervalMs ?? 5000);
+    let fresh = false;   // the first step of a Live session
+    if (ctx.live) { if (!utilLiveAt || ctx.now - utilLiveAt > gap) { utilSession++; fresh = true; } utilLiveAt = ctx.now; }
+    else utilLiveAt = 0;   // dry run: going Live again is a new session
+    ctx.utilSession = UTIL_LOAD + ':' + utilSession;
+    const au = ctx.mods?.autoUtil;
+    if (!au?.conf || !ctx.mem) return;
+    let list = [];
+    try { list = core?.ledger?.list?.() ?? []; } catch {}
+    const mm = ctx.mem('utilities');
+    for (const u of ['power', 'water']) {
+      const off = mm.get().off ?? {};
+      if (au.conf[u]?.on) { if (off[u]) mm.set({ off: { ...off, [u]: null } }); continue; }
+      if (off[u]) continue;
+      const why = utilOffWhy(u, list) ?? (fresh && mm.get().cpOn?.[u] ? 'user' : null);
+      // first step of a session: a stop-all or error stop happened while Core plan was stopped too, so it belongs to a past session
+      if (why) mm.set({ off: { ...off, [u]: { why, session: fresh && why !== 'user' ? null : ctx.utilSession } } });
+    }
+  }
+  function utilDecide(v, ctx) {
+    const au = ctx.mods?.autoUtil;
+    if (!au?.conf || !ctx.mem) return null;
+    const m = ctx.mem('utilities').get(), sid = ctx.utilSession, alerts = [];
+    const water = v.groups.some((g) => !g.paused && g.count > 0 && (v.bld(g.building).draws?.water ?? 0) > 0);
+    const readout = { power: au.conf.power?.on ? 'on' : 'off', water: au.conf.water?.on ? 'on' : water ? 'off' : 'off (no running group draws water)', alerts };
+    for (const u of ['power', 'water']) {
+      if (au.conf[u]?.on || (u === 'water' && !water)) continue;
+      const off = m.off?.[u];
+      if (off?.why === 'user') { alerts.push('Auto ' + u + ' was switched off by you: Core plan does not switch it back on'); continue; }
+      if (off ? off.session === sid : m.armed?.[u] === sid) { alerts.push('Auto ' + u + ' went off (' + (off?.why === 'pause' ? 'Alt+Shift+X' : off?.why === 'error' ? 'the game did not apply its changes' : 'not by a switch') + '): switched on again in the next Live session'); continue; }
+      return { readout, action: { id: 'utilities:' + u, text: 'Auto utilities: ' + u + ' on (wiki 8.1' + (u === 'water' ? ', a running group draws water' : '') + ')',
+        run: async () => {
+          au.set(u, true);
+          const mm = ctx.mem('utilities'), ok = au.conf[u]?.on === true;
+          mm.set({ armed: { ...(mm.get().armed ?? {}), [u]: sid }, off: { ...(mm.get().off ?? {}), [u]: null }, ...(ok ? { cpOn: { ...(mm.get().cpOn ?? {}), [u]: true } } : {}) });
+          return ok;
+        } } };
+    }
+    return { readout };
+  }
+
   // ---- registration ------------------------------------------------------------------------------------------------------------------
   // The server tick now: the core's clock (last tick seen + elapsed), never behind the last mutation tick.
   let memRef = null;                             // ctx.mem, for corePlan.offline() outside a step
   const setTick = (v, ctx) => { if (ctx.tick == null) { let t = 0; try { t = core?.nowTick?.() ?? 0; } catch {} ctx.tick = Math.max(t, v.mutTick ?? 0); } };
   cp.addDirector({
     name: 'resume', order: 10, always: true,   // always: a bill pause can make cash fall (S6) and drop the stage
-    context(v, ctx) { if (ctx.mem) resumeObserve(v, ctx.mem('resume')); },
+    defaults: { resumeGraceMin: 2 },   // minutes after a SetPaused Core plan sent in which a pause of that group is the director's
+    context(v, ctx) { ctx.apKept = keptPaused(); if (ctx.mem) resumeObserve(v, ctx.mem('resume'), ctx); },
     decide: resumeDecide,
     duties: () => [{ duty: 'resume groups paused by an unpaid bill (waits while Autopilot runs with resumePaused on)', owner: 'Core plan', done: true }],
+  });
+  cp.addDirector({
+    name: 'utilities', order: 12, always: true,   // always: from the first step, before a stage holds (wiki 8.1 step 1)
+    context: utilContext, decide: utilDecide,
+    duties: () => [{ duty: 'Auto utilities: power on, water on while a group draws water', owner: 'Core plan', done: true }],
   });
   cp.addDirector({
     name: 'slot', order: 70,
@@ -458,6 +521,7 @@ try {
     defaults: { dir_cadence: true, shelfHours: 1, kitWaveBuilds: 3 },
     context(v, ctx) {
       setTick(v, ctx); memRef = ctx.mem;
+      ctx.worldEvents ??= core?.sock?.worldEvents ?? null;
       const m = ctx.mem('cadence');
       if ((m.get().retailOk ?? null) !== (ctx.retailOk ?? null)) m.set({ retailOk: ctx.retailOk ?? null });
       cadenceSettle(cp.plan?.(), m, ctx.now ?? 0);
@@ -466,15 +530,10 @@ try {
     decide: cadenceDecide,
     duties: () => [{ duty: 'hourly and 6-hour checks (alerts on a new failure)', owner: 'Core plan', done: true }],
   });
-  cp.addDirector({
-    name: 'endgame', order: 90,
-    defaults: { dir_endgame: false },
-    decide: endgameDecide,
-    duties: () => [{ duty: 'endgame: Refinery start (off unless cfg.dir_endgame)', owner: 'Core plan', done: cfg.dir_endgame === true }],
-  });
   cp.offline = offline;
   cp.canSaveDesign = canSaveDesign;
-  cp._cadence = { slotDecide, sellPlan, sellDecide, cadenceDecide, cadenceSettle, tickPeriods, hourlyChecks, sixHourChecks, offlinePlan, canSaveDesign, endgameDecide, resumeObserve, resumeDecide, keepLine, consumption, activeFills, slotFills, NEVER, TARGETS };
+  cp.worldEvents = () => core?.sock?.worldEvents ?? null;
+  cp._cadence = { utilDecide, utilOffWhy, slotDecide, sellPlan, sellDecide, cadenceDecide, cadenceSettle, tickPeriods, hourlyChecks, sixHourChecks, offlinePlan, canSaveDesign, resumeObserve, keptPaused, resumeDecide, keepLine, consumption, activeFills, slotFills, NEVER, TARGETS };
 })();
 } catch (e) { console.error('[IdleCorp] cp-cadence failed to load:', e); }
 // @@END cp-cadence

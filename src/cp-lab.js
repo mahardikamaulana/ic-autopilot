@@ -2,6 +2,8 @@
 // CORE PLAN DIRECTOR: 7. Lab preset and module installer (wiki core-game-plan.md section 10)
 // ============================================================================
 // Director "lab" (order 55), one action per step:
+//   0. Second Lab (wiki 10 "build one", plan D2): with 1 Lab owned and cfg.labTarget 2, buy one on free acres above the buffer (else its own acres while the land rule is open) once the
+//      Iron Frames the unlocks still need are kept back and cash covers the money floor, the Lab and its bill floor; then into the Lab group.
 //   1. Lab group: a Manufacturing Lab sitting in the building pool gets its own group (CreateGroup), so modules can sit on it.
 //   2. Lab preset: while Core plan is live, a dry-run or reloaded Lab runner is started live with the Tier I list from wiki 10
 //      step 1 (Bookshelf / Table / Chair on Quality engineering, Planks on Process study), or on your own setting once you have
@@ -16,7 +18,7 @@ try {
 (() => {
   const W = typeof window !== 'undefined' ? window : globalThis;
   if (!W.corePlan?.addDirector) throw new Error('Core plan did not load');
-  const REGION = 0, SOCKETS = 6;
+  const REGION = 0, SOCKETS = 6, ACRE_CAP = 360;
   const CELLS = ['0,-1', '1,-1', '-1,0', '1,0', '-1,1', '0,1'];
   const OVERCLOCK = 61, REFINER = 62;
   const KIND_NAME = { [OVERCLOCK]: 'Overclock', [REFINER]: 'Refiner' };
@@ -145,9 +147,40 @@ try {
     return true;
   }
 
+  // Second Lab (wiki 10 "build one", plan D2), only while one is owned and cfg.labTarget asks for 2 (never more). Pure. Gates: the Iron Frames the
+  // unlocks still need (ifNeed) stay back; acres above the CD-farm buffer, else its own acres bought in the same action while the land rule is
+  // open (as buildout Stage C-D: acresOwned + acres <= min(rule.lastAcre, 360)); cash for the money floor + land + the Lab + its bill floor.
+  // No free acre and the rule closed: not wanted, so E5 is never held by a Lab that cannot be placed.
+  function labBuy(v, ctx, cfg, rule, stage) {
+    const lab = v.idB('Manufacturing Lab');
+    if (lab == null) return { note: 'no Manufacturing Lab in the catalog' };
+    const owned = v.owned('Manufacturing Lab');
+    if (owned !== 1 || cfg.labTarget < 2) return { note: owned + ' Manufacturing Lab' + (owned === 1 ? '' : 's') + ' (target ' + cfg.labTarget + ')' };
+    const usd = W.corePlan._usd, bd = v.bld(lab), floor = ctx.floorCents ?? 0;
+    const free = v.freeAcres - cfg.bufferAcres, acres = Math.max(0, bd.acres - Math.max(0, free)), cap = Math.min(rule?.lastAcre ?? 0, ACRE_CAP);
+    // Land for the Lab only in Stage C-D: in Stage A-B free land goes to engine blocks first (plan D-1).
+    if (acres && !['C', 'D', 'END'].includes(stage)) return { note: 'second Lab: no free acre above the ' + cfg.bufferAcres + '-acre buffer (stage ' + (stage ?? '-') + ' buys no land for it)' };
+    if (acres && v.acresOwned + acres > cap) return { note: 'second Lab: land rule closed (' + Math.max(0, free) + ' free acre(s) above the ' + cfg.bufferAcres + '-acre buffer, needs ' + bd.acres + '; ' + (rule ? 'acre #' + (v.acresOwned + acres) + ' is past #' + cap : 'no land rule') + ')' };
+    const per = (bd.build_items ?? []).find((i) => i.item === v.idI('Iron Frame'))?.amount ?? 0, keep = W.corePlan._ifNeed(v, null), frames = v.has('Iron Frame');
+    if (frames < keep + per) return { want: true, note: 'second Lab waits: Iron Frame ' + Math.floor(frames) + ' < ' + (keep + per) + ' (' + keep + ' kept for the unlocks + ' + per + ')' };
+    let land = 0;
+    for (let i = 0; i < acres; i++) land += W.corePlan._acrePriceCents(v.landBought + i);
+    const price = W.idleCore.planner.price(bd.cost, owned, 0);
+    const mw = bd.draws?.power ?? 0, bill = W.corePlan._billNeed(v, mw);
+    const landTxt = acres ? acres + ' acre(s) ' + usd(land) + ' + ' : '';
+    if (v.money < floor + land + price + bill) return { want: true, note: 'second Lab waits: cash ' + usd(v.money) + ' < ' + usd(floor + land + price + bill) + ' (money floor + ' + landTxt + 'Lab ' + usd(price) + ' + ' + mw + ' MW bills)' };
+    const g = v.groups.find((x) => x.building === lab), steps = W.corePlan._buySteps(v, lab, acres, g, 'Manufacturing Lab', (v.pool[lab] ?? 0) + 1);
+    const text = 'second Manufacturing Lab: buy ' + landTxt + usd(price) + (g ? ' into ' + groupLabel(v, g) : ' (new group)');
+    return { want: true, note: text, action: { id: 'lab:buy:' + owned, text, steps, hold: true } };
+  }
+
+  const pendingInvest = (v, ctx, rule, stage) => (labBuy(v, ctx, W.corePlan.cfg, rule, stage).want ? [{ what: 'second Manufacturing Lab', paybackH: null }] : []);
+
   W.corePlan.addDirector({
     name: LAB, order: 55,
-    defaults: { labPreset: true, labGroup: true, labModules: true, modulesStackOk: false },
+    defaults: { labPreset: true, labGroup: true, labModules: true, modulesStackOk: false, labTarget: 2 },
+    // E5: the second Lab is an investment still to make while it is wanted and not bought.
+    pendingInvest,
     // Records every installed module once (group, kind, cell, first seen) for the readout. Stacking (R2) is not measured here:
     // what group.work fields mean is unverified, so you read the group's speed and set modulesStackOk.
     context(v, ctx) {
@@ -172,12 +205,21 @@ try {
       const actions = [];
       const lab = v.idB('Manufacturing Lab');
 
+      // 0. Second Lab.
+      const buy = labBuy(v, ctx, cfg, out?.rule, out?.stage);
+      readout.secondLab = buy.note;
+      if (buy.action) actions.push(buy.action);
+
       // 1. Lab group.
       const labGroup = lab != null && v.groups.find((g) => g.building === lab);
       const inPool = lab != null ? v.pool[lab] ?? 0 : 0;
       if (cfg.labGroup && lab != null && !labGroup && inPool > 0) {
         actions.push({ id: 'lab:group', text: 'create a group for the ' + inPool + ' Manufacturing Lab' + (inPool > 1 ? 's' : '') + ' in the pool',
           steps: [{ msg: { type: 'CreateGroup', building: lab, amount: inPool, name: 'Manufacturing Lab', region: REGION }, until: (x) => x.groups.some((g) => g.building === lab) }] });
+      } else if (cfg.labGroup && labGroup && inPool > 0) {   // a bought Lab whose assign did not land joins the group
+        const c0 = labGroup.count;
+        actions.push({ id: 'lab:assign', text: 'assign the ' + inPool + ' Manufacturing Lab' + (inPool > 1 ? 's' : '') + ' in the pool to ' + groupLabel(v, labGroup),
+          steps: [{ msg: { type: 'AssignBuildings', group: labGroup.id, amount: inPool }, until: (x) => (x.groups.find((g) => g.id === labGroup.id)?.count ?? 0) >= c0 + inPool }] });
       }
       readout.labGroup = labGroup ? groupLabel(v, labGroup) : inPool ? inPool + ' Lab in the pool, no group' : 'no Manufacturing Lab';
 
@@ -224,7 +266,7 @@ try {
       { duty: 'confirm module stacking (R2): read the group speed after the first Overclock, then corePlan.importCfg({ modulesStackOk: true })', owner: 'you', done: false },
     ],
   });
-  W.corePlan._lab = { freeModules, planInstall, presetList, CELLS, timing };
+  W.corePlan._lab = { freeModules, planInstall, presetList, CELLS, timing, labBuy, pendingInvest };
 })();
 } catch (e) { console.error('[IdleCorp] cp-lab failed to load:', e); }
 // @@END cp-lab

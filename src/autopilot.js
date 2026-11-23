@@ -548,13 +548,13 @@ try {
       fits: (s, r) => {
         const rc = s.recipe(r), b = rc && s.bld(rc.building);
         if (!rc || rc.inputs.length || b.floor_w !== 5 || b.floor_h !== 2) return null;
-        return b.operations?.includes('Extract') ? X3_MERGE(121) : b.operations?.includes('Cultivate') ? X3_MERGE(122) : null;
+        return b.operations?.includes('Extract') ? unpack(core.floorDesigns.mineX3) : b.operations?.includes('Cultivate') ? X3_MERGE(122) : null;
       },
     },
     { name: 'Saw x2', rate: 2, recipes: [R.SAW_PLANKS], // proven max on the 6x2 Sawmill
       cells: '0,0:123:1 0,1:123:0 1,0:123:0 1,1:126:0 2,0:123:0 2,1:123:0 3,0:114:0 3,1:114:0 5,0:123:0 5,1:123:0' },
     { name: 'Smelt x3', rate: 3, recipes: [R.IRON_SHEET, 10, 11], // Iron, Steel, Aluminum Sheet
-      cells: SMELT_X3 + ' 8,0:123:0 8,1:123:0 8,2:123:0 9,0:114:0 9,1:114:0 9,2:114:0' },
+      cells: core.floorDesigns.smeltX3 },
     { name: 'Kiln x3', rate: 3, recipes: [13, 14], cells: SMELT_X3 }, // Mix Concrete, Blow Glass
     { name: 'Frame Timber x5', rate: 5, recipes: [R.FRAME_TIMBER], cells: WORKSHOP_V1 },
     // Scored with the game's engine on 2026-11-22: x5 on Make Bookshelf / Table / Chair. Layouts are per recipe, so each gets its own

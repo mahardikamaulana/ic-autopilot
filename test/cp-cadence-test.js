@@ -1,4 +1,4 @@
-// Tests for src/cp-cadence.js: slot, sell, cadence, offline, canSaveDesign, endgame.
+// Tests for src/cp-cadence.js: slot, sell, cadence, world events, offline, canSaveDesign, resume, utilities.
 //   CP_FROM_SRC=1 bun test/cp-cadence-test.js
 const assert = require('assert');
 const F = require('./cp-fixtures');
@@ -24,13 +24,11 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
   const { cp } = F.load(['cp-lab', 'cp-cadence']);
   const X = cp._cadence;
 
-  await t('directors load; endgame is off by default', () => {
-    for (const n of ['slot', 'sell', 'cadence', 'endgame']) assert.ok(cp.directors().includes(n), n);
-    assert.strictEqual(cp.cfg.dir_endgame, false);
+  await t('directors load', () => {
+    for (const n of ['resume', 'utilities', 'slot', 'sell', 'cadence']) assert.ok(cp.directors().includes(n), n);
+    assert.ok(!cp.directors().includes('endgame'), 'the endgame director is in cp-endgame.js');
     assert.strictEqual(typeof cp.offline, 'function');
-    const d = cp._decide(view(cp, plain()), F.ctxOf({ tick: T0 }));
-    assert.ok(d.waits.includes('endgame: off'), d.waits.join(' | '));
-    assert.ok(!d.actions.some((a) => a.director === 'endgame'));
+    assert.strictEqual(typeof cp.worldEvents, 'function');
   });
 
   // ---- slot -------------------------------------------------------------------------------------------------------------
@@ -419,29 +417,29 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
     assert.strictEqual(cpS.canSaveDesign({}, r), true);
   });
 
-  // ---- endgame ------------------------------------------------------------------------------------------------------------------
-  await t('endgame: StartTech Refinery once E1-E5 hold, 750,000 CD and 6 Wired Frames are in hand', () => {
+  // ---- world events (plan D5) -------------------------------------------------------------------------------------------
+  await t('world events (D5): the last WorldEvents socket message is kept raw and shown as an info row in the 6-hour checks, never failing', () => {
     const st = plain();
-    st.research = null; st.unlocked_buildings = [...st.unlocked_buildings, B('Assembly Plant'), B('Retail Store'), B('Oil Rig')];
-    st.items[F.CD] = 800000; st.stock[0][I('Wired Frame')] = 6;
-    const v = view(cpS, st);
-    let out = { finished: false, E: [{ ok: false }] };
-    assert.ok(!XS.endgameDecide(v, F.ctxOf(), out).action, 'not before E1-E5');
-    out = { finished: true, E: [] };
-    const r = XS.endgameDecide(v, F.ctxOf(), out);
-    assert.deepStrictEqual(r.action.steps[0].msg, { type: 'StartTech', building: B('Refinery'), region: 0 });
-    assert.strictEqual(out.cdNeed.name, 'Refinery');
-    assert.deepStrictEqual(r.readout.checklist.map((c) => c.item), ['Iron Frame', 'Wired Frame', 'Copper Wire', 'Copper Ore']);
-    st.stock[0][I('Wired Frame')] = 5;
-    assert.match(XS.endgameDecide(view(cpS, st), F.ctxOf(), { finished: true }).wait, /1 more Wired Frame/);
-    st.stock[0][I('Wired Frame')] = 6; st.items[F.CD] = 700000;
-    assert.ok(!XS.endgameDecide(view(cpS, st), F.ctxOf(), { finished: true }).action);
-    // Switched on, the director runs inside decide (and waits, since this corp is not at the end).
-    cpS.importCfg({ dir_endgame: true });
-    const d = cpS._decide(view(cpS, plain()), F.ctxOf({ tick: T0 }));
-    assert.ok(!d.waits.includes('endgame: off'));
-    assert.ok(d.waits.some((w) => /^endgame: end conditions/.test(w)), d.waits.join(' | '));
-    cpS.importCfg({ dir_endgame: false });
+    const { cp: c2, core, w } = F.boot(st, { deals: [], catalog: CAT, modules: ['cp-lab', 'cp-cadence'] });
+    const row = (o = {}) => c2._decide(view(c2, st), F.ctxOf({ tick: T0, now: Date.now(), ...o })).readouts.cadence.six.find((x) => x.id === 'world');
+    assert.strictEqual(c2.worldEvents(), null);
+    assert.deepStrictEqual(row(), { id: 'world', ok: null, why: 'no WorldEvents message seen' });
+    core.walk(true);                                             // attaches the core's listener to the game socket
+    w.emit({ kind: 'WorldEvents', clock: { npc_power: 2 }, tick: 5 });
+    w.emit({ kind: 'Heartbeat', tick: 6, hash: 'x' });           // other messages leave the record alone
+    const rec = c2.worldEvents();
+    assert.strictEqual(JSON.parse(rec.raw).clock.npc_power, 2);
+    assert.ok(Math.abs(rec.at - Date.now()) < 5000);
+    const r = row();
+    assert.strictEqual(r.ok, null);
+    assert.match(r.why, /^world events: last WorldEvents message 0 min ago: \{"kind":"WorldEvents","clock":\{"npc_power":2\}/);
+    const d = c2._decide(view(c2, st), F.ctxOf({ tick: T0, now: Date.now() }));
+    assert.ok(!d.readouts.cadence.failing.some((x) => /^world/.test(x)));
+    assert.ok(!d.actions.some((a) => /world/i.test(a.text)), 'never acted on');
+    const long = { raw: 'x'.repeat(500), at: Date.now() - 2 * 3600000 };
+    const six = c2._cadence.sixHourChecks(view(c2, st), F.ctxOf({ worldEvents: long, now: Date.now() }), { rule: null }).find((x) => x.id === 'world');
+    assert.strictEqual(six.why, 'world events: last WorldEvents message 2.0 h ago: ' + 'x'.repeat(200));
+    F.unload();
   });
 
   // ---- shelf hours, free modules (plan A1, A4) -----------------------------------------------------------------------------
@@ -529,6 +527,36 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
     assert.ok(!c.duties().some((x) => /floor upgrades/.test(x.duty) || x.owner === 'Autopilot'));
   });
 
+  await t('resume (D7): Autopilot\'s keptPaused groups (localStorage earlyGame.v2) and the endgame gate\'s groups stay paused; a bad key reads as empty', () => {
+    const { cp: c } = F.load(['cp-cadence']);
+    const cat = F.board.catalog, dl = F.cottonBidDeals(), st = F.stageA();
+    const v0 = c._view(st, cat, dl), drawAll = v0.groups.reduce((a, g) => a + (v0.bld(g.building).draws?.power ?? 0) * g.count, 0);
+    st.subscriptions = { 0: { power: drawAll } };
+    const mem = F.ctxOf().mem;
+    const dec = () => c._decide(c._view(st, cat, dl), F.ctxOf({ mem }));
+    const res = (d) => d.actions.find((a) => a.director === 'resume');
+    dec();
+    st.groups[1].paused = true; st.items[F.MONEY] = 100; dec();  // a bill pause
+    assert.deepStrictEqual(mem('resume').get().bill, [1]);
+    st.items[F.MONEY] = 5e6;
+    try {
+      for (const raw of [null, '{not json', JSON.stringify({ keptPaused: 'x' }), JSON.stringify({}), JSON.stringify({ keptPaused: [2] })]) {
+        globalThis.localStorage = F.mem(raw == null ? {} : { 'earlyGame.v2': raw });
+        assert.ok(res(dec()), 'resumed with earlyGame.v2 = ' + raw);
+      }
+      delete globalThis.localStorage;
+      assert.deepStrictEqual(c._cadence.keptPaused(), [], 'no localStorage at all');
+      globalThis.localStorage = F.mem({ 'earlyGame.v2': JSON.stringify({ keptPaused: [1, 9] }) });
+      assert.deepStrictEqual(c._cadence.keptPaused(), [1, 9]);
+      assert.ok(!res(dec()), 'kept paused by Autopilot');
+      globalThis.localStorage = F.mem({});
+      mem('endgame').set({ egMine: [1] });                       // the endgame stock gate paused it
+      assert.ok(!res(dec()));
+      mem('endgame').set({ egMine: [] });
+      assert.ok(res(dec()));
+    } finally { delete globalThis.localStorage; }
+  });
+
   await t('hand-off (B4): every engine item to neverSell, then Autopilot stopped once; a restart by the user is left alone with an alert', async () => {
     const { cp: c } = F.load(['cp-cadence']);
     const cat = F.board.catalog, v = c._view(F.stageA(), cat, F.cottonBidDeals()), mem = F.ctxOf().mem;
@@ -536,7 +564,8 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
     const eg = { running: true, stop() { stops++; this.running = false; } };
     globalThis.earlyGame = eg;
     const ap = (o) => ({ neverSell: [], cdBooster: true, running: eg.running, ...o });
-    const ho = (o, cx = c) => cx._decide(v, F.ctxOf({ mem, ap: ap(o) })).actions.find((a) => a.id.startsWith('handoff'));
+    const util = { conf: { power: { on: true }, water: { on: true } }, set() {} };   // Auto utilities power on (H-fix)
+    const ho = (o, cx = c) => cx._decide(v, F.ctxOf({ mem, ap: ap(o), mods: { autoUtil: util } })).actions.find((a) => a.id.startsWith('handoff'));
     const a1 = ho();
     assert.strictEqual(a1.id, 'handoff');
     for (const n of ['Wood', 'Planks', 'Iron Sheet', 'Concrete', 'Glass', 'Bookshelf', 'Table', 'Chair', 'Bench', 'Wooden Frame', 'Iron Frame',
@@ -545,6 +574,12 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
     const patched = { neverSell: a1.patch.neverSell, cdBooster: false };
     c.cfg.handoffStopAutopilot = false; assert.ok(!ho(patched), 'cfg.handoffStopAutopilot false: Autopilot keeps running'); c.cfg.handoffStopAutopilot = true;
     c.cfg.dir_resume = false; assert.ok(!ho(patched), 'D7 off: Autopilot keeps the resume duty'); c.cfg.dir_resume = true;
+    // Autopilot also raises the power subscription: no stop until Auto utilities power is on (or while autoUtil is not loaded)
+    util.conf.power.on = false;
+    assert.ok(!ho(patched), 'power Auto off: Autopilot keeps running');
+    assert.ok(c._decide(v, F.ctxOf({ mem, ap: ap(patched), mods: { autoUtil: util } })).waits.includes('hand-off: Autopilot keeps running until Auto utilities power is on (it raises the power subscription)'));
+    assert.ok(!c._decide(v, F.ctxOf({ mem, ap: ap(patched) })).actions.some((a) => a.id === 'handoff:stop'), 'autoUtil not loaded');
+    util.conf.power.on = true;
     const a2 = ho(patched);
     assert.strictEqual(a2.id, 'handoff:stop');
     assert.strictEqual(await a2.run(), true);
@@ -556,15 +591,164 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
     assert.match(d.readouts.handoff.alert, /started again after the hand-off: left running/);
     assert.strictEqual(stops, 1);
     // Autopilot not running at the hand-off: recorded without a stop, so a later start is left alone
-    const mem2 = F.ctxOf().mem, a3 = c._decide(v, F.ctxOf({ mem: mem2, ap: ap({ ...patched, running: false }) })).actions.find((a) => a.id === 'handoff:stop');
+    const mem2 = F.ctxOf().mem, a3 = c._decide(v, F.ctxOf({ mem: mem2, ap: ap({ ...patched, running: false }), mods: { autoUtil: util } })).actions.find((a) => a.id === 'handoff:stop');
     assert.match(a3.text, /Autopilot is not running; recorded/);
     assert.strictEqual(await a3.run(), true); assert.strictEqual(stops, 1); assert.ok(mem2('handoff').get().stopped);
-    assert.ok(!c._decide(v, F.ctxOf({ mem: mem2, ap: ap(patched) })).actions.some((a) => a.id.startsWith('handoff')), 'started later: not stopped');
+    assert.ok(!c._decide(v, F.ctxOf({ mem: mem2, ap: ap(patched), mods: { autoUtil: util } })).actions.some((a) => a.id.startsWith('handoff')), 'started later: not stopped');
     // no resume director loaded (D7): Autopilot is never stopped
     const { cp: c2 } = F.load([]);
     globalThis.earlyGame = { running: true, stop() { stops++; } };
     assert.ok(!c2._decide(v, F.ctxOf({ ap: ap(patched) })).actions.some((a) => a.id === 'handoff:stop'));
     globalThis.earlyGame = undefined;
+  });
+
+  await t('utilities (D1): power Auto on once per Live session; your switch-off is sticky with an alert; Alt+Shift+X waits for a new session; water only for a water-drawing group', async () => {
+    const { cp: c, core: cc } = F.load(['cp-cadence']);
+    const st = F.stageA(), cat = F.board.catalog;
+    const util = { conf: { power: { on: false }, water: { on: false } }, set(u, on) { if (this.conf[u].on === !!on) return; this.conf[u].on = !!on; cc.ledger.add('AU', 'info', 'Auto ' + u + (on ? ' on' : ' off')); } };
+    const mem = F.ctxOf().mem;
+    let now = 1.8e12;
+    const dec = (o = {}) => c._decide(c._view(st, cat, F.cottonBidDeals()), F.ctxOf({ mem, now, mods: { autoUtil: util }, ...o }));
+    const act = (d) => d.actions.find((a) => a.director === 'utilities');
+    const alerts = (d) => (d.readouts.utilities?.alerts ?? []).join(' | ');
+    // off, no switch-off line: switched on; water stays off (no running group draws water)
+    let a = act(dec());
+    assert.strictEqual(a?.id, 'utilities:power');
+    assert.strictEqual(await a.run(), true); assert.strictEqual(util.conf.power.on, true);
+    let d = dec();
+    assert.ok(!act(d), 'on, and no water draw: nothing to do');
+    assert.match(d.readouts.utilities.water, /no running group draws water/);
+    // Alt+Shift+X: "Auto power off" with a stop-all line right after it: not again in this Live session, again in the next
+    util.set('power', false); cc.ledger.add('--', 'info', 'stop all (Alt+Shift+X): Auto utilities');
+    d = dec();
+    assert.ok(!act(d)); assert.match(alerts(d), /Auto power went off \(Alt\+Shift\+X\): switched on again in the next Live session/);
+    now += 60000;                                                // a gap longer than 3 steps: a new Live session
+    a = act(dec()); assert.strictEqual(a?.id, 'utilities:power'); await a.run();
+    // its own 3-failure stop: the same
+    util.conf.power.on = false; cc.ledger.add('AU', 'fail', 'Auto power switched off: the server did not apply 3 changes in a row');
+    d = dec(); assert.ok(!act(d)); assert.match(alerts(d), /the game did not apply its changes/);
+    now += 60000; a = act(dec()); assert.strictEqual(a?.id, 'utilities:power'); await a.run();
+    // real order: Alt+Shift+X stops Core plan too, so its first look at the switch-off is in the next session: switched on there
+    util.set('power', false); cc.ledger.add('--', 'info', 'stop all (Alt+Shift+X): Core plan + Auto utilities');
+    now += 60000; a = act(dec()); assert.strictEqual(a?.id, 'utilities:power', 'stop-all first seen in a new session'); await a.run();
+    util.conf.power.on = false; cc.ledger.add('AU', 'fail', 'Auto power switched off: the server did not apply 3 changes in a row');
+    now += 60000; a = act(dec()); assert.strictEqual(a?.id, 'utilities:power', 'error stop first seen in a new session'); await a.run();
+    // the user switches it off: an alert, no action, also in a later session and after the line has left the ledger
+    util.set('power', false);
+    d = dec(); assert.ok(!act(d)); assert.match(alerts(d), /Auto power was switched off by you: Core plan does not switch it back on/);
+    now += 60000; assert.ok(!act(dec()), 'sticky across sessions');
+    cc.ledger.clear(); now += 60000; assert.ok(!act(dec()), 'kept in mem when the ledger line is gone');
+    // they switch it on again: forgotten; a later Alt+Shift+X is not theirs
+    util.set('power', true); dec();
+    assert.ok(!mem('utilities').get().off.power);
+    // water: on once a running group draws water (Paper Mill), not for a paused one
+    st.groups[20] = { building: F.B('Paper Mill'), region: 0, count: 1, recipe: null, paused: true };
+    assert.ok(!act(dec()), 'paused group: no water');
+    st.groups[20].paused = false;
+    a = act(dec()); assert.strictEqual(a?.id, 'utilities:water'); await a.run(); assert.strictEqual(util.conf.water.on, true);
+    // the pure ledger reading
+    const L = (...e) => e.map(([mod, text, t]) => ({ mod, text, t }));
+    assert.strictEqual(c._cadence.utilOffWhy('power', L(['AU', 'Auto power on', 1])), null);
+    assert.strictEqual(c._cadence.utilOffWhy('power', L(['AU', 'Auto power on', 1], ['AU', 'Auto power off', 2])), 'user');
+    assert.strictEqual(c._cadence.utilOffWhy('power', L(['AU', 'Auto power off', 2], ['--', 'stop all (Alt+Shift+X): x', 3])), 'pause');
+    assert.strictEqual(c._cadence.utilOffWhy('power', L(['AU', 'Auto power off', 2], ['--', 'stop all (Alt+Shift+X): x', 60000])), 'user', 'a stop-all much later is not why');
+    assert.strictEqual(c._cadence.utilOffWhy('water', L(['AU', 'Auto power off', 2])), null);
+    assert.strictEqual(c._cadence.utilOffWhy('power', []), null);
+    F.unload();
+  });
+
+  await t('resume (D7): a pause is judged against the load before it, so a user pause next to a paused group is not a bill pause; a real bill pause still is', () => {
+    const { cp: c } = F.load(['cp-buildout', 'cp-cadence']);
+    const cat = F.board.catalog, dl = F.cottonBidDeals(), st = F.stageA();
+    st.items[F.MONEY] = 5e8;                                     // $5M: every bill covered many times
+    const runLoad = () => { const v = c._view(st, cat, dl); return v.groups.reduce((a, g) => a + (g.paused ? 0 : (v.bld(g.building).draws?.power ?? 0) * g.count), 0); };
+    const mem = F.ctxOf().mem;
+    const dec = (o = {}) => c._decide(c._view(st, cat, dl), F.ctxOf({ mem, ...o }));
+    const res = (d) => d.actions.find((a) => a.director === 'resume');
+    st.groups[8].paused = true; mem('buildout').set({ kilnMine: [8] });   // the Kiln gate paused the Kiln
+    st.subscriptions = { 0: { power: runLoad() } };              // Auto utilities sizes to the running groups only
+    dec(); dec();
+    st.groups[1].paused = true;                                  // the user pauses the Smelters, cash plenty
+    let d = dec();
+    assert.ok(!(mem('resume').get().bill ?? []).includes(1), JSON.stringify(mem('resume').get()));
+    assert.ok(mem('resume').get().user.includes(1));
+    st.subscriptions[0].power = runLoad(); d = dec();            // Auto utilities lowers to the new load
+    assert.ok(!res(d), 'a user pause is never resumed');
+    st.groups[1].paused = false; dec();
+    st.items[F.MONEY] = 100; st.groups[1].paused = true; dec();  // cash under 2 bills of the load before: the bill did it
+    assert.deepStrictEqual(mem('resume').get().bill, [1]);
+  });
+
+  await t('resume (D7): a pause a director sent in the last resumeGraceMin minutes is not a bill pause (its own memory may be written later)', () => {
+    const { cp: c } = F.load(['cp-cadence']);
+    const cat = F.board.catalog, dl = F.cottonBidDeals(), st = F.stageA();
+    const v0 = c._view(st, cat, dl);
+    st.subscriptions = { 0: { power: v0.groups.reduce((a, g) => a + (v0.bld(g.building).draws?.power ?? 0) * g.count, 0) } };
+    const mem = F.ctxOf().mem, now = 1.8e12;
+    const dec = (o = {}) => c._decide(c._view(st, cat, dl), F.ctxOf({ mem, now, ...o }));
+    assert.strictEqual(c.cfg.resumeGraceMin, 2);
+    dec();
+    st.items[F.MONEY] = 100;                                     // bill short
+    st.groups[8].paused = true; st.groups[1].paused = true;
+    dec({ pauseSent: { 8: now - 30000, 1: now - 5 * 60000 } });  // the Kiln gate sent 8 just now; 1 was a pause sent 5 min ago
+    assert.ok(mem('resume').get().user.includes(8), JSON.stringify(mem('resume').get()));
+    assert.deepStrictEqual(mem('resume').get().bill, [1]);
+  });
+
+  await t('hand-off (B4): no Autopilot stop while browser storage does not save (the stop must be kept once only)', async () => {
+    const { cp: c } = F.load(['cp-cadence']);
+    const v = c._view(F.stageA(), F.board.catalog, F.cottonBidDeals());
+    let stops = 0;
+    globalThis.earlyGame = { running: true, stop() { stops++; this.running = false; } };
+    const ids = c.ENGINE_ITEMS.map((n) => F.I(n));
+    const util = { conf: { power: { on: true }, water: { on: true } }, set() {} };
+    const noSave = () => { let o = {}; return { get: () => o, set: (p) => (o = { ...o, ...p }) }; };   // each handle starts empty, like memOf over storage that drops writes
+    const d = c._decide(v, F.ctxOf({ mem: noSave, ap: { neverSell: ids, cdBooster: false, running: true }, mods: { autoUtil: util } }));
+    assert.ok(!d.actions.some((a) => a.id === 'handoff:stop'), d.actions.map((a) => a.id).join(','));
+    assert.ok(d.waits.some((w) => /hand-off: .*browser storage does not save/.test(w)), d.waits.join(' | '));
+    assert.strictEqual(stops, 0);
+    globalThis.earlyGame = undefined;
+  });
+
+  await t('utilities (D1): going Live with power Auto off after Core plan had switched it on, and no ledger line why: your switch-off (sticky); never switched on by it: on', async () => {
+    const { cp: c, core: cc } = F.load(['cp-cadence']);
+    const st = F.stageA(), cat = F.board.catalog;
+    const util = { conf: { power: { on: false }, water: { on: false } }, set(u, on) { if (this.conf[u].on === !!on) return; this.conf[u].on = !!on; cc.ledger.add('AU', 'info', 'Auto ' + u + (on ? ' on' : ' off')); } };
+    const mem = F.ctxOf().mem;
+    let now = 1.8e12;
+    const dec = (o = {}) => c._decide(c._view(st, cat, F.cottonBidDeals()), F.ctxOf({ mem, now, mods: { autoUtil: util }, ...o }));
+    const act = (d) => d.actions.find((a) => a.director === 'utilities');
+    let a = act(dec()); assert.strictEqual(a?.id, 'utilities:power', 'never on: switched on'); await a.run();
+    dec();
+    // Core plan stopped; the user switches power off, and the ledger line is gone (cleared, or 300 newer lines) before it goes Live again
+    util.set('power', false); cc.ledger.clear();
+    now += 3600000;
+    const d = dec();
+    assert.ok(!act(d), 'not switched on again');
+    assert.match((d.readouts.utilities?.alerts ?? []).join(' | '), /Auto power was switched off by you/);
+    now += 60000; assert.ok(!act(dec()), 'sticky');
+    util.set('power', true); dec();
+    assert.ok(!mem('utilities').get().off.power, 'switched on again by the user: forgotten');
+  });
+
+  await t('resume (D7) through the runner: a SetPaused a director sent and the server confirmed late is not read as a bill pause', async () => {
+    const st = F.stageA(), disk = {};
+    globalThis.localStorage = F.mem(disk);
+    st.items[F.MONEY] = 100;                                     // cash under 2 bills: any new pause would read as a bill
+    const { cp: c2, w } = F.boot(st, { ignore: ['SetPaused'], modules: ['cp-cadence'] });
+    c2.cfg.confirmMs = 50; c2.cfg.unlocks = false; c2.cfg.land = false; c2.cfg.handoff = false;
+    let sent = false;
+    c2.addDirector({ name: 'gate', order: 1, always: true, decide: () => (sent ? null : { action: { id: 'gate', text: 'gate pause', steps: [{ msg: { type: 'SetPaused', group: 8, paused: true }, until: (x) => !!x.groups.find((g) => g.id === 8)?.paused }] } }) });
+    c2.start({ dryRun: false });
+    await waitFor(() => !c2.active);
+    sent = true;
+    assert.ok(w.ws.sent.some((m) => m.type === 'SetPaused' && m.group === 8), 'the pause was sent');
+    st.groups[8].paused = true;                                  // the server applies it after the confirm window
+    await c2._step();
+    const mem = JSON.parse(disk['corePlan.v1.mem.resume'] || '{}');
+    assert.ok((mem.user ?? []).includes(8) && !(mem.bill ?? []).includes(8), JSON.stringify(mem));
+    c2.stop();
+    F.unload();
   });
 
   F.unload();

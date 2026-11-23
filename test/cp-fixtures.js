@@ -126,7 +126,8 @@ function world(st, deals = cottonBidDeals(), { ignore = [], catalog = board.cata
   const root = { __reactContainer$x: fiber };
   const el = () => ({ append() {}, remove() {}, addEventListener() {}, setAttribute() {}, style: {}, classList: { toggle() {} } });
   globalThis.document = { body: el(), head: el(), title: 'game', getElementById: (id) => (id === 'root' ? root : null), createElement: el, querySelector: () => null, hidden: true };
-  return { ws, st, props, deals, tickRef, setRetail: (r) => { retail = r; } };
+  // emit: a server message to every socket listener (as the game sends one), e.g. { kind: 'WorldEvents', ... }
+  return { ws, st, props, deals, tickRef, setRetail: (r) => { retail = r; }, emit: (m) => { for (const f of [...listeners]) f({ data: JSON.stringify(m) }); } };
 }
 
 const mem = (disk = {}) => ({ getItem: (k) => disk[k] ?? null, setItem: (k, v) => { disk[k] = String(v); }, removeItem: (k) => { delete disk[k]; }, _disk: disk });

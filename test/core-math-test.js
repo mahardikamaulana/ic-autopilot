@@ -135,6 +135,17 @@ t('opts.cyclesPerHour overrides state.cyclesPerHour: 300 cycles/h raises T_wall 
   assert.strictEqual(CM.landRule(state, catalog, {}).tWall, base.tWall);
 });
 
+t('opts.cdPerHour (a measured CD rate) sets T_wall instead of the modelled batch; tWallFrom says which', () => {
+  const base = CM.landRule(state, catalog);
+  assert.strictEqual(base.tWallFrom, 'model');
+  const r = CM.landRule(state, catalog, { cdPerHour: 755000 / 10 });
+  assert.strictEqual(r.tWallFrom, 'measured');
+  near(r.tWall, 10, 1e-9, 'T_wall');
+  near(r.limitHours, 10 / 3, 1e-9, 'payback limit');
+  assert.ok(r.lastAcre <= base.lastAcre, 'a shorter T_wall closes the rule earlier');
+  assert.strictEqual(CM.landRule(state, catalog, { cdPerHour: 0 }).tWallFrom, 'model', '0 or missing: the model');
+});
+
 t('edge: already past the last acre -> acresToBuy 0, no land cost, nothing to build', () => {
   const r = CM.landRule({ ...state, acres: 400, acrePrice: 90000 }, catalog);
   assert.strictEqual(r.acresToBuy, 0);

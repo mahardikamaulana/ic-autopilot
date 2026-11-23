@@ -943,9 +943,14 @@ try {
 
   // ---- rates (#7) --------------------------------------------------------
 
-  function sample() {
-    const now = Date.now();
-    stats.samples.push({ t: now, cycles: stats.cycles, built: stats.built, net: netSpend() });
+  // Net spend per sample, across runs (stats reset at every run start): rates().spendH sums its last hour (Core plan E5).
+  let spendLog = [];
+  function sample(now = Date.now()) {
+    const net = netSpend(), prev = stats.netLogged ?? 0;
+    if (net !== prev) spendLog.push({ t: now, amount: net - prev });
+    stats.netLogged = net;
+    spendLog = spendLog.filter((s) => now - s.t <= 3600000);
+    stats.samples.push({ t: now, cycles: stats.cycles, built: stats.built, net });
     stats.samples = stats.samples.filter((s) => now - s.t <= RATE_WINDOW_MS);
   }
 
@@ -953,16 +958,16 @@ try {
   // Rates stay hidden until MIN_RATE_CYCLES cycles are in, since one fast cycle
   // extrapolates to absurd hourly figures.
   const MIN_RATE_CYCLES = 3;
-  function rates(r = read()) {
-    const now = Date.now();
+  function rates(r = read(), now = Date.now()) {
     const s = stats.samples.filter((x) => now - x.t <= RATE_WINDOW_MS);
-    let cdh15 = null, spendh15 = null;
+    let cdh15 = null, spendh15 = null, cyclesh15 = null;
     if (s.length >= 2) {
       const a = s[0], b = s[s.length - 1];
       const h = (b.t - a.t) / 3.6e6;
       if (h > 0 && b.cycles - a.cycles >= MIN_RATE_CYCLES) {
         cdh15 = (b.built - a.built) / h;
         spendh15 = (b.net - a.net) / h;
+        cyclesh15 = (b.cycles - a.cycles) / h;
       }
     }
     const hAll = stats.startedAt ? (now - stats.startedAt) / 3.6e6 : 0;
@@ -979,7 +984,9 @@ try {
     }
     const goal = capped ? reachableCd : target;
     const etaH = r && rate > 0 ? Math.max(0, goal - r.cd) / rate : null;
-    return { cdh15, spendh15, cdhAll, target, etaH, reachableCd, capped };
+    // spendH: dollars net spent in the last 60 min, across runs (Core plan adds it back to the cash trend for net income).
+    const spendH = spendLog.filter((x) => now - x.t <= 3600000).reduce((a, x) => a + x.amount, 0);
+    return { cdh15, spendh15, cyclesh15, spendH, cdhAll, target, etaH, reachableCd, capped };
   }
 
   // "1h 10m" to the target, or where cash runs out first.
@@ -1509,6 +1516,8 @@ try {
     _graceMs: (ms) => { graceMs = ms; },
     _tick: () => controllerTick(),                         // tests: one pass of the always-on controller, without waiting for its timer
     _skipWaits: () => { bootAt = 0; cooldownUntil = 0; },   // tests: no boot delay or cooldown before the controller starts a run
+    _sample: sample,                                       // tests: log net spend at a given time
+    _newRun: () => { stats = freshStats(); },              // tests: reset stats as a run start does
     get stats() { return stats; },
     get building() { return farmId(); },    // id of the building the farm cycles (the run's own while one is on)
     _debug: () => ({ ...core.sock, ws: undefined, attached: !!core.sock.ws, inFlight, phase, active }),

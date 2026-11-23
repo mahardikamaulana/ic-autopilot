@@ -6,7 +6,7 @@ const path = require('path');
 const assert = require('assert');
 
 const board = JSON.parse(fs.readFileSync(path.join(__dirname, 'live-board.json'), 'utf8'));
-const full = fs.readFileSync(path.join(__dirname, '..', 'ic-autopilot.user.js'), 'utf8');
+const full = require('./cp-fixtures').full();   // CP_FROM_SRC=1 reads src/*.js
 const slice = (name) => full.slice(full.indexOf('// @@MODULE ' + name), full.indexOf('// @@END ' + name));
 const SRCS = ['core', 'pacer', 'planner', 'core-math', 'core-plan'].map(slice).join('\n');
 
@@ -80,6 +80,21 @@ function tight(cp, st, bought) {
 const unload = () => { globalThis.corePlan?._unload?.(); globalThis.idleCore?._unload?.(); globalThis.idleCore = undefined; globalThis.corePlan = undefined; globalThis.earlyGame = undefined; delete globalThis.document; delete globalThis.WebSocket; delete globalThis.localStorage; delete globalThis.sessionStorage; };
 const ctxOf = (o = {}) => ({ planDone: true, cashDelta10: 500, floorCents: 0, retailOk: null, ap: null, apNextTech: null, ...o });
 const view = (cp, st, deals = cottonBidDeals()) => cp._view(st, board.catalog, deals);
+// Stage D at the end: all three unlocks, the Retail Store, 0 Farms, every acre the rule allows, the engine built, plenty of cash.
+function endBoard() {
+  const st = stageA(); st.unlocked_buildings.push(B('Assembly Plant'), B('Retail Store'), B('Oil Rig'));
+  st.groups[11] = { building: B('Retail Store'), region: 0, count: 1, recipe: null };
+  delete st.groups[4];
+  st.land_bought[0] = 400; st.items[MONEY] = 1e13;
+  st.groups[5].count = 400; st.groups[10].count = 400; st.groups[2].count = 100;
+  return st;
+}
+// What CD Farm measures (C3: income cents/h, cycles/h, a Farm-only plan at the best batch) and the net income (C5) that let E3 and E5 hold.
+function measured(o = {}) {
+  const income = 4000000, cycles = 600;
+  const k = globalThis.idleCore.coreMath.bestBatch('farm', 0, income / 100, cycles).k;
+  return { mods: { cdFarm: { cfg: { building: 'auto', autoStart: true, batch: k } } }, ladder: { income, rates: { cyclesh15: cycles }, plan: { units: [{ b: B('Farm'), n: k, name: 'Farm' }] }, held: {} }, netIncomeH: 4000000, k, ...o };
+}
 
 // ---- fake game server over a fiber tree ---------------------------------------------------------------------------------------------
 function world(st, deals = cottonBidDeals(), { ignore = [] } = {}) {
@@ -155,18 +170,127 @@ const fastPacer = () => ({ beforeCommand: async () => {}, noteConfirm() {}, note
 
   await t('end conditions can all hold: stage becomes END', () => {
     const { cp } = load();
-    const st = stageA(); st.unlocked_buildings.push(B('Assembly Plant'), B('Retail Store'), B('Oil Rig'));
-    st.groups[11] = { building: B('Retail Store'), region: 0, count: 1, recipe: null };
-    delete st.groups[4];                                                      // 0 Farms
-    st.land_bought[0] = 400; st.items[MONEY] = 1e13;                         // past every acre the rule allows, plenty of cash
-    st.groups[5].count = 400; st.groups[10].count = 400; st.groups[2].count = 100;   // the engine is built
-    const v = view(cp, st);
-    const two = cp._decide(v, ctxOf({ retailOk: true }));
+    const v = view(cp, endBoard());
+    const two = cp._decide(v, ctxOf({ retailOk: true, ...measured() }));
     assert.match(two.E[0].why, /not yet 6 h in a row/, 'E1 needs 6 h of selling, not the 2 h checkpoint');
-    const d = cp._decide(v, ctxOf({ retailOk: true, retailE1: true }));
+    const d = cp._decide(v, ctxOf({ retailOk: true, retailE1: true, ...measured() }));
     assert.ok(d.E.every((c) => c.ok), JSON.stringify(d.E));
     assert.strictEqual(d.stage, 'END');
     assert.ok(d.finished);
+    // without CD Farm's measures and an hour of cash samples, E3 and E5 do not hold (C3, C5)
+    const bare = cp._decide(v, ctxOf({ retailOk: true, retailE1: true }));
+    assert.match(bare.E[2].why, /CD Farm is not loaded/);
+    assert.match(bare.E[4].why, /income not measured yet/);
+    assert.strictEqual(bare.stage, 'D');
+    unload();
+  });
+
+  await t('C3 (E3): CD Farm on Auto, batch within 1 of bestBatch at the measured income and cycles, Farm-only plan; unmeasured is not ok', () => {
+    const { cp } = load();
+    const st = endBoard(), v = view(cp, st), m = measured();
+    const E3 = (o, vv = v) => cp._decide(vv, ctxOf({ ...m, ...o })).E[2];
+    assert.ok(E3({}).ok, E3({}).why);
+    assert.match(E3({}).why, /^0 Farms, frames 0, Farm-only plan, batch \d+ \(measured best \d+\)$/);
+    // each passes the old check (0 Farms, frames < 20) and fails the new one
+    assert.match(E3({ mods: { cdFarm: { cfg: { building: B('Lumber Camp'), batch: m.k } } } }).why, /CD Farm Building is \d+, not Auto/);
+    assert.match(E3({ mods: { cdFarm: { cfg: { building: 'auto', batch: m.k + 2 } } } }).why, new RegExp('CD Farm batch ' + (m.k + 2) + ', measured best ' + m.k));
+    assert.ok(E3({ mods: { cdFarm: { cfg: { building: 'auto', batch: m.k - 1 } } } }).ok, 'within 1');
+    assert.match(E3({ ladder: { ...m.ladder, plan: { units: [{ b: B('Farm'), n: 10, name: 'Farm' }, { b: B('Lumber Camp'), n: 5, name: 'Lumber Camp' }] } } }).why, /plan is 10 Farm \+ 5 Lumber Camp, not Farm-only/);
+    assert.match(E3({ ladder: { ...m.ladder, rates: { cdh15: 9000, cyclesh15: null } } }).why, /batch not measured yet \(no cycles per hour\)/);
+    assert.match(E3({ ladder: { ...m.ladder, income: null } }).why, /batch not measured yet \(no income\)/);
+    assert.match(E3({ ladder: { ...m.ladder, plan: null } }).why, /CD Farm plan not measured yet/);
+    // Farms a CD Farm run holds mid-cycle are its own, not owned ones
+    st.building_pool[0][B('Farm')] = m.k;
+    assert.match(E3({}, view(cp, st)).why, new RegExp('^' + m.k + ' Farms owned'));
+    assert.ok(E3({ ladder: { ...m.ladder, held: { [B('Farm')]: m.k } } }, view(cp, st)).ok);
+    unload();
+  });
+
+  await t('E3 on the retail fail path: Farms stay on Cotton; Auto on, frames <= keep line + 20, the same batch check for the plan CD Farm runs', () => {
+    const { cp } = load();
+    const st = endBoard(); st.groups[4] = { building: B('Farm'), region: 0, count: 20, recipe: Rc('Grow Cotton') };
+    st.stock[0][I('Wooden Frame')] = 50;
+    cp._buildout = { wfKeep: () => 30 };
+    const m = measured({ retailFailPath: true });
+    m.ladder.plan = { units: [{ b: B('Lumber Camp'), n: 4, name: 'Lumber Camp' }, { b: B('Farm'), n: 2, name: 'Farm' }] };   // not Farm-only: fine here
+    const E3 = (o = {}) => cp._decide(view(cp, st), ctxOf({ ...m, ...o })).E[2];
+    assert.ok(E3().ok, E3().why);
+    assert.match(E3().why, /^fail path: Auto on, frames 50 <= keep line 30 \+ 20, 4 Lumber Camp \+ 2 Farm plan, batch \d+/);
+    assert.match(E3({ retailFailPath: false }).why, /^20 Farms owned/, 'off the fail path E3 is the strict one');
+    assert.match(E3({ mods: { cdFarm: { cfg: { ...m.mods.cdFarm.cfg, autoStart: false } } } }).why, /^fail path: CD Farm Auto is off/);
+    assert.match(E3({ mods: { cdFarm: { cfg: { ...m.mods.cdFarm.cfg, batch: m.k + 2 } } } }).why, /^fail path: CD Farm batch/);
+    assert.match(E3({ ladder: { ...m.ladder, plan: null } }).why, /^fail path: CD Farm plan not measured yet/);
+    st.stock[0][I('Wooden Frame')] = 51;
+    assert.match(E3().why, /Wooden Frame stock 51 > keep line 30 \+ 20/);
+    st.stock[0][I('Wooden Frame')] = 50; cp._buildout = undefined;
+    assert.match(E3().why, /keep line unknown/);
+    unload();
+  });
+
+  await t('C4 (E4): T_wall from the measured CD rate when CD Farm has one, the model otherwise; the readout says which', () => {
+    const { cp } = load();
+    const st = endBoard(); st.land_bought[0] = 80;
+    const ruleOf = (o) => cp._decide(view(cp, st), ctxOf(o));
+    const model = ruleOf({}).rule;
+    assert.strictEqual(model.tWallFrom, 'model');
+    // own exactly the model's last acre, no free acre: the old E4 holds
+    st.land_bought[0] = model.lastAcre - 25;
+    st.groups[5].count = 1;
+    st.groups[5].count = Math.max(1, model.lastAcre - view(cp, st).acresUsed + 1);
+    const old = ruleOf({});
+    assert.ok(old.E[3].ok, old.E[3].why);
+    assert.match(old.E[3].why, /T_wall [\d.]+ h from the model CD rate/);
+    // a measured CD rate at half the model's: T_wall doubles, the rule reaches further, E4 does not hold. It counts once CD Farm has
+    // measured for 30 min without a gap, as the mean of the last 30 min, so a short dip moves the land rule little.
+    const mkMem = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set: (p) => (m[n] = { ...(m[n] ?? {}), ...p }) }); };
+    const mm = mkMem(), half = model.cdPerHour / 2, t0 = 1.8e12;
+    const at = (i, r) => ruleOf({ mem: mm, now: t0 + i * 60000, ladder: { rates: { cdh15: r } } });
+    assert.strictEqual(ruleOf({ ladder: { rates: { cdh15: half } } }).rule.tWallFrom, 'model', 'one 15-min rate, no history: the model');
+    for (let i = 0; i < 30; i++) assert.strictEqual(at(i, half).rule.tWallFrom, 'model', 'under 30 min of rates: the model (' + i + ')');
+    const slow = at(30, half);
+    assert.strictEqual(slow.rule.tWallFrom, 'measured');
+    const dip = at(31, half / 10);
+    assert.strictEqual(dip.rule.tWallFrom, 'measured');
+    assert.ok(Math.abs(dip.rule.tWall / slow.rule.tWall - 1) < 0.1, 'a one-minute dip: ' + dip.rule.tWall + ' vs ' + slow.rule.tWall);
+    assert.strictEqual(at(40, half).rule.tWallFrom, 'model', 'a 9 min gap starts the 30 min again');
+    assert.strictEqual(at(41, null).rule.tWallFrom, 'model', 'no rate: the model');
+    assert.ok(Math.abs(slow.rule.tWall - 2 * model.tWall) < 0.01, slow.rule.tWall + ' vs ' + model.tWall);
+    assert.ok(!slow.E[3].ok && /from the measured CD rate/.test(slow.E[3].why), slow.E[3].why);
+    assert.ok(ruleOf({ ladder: { rates: { cdh15: null } } }).rule.tWallFrom === 'model', 'no 15-min rate: the model');
+    unload();
+  });
+
+  await t('C5 (E5): money >= 3 h of net income (60 min cash trend + CD Farm spend); unmeasured, not positive or a pending purchase is not ok', () => {
+    const { cp } = load();
+    const v = view(cp, endBoard()), m = measured();
+    const E5 = (o = {}) => cp._decide(v, ctxOf({ ...m, ...o })).E[4];
+    assert.ok(E5().ok, E5().why);
+    assert.match(E5({ netIncomeH: null }).why, /income not measured yet \(needs 60 min of cash samples\)/);
+    assert.match(E5({ netIncomeH: -5000 }).why, /net income .* is not positive/);
+    // the old check used the modelled gross income (far below this cash): it passed; the measured net income is not covered
+    assert.ok(v.money >= cp._decide(v, ctxOf(m)).rule.income * 300);
+    assert.match(E5({ netIncomeH: 1e13 }).why, /money .* < 3 h of net income/);
+    // a director's pending purchase that pays back inside T_wall/3 holds E5; one past it does not
+    cp.addDirector({ name: 'lab2', decide: () => null, pendingInvest: () => [{ what: 'second Manufacturing Lab', paybackH: 1 }] });
+    assert.match(E5().why, /still to buy: second Manufacturing Lab/);
+    cp.addDirector({ name: 'lab2', decide: () => null, pendingInvest: () => [{ what: 'second Manufacturing Lab', paybackH: 1e6 }] });
+    assert.ok(E5().ok, E5().why);
+    cp.cfg.dir_lab2 = false;
+    // the cash trend: samples every 30 s; null until one is 60 min old, then cents per hour over that hour
+    const t0 = 1e12;
+    for (let i = 0; i <= 100; i++) cp._trackCash({ money: 1000000 + i * 5000 }, t0 + i * 30000);
+    assert.strictEqual(cp._cashTrend60(t0 + 100 * 30000), null);
+    for (let i = 101; i <= 122; i++) cp._trackCash({ money: 1000000 + i * 5000 }, t0 + i * 30000);
+    assert.strictEqual(cp._cashTrend60(t0 + 122 * 30000), 600000);   // $50 per 30 s = $6,000/h
+    // a stop/restart gap drops the samples before it: null until 60 min of contiguous samples
+    const t1 = t0 + 122 * 30000 + 3 * 3600000;
+    cp._trackCash({ money: 1000000 }, t1);
+    assert.strictEqual(cp._cashTrend60(t1), null);
+    for (let i = 1; i <= 122; i++) cp._trackCash({ money: 1000000 + i * 5000 }, t1 + i * 30000);
+    assert.strictEqual(cp._cashTrend60(t1 + 122 * 30000), 600000);
+    cp.start({ dryRun: true });                                    // a start clears them too
+    assert.strictEqual(cp._cashTrend60(t1 + 122 * 30000), null);
+    cp.stop();
     unload();
   });
 

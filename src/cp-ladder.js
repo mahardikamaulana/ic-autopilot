@@ -108,7 +108,7 @@ try {
       return { wait: 'off: no tech named ' + ph.need.missing + ' in the catalog (the game changed?)', readout: { phase: ph.key, alerts: ['no tech named ' + ph.need.missing] } };
     }
     const lad = ctx.ladder ?? {};
-    const cycles = ctx.cyclesPerHour ?? c.cyclesPerHour;
+    const cycles = lad.rates?.cyclesh15 > 0 ? lad.rates.cyclesh15 : ctx.cyclesPerHour ?? c.cyclesPerHour;   // measured CD Farm cycles first: E3 checks the batch against them
     const incomeH = lad.income > 0 ? lad.income / 100 : out.rule?.income ?? null;   // CD Farm measures cents/h; core-math works in dollars
     const batch = incomeH > 0 && cycles > 0 ? M.bestBatch('farm', 0, incomeH, cycles).k : null;
     const spare = c.ladderSpareAcres;

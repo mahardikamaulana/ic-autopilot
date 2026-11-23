@@ -233,11 +233,53 @@ const wsGroups = (st) => Object.values(st.groups).filter((g) => g.building === B
     F.unload();
   });
 
+  await F.t('L-fix: Stage B, build-out saving cash for its next block (bill / money floor): land waits; a kit-short wait lets land buy a Cotton Farm', () => {
+    const { cp } = F.load(['cp-buildout']);
+    const st = switched(liveReady()); st.items[F.MONEY] = 1e9; st.stock[0][I('Wood')] = 300000;
+    st.groups[3].count = 4;                                      // a Sawmill is next (as in B1)
+    st.land_bought[0] += 20 - cp._view(st, cat, deals).freeAcres;
+    const v = cp._view(st, cat, deals), ctx = F.ctxOf({ retailBoard: retail });
+    const s = cp._buildout.nextBuildStep(v, ctx, cp._decide(v, ctx).rule, 'B');
+    assert.strictEqual(s.pick?.bn, 'Sawmill', JSON.stringify(s));
+    const floorCents = 1e8;
+    st.items[F.MONEY] = s.cost + floorCents - 1;                 // a Cotton Farm fits above the floor, the Sawmill does not
+    let d = decideOn(cp, st, { floorCents });
+    assert.match(boWait(d), /next Sawmill: (bill|money) floor/);
+    assert.ok(d.waits.includes('land: build-out is saving for Sawmill'), d.waits.join(' | '));
+    assert.ok(!d.actions.some((x) => x.id.startsWith('land:')), JSON.stringify(d.actions.map((x) => x.id)));
+    // kit short (Wood): land buys the Cotton Farm
+    st.items[F.MONEY] = 1e9; st.stock[0][I('Wood')] = 10;
+    d = decideOn(cp, st);
+    assert.match(boWait(d), /next Sawmill: kit short/);
+    assert.ok(d.actions.some((x) => x.id.startsWith('land:')), d.waits.join(' | '));
+    F.unload();
+  });
+
+  await F.t('C5: the build-out publishes its next purchase for E5 (pendingInvest) until it is at target', () => {
+    const { cp } = F.load(['cp-buildout']);
+    const st = stageC(switched(liveReady())); st.items[F.MONEY] = 1e9;
+    const d = decideOn(cp, st, { floorCents: 0, netIncomeH: 1 });
+    assert.match(d.E[4].why, /still to buy: .*build-out \(/, d.E[4].why);
+    // at target (a rule with no planks, Camps or Sawmills left to build): nothing pending, so E5 can hold
+    const v = cp._view(st, cat, deals), ctx = F.ctxOf({ retailBoard: retail, floorCents: 0 });
+    const rule0 = { ...cp._decide(v, ctx).rule, planksH: 0, camps: 0, sawmills: 0 };
+    assert.strictEqual(cp._buildout.nextBuildStep(v, ctx, rule0, 'D').done, true);
+    assert.deepStrictEqual(cp._buildout.pendingInvest(v, ctx, rule0, 'D'), []);
+    cp.cfg.dir_buildout = false;
+    assert.ok(!/build-out \(/.test(decideOn(cp, st, { floorCents: 0, netIncomeH: 1 }).E[4].why), 'director off: nothing published');
+    F.unload();
+  });
+
   await F.t('Farm conversion: 4 waves 3 h apart, never early, never before the last wave runs, never while CD Farm runs', () => {
     const { cp } = F.load(['cp-buildout']);
     const st = stageC(switched(liveReady())); st.items[F.MONEY] = 1;
     const mem = sharedMem();
     let now = 1.8e12;
+    // 2 Chair Workshops are off the board's split: after 6 h the rebalance would take the step, so it is held off in this test about waves
+    const rbMem = sharedMem();
+    cp._decide(cp._view(st, cat, deals), F.ctxOf({ retailBoard: retail, mem: rbMem, now }));
+    assert.match(bo(cp._decide(cp._view(st, cat, deals), F.ctxOf({ retailBoard: retail, mem: rbMem, now: now + 7 * HOUR })))?.id ?? '', /^bo:rebal:/);
+    cp.cfg.rebalanceHours = 1000;
     const ctx = (o) => F.ctxOf({ retailBoard: retail, mem, now, ...o });
     const dec = (o) => cp._decide(cp._view(st, cat, deals), ctx(o));
     const cotton = st.groups[1];
@@ -675,6 +717,184 @@ const wsGroups = (st) => Object.values(st.groups).filter((g) => g.building === B
     assert.strictEqual(bo(decideOn(cp, st, { mem: mem2, ...burn }))?.id?.startsWith('bo:pause:3:') ?? false, false);
     mem2('buildout').set({ ftMine: [3] }); st.groups[3].paused = true;
     assert.deepStrictEqual(bo(decideOn(cp, st, { mem: mem2, ...burn })).steps[0].msg, { type: 'SetPaused', group: 3, paused: false });
+    F.unload();
+  });
+
+  await F.t('D3 rebalance: the board moves 6/5/7 -> 4/5/9 for 6 h: one Workshop per step until it matches; a 2 h blip moves nothing', () => {
+    const { cp } = F.load(['cp-buildout']);
+    cp.cfg.landPaybackAB = 0;
+    const st = switched(liveReady());
+    st.groups[2].count = 200;                                   // plank headroom: only the rebalance rules decide
+    st.groups[8].count = 7;                                     // Chair 7
+    st.groups[20] = { building: B('Workshop'), region: 0, count: 4, recipe: Rc('Make Bookshelf'), modules: { '0,-1': 0 } };   // module id 0 counts
+    st.groups[21] = { building: B('Workshop'), region: 0, count: 2, recipe: Rc('Make Bookshelf'), modules: {} };
+    st.groups[22] = { building: B('Workshop'), region: 0, count: 5, recipe: Rc('Make Table'), modules: {} };
+    st.next_group_id = 30;
+    const board = (a, b, c) => ({ shelves: { 0: { [I('Bookshelf')]: { appetite: a }, [I('Table')]: { appetite: b }, [I('Chair')]: { appetite: c } } } });
+    const A = board(180, 150, 262.5), Bd = board(120, 150, 337.5);   // alloc(18): 6/5/7 and 4/5/9
+    assert.deepStrictEqual(cp._buildout.furnitureSplit(Bd, 0, cat).alloc(18), { bookshelf: 4, table: 5, chair: 9 });
+    const mem = sharedMem(), t0 = 1.8e12;
+    const dec = (b, now, o = {}) => cp._decide(cp._view(st, cat, deals), F.ctxOf({ retailBoard: b, mem, now, ...o }));
+    const rebal = (d) => (bo(d)?.id.startsWith('bo:rebal') ? bo(d) : null);
+    assert.ok(!rebal(dec(A, t0)), 'on the split: nothing');
+    let d = dec(Bd, t0);
+    assert.ok(!rebal(d));
+    assert.match(boWait(d), /rebalance: Make Bookshelf -2, Make Chair \+2 \(moves once held 6 h\)/);
+    assert.ok(!rebal(dec(A, t0 + 2 * HOUR)), 'blip back to the split');
+    assert.deepStrictEqual(mem('buildout').get().rebal, {}, 'the gap closed: its time is forgotten');
+    assert.ok(!rebal(dec(Bd, t0 + 6 * HOUR)), 'the gap starts again at +6 h');
+    assert.ok(!rebal(dec(Bd, t0 + 12 * HOUR - 60000)));
+    assert.ok(!rebal(dec(Bd, t0 + 12 * HOUR, { retailFail: true })), 'never on the retail fail path');
+    assert.ok(!rebal(dec(null, t0 + 12 * HOUR)), 'no board: no move');
+    const moves = [];
+    for (let i = 0; i < 4; i++) {
+      const a = rebal(dec(Bd, t0 + 12 * HOUR));
+      if (!a) break;
+      moves.push(a.steps.map((s) => s.msg));
+      st.groups[a.steps[0].msg.group].count -= 1; st.groups[a.steps[1].msg.group].count += 1;   // the server applies both
+    }
+    const out = { type: 'UnassignBuildings', group: 21, amount: 1 }, into = { type: 'AssignBuildings', group: 8, amount: 1 };
+    assert.deepStrictEqual(moves, [[out, into], [out, into]], 'from the Bookshelf group without modules, one per step');
+    assert.deepStrictEqual([st.groups[20].count + st.groups[21].count, st.groups[22].count, st.groups[8].count], [4, 5, 9]);
+    F.unload();
+  });
+
+  await F.t('D3 rebalance: the under recipe needs its floor', () => {
+    const { cp } = F.load(['cp-buildout']);
+    Object.assign(cp.cfg, { landPaybackAB: 0, applyFurnitureFloor: false });
+    const st = switched(liveReady());
+    st.groups[2].count = 200;
+    st.groups[22] = { building: B('Workshop'), region: 0, count: 6, recipe: Rc('Make Table'), modules: {} };
+    st.next_group_id = 30;
+    delete st.layouts[Rc('Make Bookshelf')]; delete st.layouts[Rc('Make Chair')];   // both under recipes lack their floor
+    const mem = sharedMem(), dec = (now) => cp._decide(cp._view(st, cat, deals), F.ctxOf({ retailBoard: retail, mem, now }));
+    dec(1.8e12);
+    const d = dec(1.8e12 + 7 * HOUR);
+    assert.ok(!bo(d)?.id.startsWith('bo:rebal'), bo(d)?.text);
+    assert.match(boWait(d), /rebalance: .* waits: Make Bookshelf has no floor; Make Chair has no floor/);
+    F.unload();
+  });
+
+  // Stage D after a pass: Retail Store built, cotton Farms gone, 200 Sawmills for plank headroom, cash for anything.
+  function stageD() {
+    const st = stageC(switched(liveReady()));
+    st.groups[30] = { building: B('Retail Store'), region: 0, count: 1, recipe: null, modules: {} };
+    st.groups[1].count = 0; st.groups[2].count = 200; st.items[F.MONEY] = 1e10; st.next_group_id = 40;
+    return st;
+  }
+  const benchLayout = (st) => { st.layouts[Rc('Make Bench')] = { ...F.clone(st.layouts[Rc('Frame Timber')]), fx: { rate: 3 } }; };
+  const pass = { retailOk: true };
+
+  await F.t('D4 Bench: after a pass the Rivet x3 floor goes on Make Bench first, then the Workshop is bought; never before a pass or on the fail path', () => {
+    const { core, cp } = F.load(['cp-buildout']);
+    assert.strictEqual(cp.cfg.benchWorkshops, 1);
+    const st = stageD(); st.stock[0][I('Concrete')] = 100000;
+    let a = bo(decideOn(cp, st, pass));
+    assert.strictEqual(a.steps[0].msg.type, 'EditLayout');
+    assert.strictEqual(a.steps[0].msg.recipe, Rc('Make Bench'));
+    assert.strictEqual(Object.keys(a.steps[0].msg.cells).length, core.floorDesigns.rivetX3.split(' ').length);
+    assert.match(a.text, /Rivet x3 floor to Make Bench/);
+    for (const o of [{}, { retailOk: false }, { retailOk: true, retailFail: true, retailFailPath: true }]) {
+      const b = bo(decideOn(cp, st, o));
+      assert.ok(!b || !/Bench/.test(b.text), JSON.stringify(o) + ': ' + b?.text);
+    }
+    benchLayout(st);
+    a = bo(decideOn(cp, st, pass));
+    assert.ok(a.steps.some((s) => s.msg.type === 'BuyBuilding' && s.msg.building === B('Workshop')), a.text);
+    assert.deepStrictEqual(a.steps[a.steps.length - 1].msg, { type: 'CreateGroup', building: B('Workshop'), amount: 1, name: 'Make Bench', region: 0 });
+    assert.ok(a.hold);
+    F.unload();
+  });
+
+  await F.t('Bench planks: a running Make Bench group counts at the floor it runs (x3), not furniture\'s x5; one with no floor yet at the x5 plan rate', () => {
+    const { cp } = F.load(['cp-buildout']);
+    const used = (st) => +/, ([\d,]+)\/h used/.exec(cp._decide(cp._view(st, cat, deals), F.ctxOf({ ...pass, retailBoard: retail })).readouts.buildout.planks)[1].replace(/,/g, '');
+    const st = stageD(), base0 = used(st);
+    const r = cat.recipes.find((x) => x.name === 'Make Bench'), pl = r.inputs.find((i) => i.item === I('Planks')).amount;
+    st.groups[41] = { building: B('Workshop'), region: 0, count: 2, recipe: r.id, modules: {} };
+    benchLayout(st);
+    assert.strictEqual(used(st) - base0, Math.round(2 * pl * 3 * 7200 / r.ticks), 'x3');
+    delete st.layouts[r.id];
+    assert.strictEqual(used(st) - base0, Math.round(2 * pl * 5 * 7200 / r.ticks), 'no floor: the plan rate');
+    F.unload();
+  });
+
+  await F.t('D4 Bench: Concrete short of the gate + 48 h of Bench use: no Bench Workshop, the rest of the build-out goes on', () => {
+    const { cp } = F.load(['cp-buildout']);
+    const st = stageD(); benchLayout(st); st.stock[0][I('Concrete')] = 5799;   // 400 + 48 h x 22.5 runs x 5 Concrete = 5,800
+    const v = cp._view(st, cat, deals), ctx = F.ctxOf({ retailBoard: retail, ...pass });
+    const rule = cp._decide(v, ctx).rule;
+    const nb = cp._buildout.nextBuildStep(v, ctx, rule, 'D');
+    assert.strictEqual(nb.pick.r.name, 'Make Table', 'a Bench that waits holds nothing else back');
+    assert.strictEqual(cp._buildout.benchHeld(v, ctx, rule), 'Concrete 5799 < 5800 (gate 400 + 48 h of Bench use)');
+    assert.ok(!(bo(decideOn(cp, st, pass))?.steps ?? []).some((s) => s.msg.name === 'Make Bench'));
+    st.stock[0][I('Concrete')] = 5800;
+    assert.strictEqual(cp._buildout.nextBuildStep(cp._view(st, cat, deals), ctx, rule, 'D').pick.r.name, 'Make Bench');
+    F.unload();
+  });
+
+  await F.t('D4 Bench: the Kiln gate keeps 48 h of Bench use on top while a Bench is wanted or runs; a pool Workshop goes to the wanted Bench', () => {
+    const { cp } = F.load(['cp-buildout']);
+    const st = stageD(); benchLayout(st); st.stock[0][I('Concrete')] = 500;
+    assert.match(decideOn(cp, st).readouts.buildout.kiln, /Concrete 500\/400(?! \()/, 'no pass: the plain gate');
+    assert.match(decideOn(cp, st, pass).readouts.buildout.kiln, /Concrete 500\/5800 \(gate 400 \+ 48 h of Bench use\)/, 'wanted: the Kiln makes the Bench gate\'s Concrete');
+    // a Kiln Core plan paused at the plain gate comes back on Concrete for the Bench
+    const mem = sharedMem(); mem('buildout').set({ kilnMine: [10] });
+    st.groups[10].recipe = Rc('Mix Concrete');
+    assert.deepStrictEqual(bo(decideOn(cp, st, { ...pass, mem })).steps[0].msg, { type: 'SetPaused', group: 10, paused: false });
+    assert.ok(!bo(decideOn(cp, st, { mem }))?.id.startsWith('bo:pause:10'), 'no pass: Concrete 500 is past the plain gate');
+    delete mem('buildout').get().kilnMine; st.groups[10].recipe = Rc('Blow Glass');
+    st.groups[31] = { building: B('Workshop'), region: 0, count: 1, recipe: Rc('Make Bench'), modules: {} };
+    assert.match(decideOn(cp, st, pass).readouts.buildout.kiln, /Concrete 500\/5800 \(gate 400 \+ 48 h of Bench use\)/);
+    delete st.groups[31];
+    st.building_pool[0][B('Workshop')] = 1; st.stock[0][I('Concrete')] = 100000;   // a Bench that is ready takes the pool Workshop first, as the buy path
+    const a = bo(decideOn(cp, st, pass));
+    assert.deepStrictEqual(a.steps.map((s) => s.msg), [{ type: 'CreateGroup', building: B('Workshop'), amount: 1, name: 'Make Bench', region: 0 }]);
+    F.unload();
+  });
+
+  await F.t('B2 Bench planks: a wanted Bench adds its planks (Rivet x3 rate) to the Camp / Sawmill targets, sized as the rule; none when it is not wanted', () => {
+    const { core, cp } = F.load(['cp-buildout']);
+    const st = stageD(); benchLayout(st); st.stock[0][I('Concrete')] = 100000;
+    const v = cp._view(st, cat, deals), ctx = F.ctxOf({ retailBoard: retail, ...pass });
+    const rule = cp._decide(v, ctx).rule, m = core.coreMath.engineModel(v.C);
+    const r = cat.recipes.find((x) => x.name === 'Make Bench'), benchP = r.inputs.find((i) => i.item === I('Planks')).amount * 3 * 7200 / r.ticks;   // x3 runs an hour x planks a run
+    const sized = (p) => [Math.ceil(p * m.woodPerPlank / m.campWoodH), Math.ceil(p / m.smPlanksH)];
+    const tg = cp._buildout.targets(v, ctx, rule), q = sized(rule.planksH + benchP), p = sized(rule.planksH);
+    assert.deepStrictEqual([tg.camps, tg.sawmills], [rule.camps + q[0] - p[0], rule.sawmills + q[1] - p[1]]);
+    const r0 = { ...rule, planksH: 0, camps: 0, sawmills: 0 };   // a rule with no planks: the Bench's own Camps / Sawmills
+    const t0 = cp._buildout.targets(v, ctx, r0);
+    assert.deepStrictEqual([t0.camps, t0.sawmills], sized(benchP));
+    assert.ok(t0.camps >= 1 && t0.sawmills >= 1);
+    const tn = cp._buildout.targets(v, F.ctxOf({ retailBoard: retail }), r0);
+    assert.deepStrictEqual([tn.camps, tn.sawmills], [0, 0], 'no pass: no Bench, the rule alone');
+    cp.cfg.benchWorkshops = 0;
+    assert.deepStrictEqual([cp._buildout.targets(v, ctx, r0).camps, cp._buildout.targets(v, ctx, r0).sawmills], [0, 0], 'benchWorkshops 0');
+    F.unload();
+  });
+
+  await F.t('B2: a Bench held only by planks with the Camps / Sawmills at their targets is closed, so it is not pending for E5', () => {
+    const { cp } = F.load(['cp-buildout']);
+    const st = stageD(); benchLayout(st); st.stock[0][I('Concrete')] = 100000;
+    st.groups[2].count = 1;   // 1 Sawmill: the planks cannot feed the Bench
+    const v = cp._view(st, cat, deals), base = F.ctxOf({ retailBoard: retail, ...pass });
+    const r0 = { ...cp._decide(v, base).rule, planksH: 0, camps: 0, sawmills: 0 };   // synthetic: rule.need 0, the fixture's Wood model aside
+    const tg = cp._buildout.targets(v, base, r0);
+    const ctx = F.ctxOf({ retailBoard: retail, ...pass, _boTargets: { ...tg, camps: v.owned('Lumber Camp'), sawmills: v.owned('Sawmill') } });
+    const nb = cp._buildout.nextBuildStep(v, ctx, r0, 'D');
+    assert.ok(nb.closed && !nb.pick, JSON.stringify(nb));
+    assert.match(nb.wait, /Workshop \(Make Bench\): planks \d+\/h cannot feed \d+\/h \(the targets, \d+ Camps \/ 1 Sawmills, make \d+\/h: closed\)/);
+    assert.deepStrictEqual(cp._buildout.pendingInvest(v, ctx, r0, 'D'), []);
+    // planks short only now (the 200 Sawmills at target, their group paused): the targets can feed it, so it stays pending
+    const sp = stageD(); benchLayout(sp); sp.stock[0][I('Concrete')] = 100000; sp.groups[2].paused = true;
+    const vp = cp._view(sp, cat, deals), cpx = F.ctxOf({ retailBoard: retail, ...pass, _boTargets: { ...tg, camps: vp.owned('Lumber Camp'), sawmills: vp.owned('Sawmill') } });
+    const np = cp._buildout.nextBuildStep(vp, cpx, r0, 'D');
+    assert.ok(!np.closed && !np.done && /planks/.test(np.wait), JSON.stringify(np));
+    assert.strictEqual(cp._buildout.pendingInvest(vp, cpx, r0, 'D').length, 1);
+    // one Sawmill short of its target: it is bought, nothing closed
+    const more = F.ctxOf({ retailBoard: retail, ...pass, _boTargets: { ...tg, camps: v.owned('Lumber Camp'), sawmills: v.owned('Sawmill') + 1 } });
+    const nb2 = cp._buildout.nextBuildStep(v, more, r0, 'D');
+    assert.ok(!nb2.closed && /Sawmill|Lumber Camp/.test(nb2.pick?.label ?? ''), JSON.stringify(nb2));
     F.unload();
   });
 

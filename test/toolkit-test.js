@@ -14,6 +14,7 @@ const coreSrc = full.slice(full.indexOf('// @@MODULE core'), full.indexOf('// @@
 const apSrc = full.slice(full.indexOf('// @@MODULE early-game'));
 const labSrc = full.slice(full.indexOf('// @@MODULE lab'), full.indexOf('// @@END lab'));
 const asSrc = full.slice(full.indexOf('// @@MODULE autosell'), full.indexOf('// @@END autosell'));
+const cdSrc = full.slice(full.indexOf('// @@END core-math'), full.indexOf('// @@MODULE lab'));   // CD Farm has no module markers: it sits between core-math and lab
 
 let failed = 0;
 const quietLog = console.log, quietWarn = console.warn;
@@ -800,7 +801,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       // Give up after 24 h with no qualifying bid; a job that is not waiting for a bid has no clock.
       v = d(asJob({ waitSince: NOW - DAY }), asBase({ deals: [], now: NOW }));
       assert.strictEqual(v.kind, 'end');
-      assert.match(v.why, /no Cotton bid at ≥ \$0\.00 for 24 h/);
+      assert.match(v.why, /no Cotton bid at ≥ \$1\.35 for 24 h/);
       v = d(asJob({ waitSince: NOW - DAY + 1 }), asBase({ deals: [], now: NOW }));
       assert.deepStrictEqual([v.kind, v.noBid], ['wait', true]);
       assert.strictEqual(d(asJob({ waitSince: 0 }), asBase({ deals: [], now: NOW })).kind, 'wait');
@@ -919,7 +920,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       let j = as.jobs()[0];
       assert.deepStrictEqual([as.jobs().length, j.from, j.unit, j.sold, j.left, j.revenue], [1, 7, 170, cottonLoad, 700 - cottonLoad, cottonLoad * 150]);
       assert.ok(core.ledger.list().some((e) => e.mod === 'AS' && /moved: bid #7 @ \$1\.50 → #12 @ \$1\.70/.test(e.text)));
-      assert.deepStrictEqual([saved().length, saved()[0].deal, saved()[0].from, saved()[0].waitSince], [1, 12, 7, 0]);
+      assert.deepStrictEqual([saved().length, saved()[0].deal, saved()[0].from, saved()[0].waitSince, saved()[0].unit0], [1, 12, 7, 0, 150]);
       // A reload resumes the job on the new bid.
       as._unload(); globalThis.autoSell = undefined;
       (0, eval)(asSrc);
@@ -947,7 +948,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       assert.match(as.jobs().find((x) => x.deal === 22).status, /waiting for a Cotton bid/i);
       await until(() => saved().some((x) => x.deal === 22 && x.waitSince > 0));
       // A bid that comes back ends the wait: the clock is reset.
-      deals.push(bid(24, COTTON, 100000, 120));
+      deals.push(bid(24, COTTON, 100000, 130));
       await until(() => as.jobs().some((x) => x.deal === 24));
       assert.deepStrictEqual(saved().map((x) => x.waitSince), [0, 0]);
 
@@ -956,6 +957,67 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       deals.splice(0, deals.length, bid(99, WOOD, 100000, 90));   // an empty array would read as "board not loaded"
       await until(() => !as.jobs().length, 8000);
       assert.ok(core.ledger.list().some((e) => e.mod === 'AS' && /ended: no Cotton bid .* for 24 h/.test(e.text)));
+      assert.deepStrictEqual(saved(), []);
+    } finally {
+      globalThis.autoSell?._unload(); core._unload(); globalThis.idleCore = undefined; globalThis.autoSell = undefined;
+      delete globalThis.document; delete globalThis.WebSocket; delete globalThis.localStorage;
+    }
+  });
+
+  await t('Auto ship loop: a moved job never takes a bid below cfg.switchFloorPct of the first bid (unit0), however many times it moved, and unit0 survives a reload', async () => {
+    fresh();
+    const disk = {};
+    globalThis.localStorage = { getItem: (k) => disk[k] ?? null, setItem: (k, v) => { disk[k] = v; } };
+    const st = baseState();
+    st.stock = { 0: { [COTTON]: 1200 } };
+    st.courier_ready_at = 1e9; st.next_shipment_id = 10; st.standing_fills = {};   // courier busy: nothing is sent, only moves are tested
+    const deals = [bid(31, COTTON, 100000, 200)];
+    class FakeWS { constructor() { this.readyState = 1; } addEventListener() {} removeEventListener() {} send() {} }
+    labPage(st, FakeWS);
+    globalThis.document.getElementById('root').__reactContainer$x.memoizedState.next.next = { memoizedState: deals, next: null };
+    (0, eval)(coreSrc + '\n' + asSrc);
+    let as = globalThis.autoSell;
+    const core = globalThis.idleCore;
+    const timing = { cycleMs: 40, confirmMs: 3000, jitterMs: 0 };
+    Object.assign(as.cfg, timing);
+    core.ledger.clear();
+    const saved = () => JSON.parse(disk['autoSell.v1']).jobs;
+    const open = (...bids) => deals.splice(0, deals.length, ...bids);
+    try {
+      assert.strictEqual(as.cfg.switchFloorPct, 90);
+      as.start({ deal: 31 });
+      assert.strictEqual(saved()[0].unit0, 200, 'unit0 is the first bid');
+      // Bid 31 is gone; the only bid is below 90% of $2.00: the job waits, it does not move.
+      open(bid(32, COTTON, 100000, 179));
+      await until(() => saved().some((x) => x.waitSince > 0));
+      await sleep(200);
+      assert.deepStrictEqual([as.jobs().length, as.jobs()[0].deal], [1, 31], 'bid 32 is below the floor: no move');
+      assert.match(as.jobs()[0].status, /waiting for a Cotton bid at ≥ \$1\.80/i);
+      // Exactly 90% is taken.
+      deals.push(bid(33, COTTON, 100000, 180));
+      await until(() => as.jobs().some((x) => x.deal === 33));
+      assert.deepStrictEqual([as.jobs()[0].unit, saved()[0].unit0, as.jobs()[0].from], [180, 200, 31]);
+      // After one move the floor is still 90% of the first bid ($1.80), not of the second ($1.62): $1.70 is refused.
+      open(bid(34, COTTON, 100000, 170));
+      await until(() => saved().some((x) => x.waitSince > 0));
+      await sleep(200);
+      assert.deepStrictEqual([as.jobs()[0].deal, saved()[0].unit0], [33, 200], 'bid 34 is above 90% of the second bid but below 90% of the first');
+      deals.push(bid(35, COTTON, 100000, 185));
+      await until(() => as.jobs().some((x) => x.deal === 35));
+      assert.deepStrictEqual([as.jobs()[0].unit, saved()[0].unit0], [185, 200], 'second move: unit0 unchanged');
+      assert.deepStrictEqual([saved()[0].deal, saved()[0].unit0], [35, 200], 'persisted');
+      // A reload keeps unit0.
+      as._unload(); globalThis.autoSell = undefined;
+      (0, eval)(asSrc);
+      as = globalThis.autoSell;
+      Object.assign(as.cfg, timing);
+      assert.deepStrictEqual(as.jobs().map((x) => x.deal), [35], 'resumed on the moved bid');
+      as.start({ deal: 35 });
+      // After the reload the floor is still $1.80 (unit0 was restored): a $1.70 bid is refused and the job ends after cfg.bidWaitMs.
+      as.cfg.bidWaitMs = 300;
+      open(bid(36, COTTON, 100000, 170));
+      await until(() => !as.jobs().length, 8000);
+      assert.ok(core.ledger.list().some((e) => e.mod === 'AS' && /ended: no Cotton bid at ≥ \$1\.80 for 24 h/.test(e.text)));
       assert.deepStrictEqual(saved(), []);
     } finally {
       globalThis.autoSell?._unload(); core._unload(); globalThis.idleCore = undefined; globalThis.autoSell = undefined;
@@ -1366,6 +1428,21 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     assert.ok(core.reserves.names().includes('earlyGame'));
     ap._unload();
     assert.ok(!core.reserves.names().includes('earlyGame'));
+  });
+
+  await t('CD Farm rates().spendH: net dollars spent in the last 60 min, across runs (Core plan E5 adds it to the cash trend)', () => {
+    const { core } = loadBoth();
+    globalThis.window = globalThis; globalThis.document = { querySelector: () => null, getElementById: () => null };
+    (0, eval)(cdSrc);
+    const cf = globalThis.cdFarm, H = 3600000, T0 = 1e12, spendH = (now) => cf.rates(null, now).spendH;
+    cf._newRun(); cf.stats.spent = 500; cf._sample(T0);                       // run 1: $500
+    cf._newRun(); cf.stats.spent = 300; cf._sample(T0 + 10 * 60000);          // run 2 (stats reset): $300
+    assert.strictEqual(spendH(T0 + 20 * 60000), 800, 'both runs count, in dollars');
+    assert.strictEqual(spendH(T0 + H + 5 * 60000), 300, 'run 1 is older than 60 min, run 2 still counts');
+    cf.stats.refunded = 120; cf._sample(T0 + 30 * 60000);                     // a net refund: negative
+    assert.strictEqual(spendH(T0 + 40 * 60000), 680, 'refund (-$120) is subtracted');
+    assert.strictEqual(spendH(T0 + H + 25 * 60000), -120, 'only the refund is left: a negative amount');
+    cf._unload(); core._unload(); delete globalThis.window; delete globalThis.document;
   });
 
   await t('earlyGame.tune: saved, validated like importCfg, neverSell is unioned', () => {

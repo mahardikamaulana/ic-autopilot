@@ -72,6 +72,7 @@ try {
       const m = JSON.parse(e.data);
       seeTick(m.tick ?? m.diff?.tick);
       if (m.kind === 'Diff') sock.diffs++;
+      if (m.kind === 'WorldEvents') sock.worldEvents = { raw: e.data, at: Date.now() };   // plan D5: kept for a readout only, nothing acts on it
       const u = m.diff?.ssi?.last_user_mutation_tick;
       if (typeof u === 'number' && u > sock.mutTick) { sock.mutTick = u; sock.muts++; if (sock.sendAt && !sock.ackAt) sock.ackAt = hrNow(); for (const w of [...wakers]) w(); }
     } catch {}
@@ -139,7 +140,7 @@ try {
   };
   function makeDraggable(handle, getPanel, ui, place, saveUi) {
     handle.addEventListener('pointerdown', (e) => {
-      if (e.target.closest('button')) return;
+      if (e.target.closest('button') || getPanel().classList.contains('idc-docked')) return;   // a docked panel stays put
       const r = getPanel().getBoundingClientRect();
       const dx = e.clientX - r.left, dy = e.clientY - r.top;
       handle.setPointerCapture(e.pointerId);
@@ -285,16 +286,25 @@ try {
   // ---- UI kit (core.ui): one stylesheet, panel shell, tabs, sidebar tab + top-bar chip, log view -------------
   // Both modules build their panels from this; each keeps only its own content and settings.
   const UI_CSS = `
-.idc-panel,.idc-toasts{--idc-muted:color-mix(in srgb,var(--muted,#808086),#fff 18%);--idc-focus:var(--accent,#5b8def)}
-.idc-panel{position:fixed;z-index:9999;display:flex;flex-direction:column;width:340px;max-width:calc(100vw - 32px);max-height:calc(100vh - 40px);overflow:auto;background:var(--surface,#151517);border:1px solid var(--border,rgba(255,255,255,.09));border-radius:12px;box-shadow:var(--shadow,0 4px 16px rgba(0,0,0,.4));color:var(--ink,#ededee);font:13px/1.5 "Inter Variable",system-ui,-apple-system,"Segoe UI",sans-serif;font-variant-numeric:tabular-nums}
+.idc-panel,.idc-toasts{--idc-muted:var(--muted,#808086);--idc-focus:var(--accent,#5b8def)}
+.idc-panel{--kind:var(--accent,#5b8def)}.cdf-panel{--kind:#d9a637}.lab-panel{--kind:#8e6fd8}.cp-panel{--kind:#4fbf6a}
+.idc-panel{position:fixed;z-index:9999;display:flex;flex-direction:column;width:var(--idc-w,340px);max-width:calc(100vw - 32px);max-height:calc(100vh - 40px);overflow:auto;background:var(--surface,#151517);border:1px solid var(--border,rgba(255,255,255,.09));border-radius:12px;box-shadow:0 12px 32px rgba(0,0,0,.5);color:var(--ink,#ededee);font:inherit;font-variant-numeric:tabular-nums}
+.idc-panel.idc-docked{inset:0 0 0 auto;width:var(--idc-dock,360px);max-width:100vw;max-height:none;z-index:40;border-width:0 0 0 1px;border-radius:0;box-shadow:none;background:var(--page,#0d0d0f)}
+.idc-docked .idc-head{cursor:default}
+body:has(>.idc-docked:not(.idc-ghost)) .shell{padding-right:var(--idc-dock,360px)}
+@media (max-width:700px){
+.idc-panel.idc-docked{inset:auto 0 var(--chrome-h,120px) 0;width:auto;max-height:calc(100dvh - var(--chrome-h,120px) - 3rem);z-index:41;border-width:1px 0 0;border-radius:12px 12px 0 0}
+body:has(>.idc-docked:not(.idc-ghost)) .shell{padding-right:0}
+body:has(.shell)>.idc-panel{--idc-bottom:calc(var(--chrome-h,120px) + 8px)}
+}
 .idc-panel:focus{outline:none}
 .idc-panel :focus-visible,.idc-chip:focus-visible,.idc-tab:focus-visible,.idc-toasts :focus-visible{outline:2px solid var(--idc-focus);outline-offset:1px}
 .idc-panel [hidden],.idc-pill[hidden],.idc-toasts [hidden]{display:none!important}
-.idc-head{flex:none;display:flex;align-items:center;gap:8px;padding:10px 8px 10px 14px;border-bottom:1px solid var(--border,rgba(255,255,255,.09));cursor:move;user-select:none}
+.idc-head{flex:none;display:flex;align-items:center;gap:8px;min-height:40px;padding:4px 4px 4px 1rem;box-sizing:border-box;border-bottom:1px solid var(--border,rgba(255,255,255,.09));cursor:move;user-select:none}
 .idc-panel.min .idc-head{border-bottom-color:transparent}
-.idc-title{flex:1;font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.idc-panel button.idc-ib{flex:none;display:grid;place-items:center;width:26px;height:26px;padding:0;border:0;background:transparent;color:var(--idc-muted)}
-.idc-panel button.idc-ib:hover{background:var(--surface-2,#1d1d20);color:var(--ink,#ededee)}
+.idc-title{flex:1;font-size:15px;font-weight:600;letter-spacing:-.01em;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.idc-panel button.idc-ib{flex:none;display:grid;place-items:center;width:26px;height:26px;padding:0;border:0;border-radius:8px;background:transparent;color:var(--idc-muted)}
+.idc-panel button.idc-ib:hover{background:rgba(255,255,255,.1);color:var(--ink,#ededee)}
 .idc-badge{padding:0 7px;border-radius:999px;font-size:11px;line-height:18px;background:var(--surface-2,#1d1d20);color:var(--ink-2,#b6b6ba)}
 .idc-badge.live{background:rgba(34,181,115,.14);color:var(--status-good,#22b573)}
 .idc-dot{width:8px;height:8px;border-radius:50%;flex:none;background:var(--muted,#808086)}
@@ -303,22 +313,25 @@ try {
 .idc-dot.err{background:var(--status-crit,#ef5b45)}
 @media (prefers-reduced-motion:no-preference){.idc-dot.run{animation:idc-pulse 2.4s ease-in-out infinite}}
 @keyframes idc-pulse{50%{box-shadow:0 0 0 5px rgba(34,181,115,.06)}}
-.idc-tabs{flex:none;display:flex;gap:2px;padding:0 10px;border-bottom:1px solid var(--border,rgba(255,255,255,.09))}
+.idc-tabs{flex:none;display:flex;gap:0;padding:0 6px;border-bottom:1px solid var(--border,rgba(255,255,255,.09))}
 .idc-panel.min .idc-tabs,.idc-panel.min .idc-scroll,.idc-panel.min .idc-foot{display:none}
-.idc-panel button.idc-tabbtn{position:relative;display:inline-flex;align-items:center;gap:6px;height:34px;padding:0 10px;border:0;border-bottom:2px solid transparent;border-radius:0;background:transparent;color:var(--idc-muted);font:inherit;font-size:12.5px}
-.idc-panel button.idc-tabbtn:hover{color:var(--ink,#ededee);background:transparent}
-.idc-panel button.idc-tabbtn[aria-selected="true"]{color:var(--ink,#ededee);border-bottom-color:var(--accent,#5b8def)}
+.idc-panel button.idc-tabbtn{position:relative;display:inline-flex;align-items:center;gap:.4rem;height:auto;padding:.55rem .9rem;line-height:1.4;border:0;border-bottom:2px solid transparent;border-radius:0;background:transparent;color:var(--ink-2,#b6b6ba);font:inherit}
+.idc-panel button.idc-tabbtn:hover{color:var(--ink,#ededee);background:transparent;border-bottom-color:var(--border,rgba(255,255,255,.09))}
+.idc-panel button.idc-tabbtn[aria-selected="true"]{color:var(--ink,#ededee);font-weight:600;border-bottom-color:var(--accent,#5b8def)}
+.idc-tl{display:inline-flex;flex-direction:column;align-items:center}
+.idc-tl::after{content:attr(data-label);font-weight:600;height:0;overflow:hidden;visibility:hidden}
 .idc-tabdot{min-width:6px;height:6px;border-radius:999px;background:var(--accent,#5b8def)}
 .idc-tabdot.warn{background:var(--status-warn,#f2a93b)}
 .idc-scroll{flex:1 1 auto;min-height:96px;overflow:auto;overscroll-behavior:contain}
-.idc-pane{display:grid;gap:14px;align-content:start;padding:12px 14px 14px}
-.idc-label{color:var(--idc-muted);font-size:12.5px}
+.idc-pane{display:grid;gap:14px;align-content:start;padding:12px 16px 16px}
+.idc-label{color:var(--idc-muted);font-size:13px}
 .idc-hero{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
-.idc-big{font-size:24px;font-weight:600;letter-spacing:-.01em}
-.idc-bar{height:6px;border-radius:3px;background:var(--surface-3,#27272a);overflow:hidden;margin:8px 0 0}
-.idc-bar>i{display:block;height:100%;width:0;background:var(--accent,#5b8def);transition:width .4s}
-.idc-rows{display:grid;gap:3px}
-.idc-row{display:flex;justify-content:space-between;gap:12px}
+.idc-big{font-size:24px;font-weight:500;letter-spacing:-.02em;line-height:1.2}
+.idc-bar{height:6px;border-radius:999px;background:var(--ring-off,rgba(255,255,255,.16));overflow:hidden;margin:10px 0 0}
+.idc-bar>i{display:block;height:100%;width:0;border-radius:999px;background:var(--kind);transition:width .4s}
+.idc-rows{display:grid}
+.idc-row{display:flex;justify-content:space-between;gap:12px;padding:5px 0;border-bottom:1px solid var(--border,rgba(255,255,255,.09))}
+.idc-row:last-child{border-bottom:0}
 .idc-row>span:first-child{color:var(--idc-muted);flex:none}
 .idc-row>span:last-child{text-align:right;min-width:0;overflow-wrap:anywhere}
 .idc-state{display:flex;align-items:flex-start;gap:8px;padding:8px 10px;border-radius:8px;background:var(--surface-2,#1d1d20);color:var(--ink-2,#b6b6ba);font-size:12.5px;line-height:1.45}
@@ -329,7 +342,7 @@ try {
 .idc-recent>div{overflow-wrap:anywhere}
 .idc-group{display:grid;gap:10px;min-width:0}
 .idc-group+.idc-group{padding-top:14px;border-top:1px solid var(--border,rgba(255,255,255,.09))}
-.idc-gh{margin:0;font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--idc-muted)}
+.idc-gh{margin:0;font-size:10.5px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--idc-muted)}
 .idc-sub>summary,.idc-sec>summary{cursor:pointer;color:var(--ink-2,#b6b6ba);font-size:12.5px;list-style:none;display:flex;justify-content:space-between}
 .idc-sub>summary::-webkit-details-marker,.idc-sec>summary::-webkit-details-marker{display:none}
 .idc-sub>summary::after,.idc-sec>summary::after{content:"›";display:inline-block;transition:transform .15s}
@@ -345,10 +358,10 @@ fieldset.idc-form:disabled .idc-field,fieldset.idc-form:disabled .idc-check,fiel
 .idc-panel button.idc-rst{display:grid;place-items:center;width:18px;height:18px;padding:0;border:0;border-radius:4px;background:transparent;color:var(--idc-muted)}
 .idc-panel button.idc-rst:hover{background:var(--surface-2,#1d1d20);color:var(--ink,#ededee)}
 .idc-desc{font-size:12px;line-height:1.45;color:var(--idc-muted)}
-.idc-seg{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:2px;padding:2px;border-radius:8px;background:var(--surface-2,#1d1d20);border:1px solid var(--border,rgba(255,255,255,.09))}
-.idc-panel .idc-seg button{height:26px;padding:0 4px;border:0;border-radius:6px;background:transparent;color:var(--ink-2,#b6b6ba);font-size:12.5px;white-space:nowrap}
-.idc-panel .idc-seg button:hover{color:var(--ink,#ededee)}
-.idc-panel .idc-seg button[aria-checked="true"]{background:var(--surface-3,#27272a);color:var(--ink,#ededee);box-shadow:0 1px 2px rgba(0,0,0,.35)}
+.idc-seg{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:2px;padding:2px;border-radius:8px;background:var(--surface-2,#1d1d20)}
+.idc-panel .idc-seg button{height:28px;padding:0 4px;border:0;border-radius:6px;background:transparent;color:var(--ink-2,#b6b6ba);font-size:12.5px;white-space:nowrap}
+.idc-panel .idc-seg button:hover{background:var(--surface-3,#27272a);color:var(--ink,#ededee)}
+.idc-panel .idc-seg button[aria-checked="true"]{background:var(--accent-wash,rgba(91,141,239,.14));color:var(--accent,#5b8def);font-weight:500}
 .idc-panel .idc-seg button:disabled{opacity:.5;cursor:default}
 .idc-inp{display:flex;align-items:center;gap:4px;height:30px;padding:0 9px;border-radius:6px;background:var(--surface-2,#1d1d20);border:1px solid var(--border,rgba(255,255,255,.09));box-sizing:border-box}
 .idc-inp:focus-within{border-color:var(--accent,#5b8def);outline:1px solid var(--accent,#5b8def)}
@@ -378,38 +391,47 @@ fieldset.idc-form:disabled .idc-field,fieldset.idc-form:disabled .idc-check,fiel
 .idc-lctl{display:flex;align-items:center;gap:4px;min-width:0}
 .idc-lctl .idc-sel{flex:1 1 0}
 .idc-tools{display:flex;flex-wrap:wrap;gap:6px}
-.idc-panel button.danger{color:var(--status-crit,#ef5b45);border-color:rgba(239,91,69,.35)}
+.idc-panel button.danger{color:var(--status-crit,#ef5b45);border-color:rgba(208,59,59,.6)}
 .idc-panel button.danger:hover:not(:disabled){background:rgba(239,91,69,.12)}
 .idc-panel button.danger.armed{background:var(--status-crit,#ef5b45);border-color:transparent;color:#fff}
-.idc-foot{flex:none;display:grid;gap:10px;padding:12px 14px 14px;border-top:1px solid var(--border,rgba(255,255,255,.09));background:var(--surface,#151517)}
-.idc-plan{padding:9px 10px;border-radius:8px;border:1px solid var(--border,rgba(255,255,255,.09));font-size:12.5px;line-height:1.45;color:var(--ink-2,#b6b6ba)}
+.idc-foot{flex:none;display:grid;gap:10px;padding:12px 14px 14px;border-top:1px solid var(--border,rgba(255,255,255,.09));background:inherit}
+.idc-plan{padding:0 2px;border-radius:8px;border:1px solid transparent;font-size:12.5px;line-height:1.45;color:var(--idc-muted)}
+.idc-plan.hot,.idc-plan.bad{padding:9px 10px}
 .idc-plan.hot{border-color:var(--accent,#5b8def);background:var(--accent-wash,rgba(91,141,239,.14));color:var(--ink,#ededee)}
 .idc-plan.bad{border-color:rgba(239,91,69,.4);color:var(--status-crit,#ef5b45)}
 .idc-btns{display:flex;gap:8px}
 .idc-btns button{flex:1}
-.idc-pill{margin-left:auto;padding:0 6px;border-radius:999px;font-size:11px;line-height:18px;background:var(--accent-wash,rgba(91,141,239,.14));color:var(--accent,#5b8def);font-variant-numeric:tabular-nums}
-.idc-pill.wait{background:rgba(242,169,59,.14);color:var(--status-warn,#f2a93b)}
-.idc-chip{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 10px;border-radius:999px;border:1px solid transparent;background:var(--surface-2,#1d1d20);color:var(--ink,#ededee);font:12.5px "Inter Variable",system-ui,sans-serif;font-variant-numeric:tabular-nums;cursor:pointer}
-.idc-chip:hover,.idc-chip[aria-expanded="true"]{border-color:var(--border,rgba(255,255,255,.09))}
+.idc-pill{margin-left:auto;padding:0 .4rem;border:1px solid var(--accent,#5b8def);border-radius:999px;font-size:11px;font-weight:400;line-height:16px;color:var(--accent,#5b8def);font-variant-numeric:tabular-nums}
+.idc-pill.wait{border-color:var(--status-warn,#f2a93b);color:var(--status-warn,#f2a93b)}
+.primary-navigation .idc-tab[aria-expanded="true"]{background:var(--surface,#151517);color:var(--ink,#ededee)}
+.primary-navigation .idc-tab[aria-expanded="true"] .nav-icon{color:var(--accent,#5b8def)}
+.idc-chip{display:inline-flex;align-items:center;gap:.35rem;height:24px;padding:0 .6rem;border-radius:999px;border:1px solid transparent;background:var(--surface-2,#1d1d20);color:var(--ink-2,#b6b6ba);font:inherit;font-size:12.5px;line-height:22px;white-space:nowrap;font-variant-numeric:tabular-nums;cursor:pointer}
+.idc-chip:hover{color:var(--ink,#ededee);background:var(--surface-2,#1d1d20)}
+.idc-chip[aria-expanded="true"]{color:var(--ink,#ededee);border-color:var(--border,rgba(255,255,255,.09))}
 .idc-led{display:grid;gap:1px;font-size:12px;line-height:1.4;color:var(--idc-muted)}
 .idc-ll{display:grid;grid-template-columns:auto auto minmax(0,1fr);gap:6px;align-items:baseline;padding:3px 6px;border-radius:5px;border-left:2px solid transparent;overflow-wrap:anywhere}
 .idc-ll.k-action{color:var(--ink-2,#b6b6ba)}
 .idc-ll.k-fail{border-left-color:var(--status-crit,#ef5b45);background:rgba(239,91,69,.08);color:var(--ink,#ededee)}
 .idc-ll.k-alert{border-left-color:var(--status-warn,#f2a93b);background:rgba(242,169,59,.08);color:var(--ink,#ededee)}
 .idc-ll time{font-size:11px;white-space:nowrap}
-.idc-tag{padding:0 5px;border-radius:4px;background:var(--surface-2,#1d1d20);font-size:10.5px;letter-spacing:.03em;color:var(--ink-2,#b6b6ba)}
+.idc-tag{padding:0 5px;border-radius:4px;background:var(--surface-2,#1d1d20);font-size:10.5px;letter-spacing:.07em;color:var(--ink-2,#b6b6ba)}
 .idc-empty{padding:14px 6px;text-align:center;color:var(--idc-muted);font-size:12px}
-.idc-toasts{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:2147483000;display:grid;gap:8px;justify-items:center;width:max-content;max-width:min(520px,calc(100vw - 32px));pointer-events:none}
-.idc-toast{display:flex;align-items:center;gap:12px;pointer-events:auto;padding:9px 12px 9px 14px;border-radius:8px;background:var(--surface-3,#27272a);color:var(--ink,#ededee);border:1px solid var(--border,rgba(255,255,255,.09));border-left:3px solid var(--accent,#5b8def);font:13px/1.4 "Inter Variable",system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.4)}
-.idc-toast.k-success{border-left-color:var(--status-good,#22b573)}
-.idc-toast.k-error{border-left-color:var(--status-crit,#ef5b45)}
+.idc-toasts{position:fixed;top:calc(var(--chrome-h,56px) + 12px);right:24px;z-index:2147483000;display:grid;gap:8px;justify-items:end;width:max-content;max-width:min(380px,calc(100vw - 32px));pointer-events:none}
+body:has(>.idc-docked:not(.idc-ghost)) .idc-toasts{right:calc(var(--idc-dock,360px) + 24px)}
+.idc-toast{display:flex;align-items:center;gap:.6rem;pointer-events:auto;padding:.5rem .5rem .5rem .75rem;border-radius:8px;background:var(--surface-2,#1d1d20);color:var(--ink,#ededee);border:1px solid var(--border,rgba(255,255,255,.09));font-size:13px;line-height:1.4;box-shadow:0 12px 32px rgba(0,0,0,.5)}
+.idc-toast::before{content:"";flex:none;width:8px;height:8px;border-radius:50%;background:var(--accent,#5b8def)}
+.idc-toast.k-success::before{background:var(--status-good,#22b573)}
+.idc-toast.k-error::before{background:var(--status-crit,#ef5b45)}
+@media (max-width:700px){.idc-toasts,body:has(>.idc-docked:not(.idc-ghost)) .idc-toasts{top:auto;bottom:calc(var(--chrome-h,120px) + 12px);left:16px;right:16px;width:auto;max-width:none;justify-items:center}}
 .idc-toast button{height:24px;padding:0 8px;font-size:12px}
-@media (prefers-reduced-motion:no-preference){.idc-toast{animation:idc-in .18s ease-out}@keyframes idc-in{from{opacity:0;transform:translateY(6px)}}}
+@media (prefers-reduced-motion:no-preference){.idc-toast{animation:idc-in .18s ease-out}@keyframes idc-in{from{opacity:0;transform:translateY(-6px)}}}
 @keyframes idc-panel-in{from{opacity:0;transform:translateY(10px) scale(.97)}}
 @keyframes idc-panel-out{to{opacity:0;transform:translateY(6px) scale(.97)}}
+@keyframes idc-dock-in{from{opacity:0;transform:translateX(16px)}}
 @keyframes idc-pane-in{from{opacity:0;transform:translateY(4px)}}
 @media (prefers-reduced-motion:no-preference){
 .idc-panel{animation:idc-panel-in .24s cubic-bezier(.2,.8,.2,1);transform-origin:50% 100%}
+.idc-panel.idc-docked:not(.idc-ghost){animation-name:idc-dock-in}
 .idc-panel.idc-ghost{animation:idc-panel-out .16s ease-in forwards;pointer-events:none}
 .idc-pane{animation:idc-pane-in .22s cubic-bezier(.2,.8,.2,1)}
 .idc-chip,.idc-tab{transition:background-color .15s,border-color .15s,color .15s}
@@ -497,6 +519,18 @@ fieldset.idc-form:disabled .idc-field,fieldset.idc-form:disabled .idc-check,fiel
 
   // Panel shell: sticky header (drag, minimize, close), tabs, scrolling body, sticky footer ----------
   const livePanels = new Set();
+  // React can drop or bring back the game's layout: re-place the panels whose docked state no longer matches it.
+  let dockObs = null;
+  function watchDock() {
+    if (dockObs) return;
+    let queued = false;
+    dockObs = new MutationObserver(() => {
+      if (queued) return;
+      queued = true;
+      requestAnimationFrame(() => { queued = false; const can = !!document.querySelector('.shell'); for (const p of livePanels) if (!p.state.min && p.el.classList.contains('idc-docked') !== can) p.place(); });
+    });
+    dockObs.observe(document.getElementById('root') || document.body, { childList: true, subtree: true });
+  }
   const motionOK = () => HAS_DOM && matchMedia('(prefers-reduced-motion: no-preference)').matches;
   const EASE = 'cubic-bezier(.2,.8,.2,1)';
   function createPanel(o) {
@@ -512,7 +546,7 @@ fieldset.idc-form:disabled .idc-field,fieldset.idc-form:disabled .idc-check,fiel
     const scroll = h('div', { class: 'idc-scroll' });
     for (const t of o.tabs) {
       const badge = h('span', { class: 'idc-tabdot', hidden: true });
-      const b = h('button', { type: 'button', class: 'idc-tabbtn', role: 'tab', id: 'idc-' + o.id + '-t-' + t.id, 'aria-controls': 'idc-' + o.id + '-p-' + t.id, onclick: () => setTab(t.id) }, t.label, badge);
+      const b = h('button', { type: 'button', class: 'idc-tabbtn', role: 'tab', id: 'idc-' + o.id + '-t-' + t.id, 'aria-controls': 'idc-' + o.id + '-p-' + t.id, onclick: () => setTab(t.id) }, h('span', { class: 'idc-tl', 'data-label': t.label }, t.label), badge);
       b._badge = badge;
       tabBtns[t.id] = b;
       panes[t.id] = h('div', { class: 'idc-pane', role: 'tabpanel', id: 'idc-' + o.id + '-p-' + t.id, 'aria-labelledby': b.id, hidden: true }, ...t.content);
@@ -528,13 +562,17 @@ fieldset.idc-form:disabled .idc-field,fieldset.idc-form:disabled .idc-check,fiel
     });
 
     const el = h('div', { class: 'idc-panel ' + (o.cls || ''), role: 'dialog', 'aria-label': o.label || o.title, tabindex: '-1' }, head, tablist, scroll, ...(o.foot ? [o.foot] : []));
-    if (o.width) el.style.width = o.width + 'px';
+    if (o.width) el.style.setProperty('--idc-w', o.width + 'px');
     el.addEventListener('pointerdown', () => raise(), true);
     el.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !e.defaultPrevented && !isTyping(e.target)) { e.preventDefault(); o.onClose(); } });
     makeDraggable(head, () => el, st, place, save);
 
     // Two levels only (the one you used last is on top), so the panels never climb above the game's own dialogs.
-    function raise() { for (const p of livePanels) p.el.style.zIndex = p === api ? 9999 : 9998; el.style.zIndex = 9999; }
+    // A docked panel keeps the stylesheet's z-index (the game's sidebar level, under its modals and popovers).
+    function raise() {
+      for (const p of livePanels) if (p !== api) p.el.style.zIndex = p.el.classList.contains('idc-docked') ? '' : 9998;
+      el.style.zIndex = el.classList.contains('idc-docked') ? '' : 9999;
+    }
     function setTab(id) {
       if (!panes[id]) id = order[0];
       st.tab = id; save();
@@ -556,9 +594,17 @@ fieldset.idc-form:disabled .idc-field,fieldset.idc-form:disabled .idc-check,fiel
       if (!st.min) o.onTab?.(st.tab);
     }
     function place() {
+      // Dock beside the game's layout root (.shell) like its own sidebar; minimized, or with no anchor, it floats as before.
+      const dock = !st.min && !!document.querySelector('.shell');
+      el.classList.toggle('idc-docked', dock);
+      if (dock) {
+        Object.assign(el.style, { left: '', right: '', top: '', bottom: '', maxHeight: '', zIndex: '' });
+        for (const p of livePanels) if (p !== api && p.el.classList.contains('idc-docked')) p.setMin(true);   // one dock: the panel shown last takes it
+        return;
+      }
       if (st.x == null) {
         const d = o.defaultPlace?.() || { right: 20 };
-        Object.assign(el.style, { left: d.left != null ? d.left + 'px' : 'auto', right: d.right != null ? d.right + 'px' : 'auto', top: 'auto', bottom: '20px', maxHeight: 'calc(100vh - 40px)' });
+        Object.assign(el.style, { left: d.left != null ? d.left + 'px' : 'auto', right: d.right != null ? d.right + 'px' : 'auto', top: 'auto', bottom: 'var(--idc-bottom,20px)', maxHeight: 'calc(100vh - 40px)' });
         return;
       }
       // Keep the header, tabs and footer on screen: the top can't be so low that they no longer fit.
@@ -569,7 +615,7 @@ fieldset.idc-form:disabled .idc-field,fieldset.idc-form:disabled .idc-check,fiel
     }
     // Two default-placed panels that would cover each other (narrow window): the one you opened last wins.
     function avoidOverlap() {
-      if (st.x != null || st.min) return;
+      if (st.x != null || st.min || el.classList.contains('idc-docked')) return;
       const a = el.getBoundingClientRect();
       for (const p of livePanels) {
         if (p === api || p.state.x != null || p.state.min) continue;
@@ -589,7 +635,7 @@ fieldset.idc-form:disabled .idc-field,fieldset.idc-form:disabled .idc-check,fiel
       mount({ focus = false } = {}) {
         ensureStyle();
         if (!el.isConnected) document.body.append(el);
-        livePanels.add(api);
+        livePanels.add(api); watchDock();
         setTab(st.tab); setMin(st.min, true); raise();
         if (focus) { avoidOverlap(); el.focus({ preventScroll: true }); }
       },
@@ -723,9 +769,12 @@ fieldset.idc-form:disabled .idc-field,fieldset.idc-form:disabled .idc-check,fiel
   // ---- saved floor designs shared by Autopilot (floor upgrades) and Core plan (furniture floors) --------------------------
   // "x,y:item:rot" cells. Scored with the game's engine.evaluateLayout on 2026-11-22: Workshop v1 = x5 on Frame Timber, Make Bookshelf,
   // Make Table, Make Chair (one input); Rivet x3 = x3 on Rivet Iron Frame, Make Bench, Make Desk (two inputs).
+  // mineX3 = x3 merge on a 5x2 Mine (Extract, no inputs; proven max), smeltX3 = Smelt x3 on the Smelter: both moved from Autopilot's floor library.
   const floorDesigns = Object.freeze({
     workshopV1: '0,0:114:0 0,1:114:0 0,2:114:0 0,3:114:0 0,4:114:0 10,1:123:0 10,2:116:2 10,4:123:0 11,0:123:0 11,1:126:0 11,4:123:0 12,0:123:0 12,1:123:0 12,4:123:0 13,0:123:0 13,1:126:0 13,2:123:1 13,3:123:2 13,4:123:0 14,0:123:0 14,1:123:1 14,2:123:0 14,4:123:0 15,0:116:0 15,2:116:0 15,4:123:0 16,4:123:0 17,4:123:0 2,0:123:0 2,1:123:0 2,2:123:0 2,3:123:0 2,4:123:0 3,0:123:0 3,1:123:1 3,2:127:0 3,3:123:3 3,4:123:0 4,0:116:0 4,2:123:0 4,3:116:0 5,2:123:0 6,2:123:0 7,0:123:0 7,1:123:0 7,2:123:3 7,3:123:0 8,0:123:1 8,1:128:0 8,2:123:1 8,3:127:1 8,4:123:0 9,1:123:0 9,3:123:1 9,4:127:0',
     rivetX3: '0,0:123:0 0,1:123:1 0,2:123:1 0,3:123:1 0,4:123:0 1,0:123:0 1,4:123:0 10,1:123:0 10,2:123:0 10,4:123:0 11,1:123:0 11,2:123:0 11,4:123:0 12,1:123:0 12,2:116:0 12,4:123:0 13,1:123:0 13,4:123:0 14,1:123:0 14,4:123:0 15,0:116:0 15,2:123:0 15,3:116:0 16,2:123:0 17,2:123:0 2,0:126:0 2,1:123:1 2,2:126:1 2,3:123:0 2,4:123:0 3,0:123:0 3,2:123:0 3,3:114:0 3,4:123:0 4,0:114:0 4,2:114:0 4,4:123:0 5,3:123:0 5,4:123:0 6,0:123:0 6,2:123:0 6,3:127:0 6,4:123:3 7,0:123:1 7,1:123:1 7,2:127:0 7,3:123:3 8,2:123:0 9,1:123:0 9,2:126:0 9,3:123:1 9,4:123:0',
+    mineX3: '0,0:121:0 0,1:121:0 1,0:123:0 1,1:123:0 2,0:127:0 2,1:123:3 3,0:123:0 4,0:123:0 4,1:121:0',
+    smeltX3: '0,0:123:1 0,1:127:1 0,2:123:1 0,3:123:0 1,0:113:0 1,2:123:3 1,3:126:0 2,3:123:0 3,0:123:0 3,2:123:0 3,3:126:0 4,0:123:0 4,1:113:0 4,3:123:0 5,0:123:0 5,3:123:0 6,0:123:0 6,1:123:0 6,2:113:0 7,0:123:0 7,1:123:0 8,0:123:0 8,1:123:0 8,2:123:0 9,0:114:0 9,1:114:0 9,2:114:0',
   });
 
   const ui = { ensureStyle, ICONS, row, group, field, setModified, inputBox, check, seg, confirmBtn, createPanel, createChrome, createLogView, togglePanel };
@@ -745,7 +794,7 @@ fieldset.idc-form:disabled .idc-field,fieldset.idc-form:disabled .idc-check,fiel
       if (HAS_DOM) removeEventListener('keydown', onKey, true);
       clearInterval(titleTimer);
       flushLedger();
-      if (HAS_DOM) { uiStyleEl?.remove(); toastBox?.remove(); uiStyleEl = toastBox = null; }
+      if (HAS_DOM) { uiStyleEl?.remove(); toastBox?.remove(); uiStyleEl = toastBox = null; dockObs?.disconnect(); dockObs = null; }
     },
   };
 })();

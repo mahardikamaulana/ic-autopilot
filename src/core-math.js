@@ -6,6 +6,7 @@
 // (income -> T_wall -> last acre inside the rule -> engine acres -> income). No DOM, sockets or timers.
 // Money is in dollars (like the spec script). opts.cyclesPerHour overrides the state's CD rate (a measured CD-farm rate).
 // opts.planksCap (planks per hour, a failed retail checkpoint): the engine, its Camps / Sawmills and the last acre stop at those planks.
+// opts.cdPerHour (a measured CD-farm rate, CD/h): T_wall comes from it instead of the modelled batch (T_wall moves with income).
 // @@MODULE core-math
 try {
 (() => {
@@ -96,7 +97,7 @@ try {
     let E = Math.min(150, Ecap), rule = null;
     for (let it = 0; it < 40; it++) {
       const planks = m.planksFor(E), income = planks * m.perPlank;
-      const b = bestBatch('farm', 0, income, cycles), tWall = WALL_CD / b.cdH;
+      const b = bestBatch('farm', 0, income, cycles), tWall = WALL_CD / (opts.cdPerHour > 0 ? opts.cdPerHour : b.cdH);
       let price = st.acrePrice, last = st.acres;
       const rev = planks * m.perPlank / (E - 4);   // marginal furniture acre: reserve Workshops (Frame Timber, Rivet) excluded
       for (let a = st.acres; a < 360; a++) {
@@ -120,7 +121,7 @@ try {
     return {
       fixedAcres: fixed, bufferAcres: buffer,
       income: rule.income, batch: rule.b.k, perCd: rule.b.perCd, cdPerHour: rule.b.cdH,
-      tWall: rule.tWall, limitHours: rule.tWall / 3,
+      tWall: rule.tWall, limitHours: rule.tWall / 3, tWallFrom: opts.cdPerHour > 0 ? 'measured' : 'model',
       lastAcre: rule.last, acresToBuy: Math.max(0, rule.last - st.acres), landCost,
       targetAcres: acreN, engineAcres: E, planksH: planks, camps, sawmills: saws,
       workshops: { bookshelf: ws[0], table: ws[1], chair: ws[2], frameTimber: 1, rivet: 1, total: wsTotal },

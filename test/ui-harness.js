@@ -30,6 +30,51 @@ button.primary{background:var(--accent);border-color:transparent;color:#fff}butt
 <div id="root"><nav class="primary-navigation"><button class="page-tab">Corp</button><button class="page-tab">Market</button></nav>
 <main><div class="topbar"><div class="topbar-tools"><span class="tip-anchor"></span></div></div><div style="flex:1;padding:24px">Game content</div></main></div></body></html>`;
 
+// The game's real layout (read from idlecorp.net on 2026-11-23): .shell > .app-sidebar (fixed 200px rail) + .chrome (sticky top bar,
+// fixed to the bottom at <=700px) + .page-body. Panels dock beside it; the plain PAGE above has no .shell, so it covers the floating fallback.
+const SHELL_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Idle Corp</title><style>
+:root{--page:#0d0d0f;--surface:#151517;--surface-2:#1d1d20;--surface-3:#27272a;--border:rgba(255,255,255,.09);--ink:#ededee;--ink-2:#b6b6ba;--muted:#808086;--accent:#5b8def;--accent-dim:#2b4a86;--accent-wash:rgba(91,141,239,.14);--status-good:#22b573;--status-warn:#f2a93b;--status-crit:#ef5b45;--ring-off:rgba(255,255,255,.16);--shadow:0 1px 2px rgba(0,0,0,.35),0 4px 16px rgba(0,0,0,.18)}
+*{box-sizing:border-box}body{margin:0;background:var(--page);color:var(--ink);font:14px/1.45 "Inter Variable",system-ui,-apple-system,"Segoe UI",sans-serif}
+button,input,select{font:inherit;color:var(--ink);background:var(--surface-2);border:1px solid var(--border);border-radius:6px;height:30px;padding:0 .7rem}
+button{cursor:pointer}button:hover:not(:disabled){background:var(--surface-3)}button:disabled{opacity:.45;cursor:not-allowed}
+button.primary{background:var(--accent);color:#fff;font-weight:500}button.primary:hover:not(:disabled){background:#6f9cf2}button.danger{border-color:rgba(208,59,59,.6);color:var(--status-crit)}
+input:focus-visible,select:focus-visible{outline:none;border-color:var(--accent)}input[type=checkbox]{accent-color:var(--accent);height:auto}
+.shell{display:block;min-height:100vh;padding-left:200px}
+.app-sidebar{position:fixed;inset:0 auto 0 0;z-index:40;width:200px;display:flex;flex-direction:column;gap:1.25rem;padding:.7rem .75rem 1rem;overflow-y:auto;background:var(--page);border-right:1px solid var(--border)}
+.sidebar-brand{display:flex;align-items:center;height:24px;padding:0 .6rem;font-weight:600}
+.primary-navigation{display:flex;flex-direction:column;gap:2px}
+.primary-navigation .page-tab{width:100%;height:34px;display:flex;align-items:center;justify-content:flex-start;gap:.65rem;padding:0 .6rem;border:none;border-radius:6px;background:none;color:var(--ink-2);font-size:13.5px;text-align:left}
+.primary-navigation .page-tab .nav-icon{flex:0 0 auto;color:var(--muted)}
+.primary-navigation .page-tab .nav-text{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.primary-navigation .page-tab:hover:not(:disabled){background:var(--surface);color:var(--ink)}
+.primary-navigation .page-tab.active{background:var(--surface-2);color:var(--ink);font-weight:600}
+.primary-navigation .page-tab:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.chrome{position:sticky;top:0;z-index:40;background:rgba(13,13,13,.65);backdrop-filter:blur(10px)}
+.topbar{display:flex;align-items:center;flex-wrap:wrap;gap:.6rem 1rem;padding:.7rem 1.5rem;border-bottom:1px solid var(--border)}
+.topbar-context{display:flex;align-items:center;height:32px;padding:0 .8rem;border-radius:8px;background:var(--surface-2);font-weight:500}
+.topbar-tools{display:flex;flex:1 1 auto;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:.6rem;min-width:0}
+.tip-anchor{display:inline-flex}
+.power-status,.shipments-chip{display:inline-flex;align-items:center;gap:.35rem;color:var(--ink-2);border:1px solid transparent;border-radius:999px;background:var(--surface-2);height:24px;line-height:22px;padding:0 .6rem;font-size:12.5px;white-space:nowrap}
+.notice-bell{width:30px;height:30px;padding:0;border:0;border-radius:8px;background:none;color:var(--ink-2)}
+.balance{font-size:15px;font-variant-numeric:tabular-nums}
+.page-body{display:flex;flex-direction:column;gap:1.25rem;padding:1.5rem;max-width:1800px;margin:0 auto}
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow)}
+.panel-head{display:flex;align-items:center;gap:.75rem;padding:4px 4px 4px 1rem;min-height:40px;border-bottom:1px solid var(--border)}
+.panel-head h2{font-size:15px;font-weight:600;letter-spacing:-.01em;margin:0}
+.panel-body{padding:.75rem 1rem 1rem;display:flex;flex-direction:column;gap:.6rem}
+.stat-strip{display:flex;flex-wrap:wrap;gap:.75rem 2.5rem}.stat-strip-value{font-size:24px;font-weight:500;letter-spacing:-.02em;line-height:1.2;font-variant-numeric:tabular-nums}.stat-strip-label{color:var(--muted);font-size:13px;margin-top:.15rem}
+@media (max-width:900px){.shell{padding-left:0}.app-sidebar{display:none}.topbar{padding:.6rem 1rem}.page-body{padding:1rem}}
+@media (max-width:700px){.chrome{position:fixed;inset:auto 0 0;background:rgba(13,13,13,.85)}.topbar{border-bottom:0;border-top:1px solid var(--border);padding:.5rem 1rem}.topbar-tools{order:-1;flex:1 0 100%;flex-wrap:nowrap;overflow-x:auto;justify-content:flex-start;scrollbar-width:none}.shell{padding-bottom:var(--chrome-h,120px)}}
+</style></head><body>
+<div id="root"><div class="shell">
+<aside class="app-sidebar"><div class="sidebar-brand">IdleCorp</div><nav class="primary-navigation"><button class="page-tab active"><span class="nav-text">Corp</span></button><button class="page-tab"><span class="nav-text">Market</span></button></nav></aside>
+<div class="chrome"><header class="topbar"><div class="topbar-context">Heartland</div><div class="topbar-tools"><span class="tip-anchor"><span class="power-status">11/11 MW</span></span><span class="shipments-chip">8 · 32s</span><span class="tip-anchor"></span></div><button class="notice-bell" aria-label="Notices">●</button><span class="balance">$1,775,058.39</span></header></div>
+<div class="page-body"><div class="panel"><div class="panel-head"><h2>Overview</h2></div><div class="panel-body"><div class="stat-strip"><div><div class="stat-strip-value">$1,775,058</div><div class="stat-strip-label">Cash</div></div><div><div class="stat-strip-value">1,340</div><div class="stat-strip-label">Construction Data</div></div><div><div class="stat-strip-value">11/11 MW</div><div class="stat-strip-label">Power</div></div></div></div></div>
+<div class="panel"><div class="panel-head"><h2>Operations</h2></div><div class="panel-body" style="height:900px;color:var(--ink-2)">Game content</div></div></div>
+</div></div>
+<script>new ResizeObserver(([e]) => document.documentElement.style.setProperty('--chrome-h', Math.round(e.borderBoxSize[0].blockSize) + 'px')).observe(document.querySelector('.chrome'));</script>
+</body></html>`;
+
 const INIT = (data) => {
   class FakeWS {
     constructor() { this.readyState = 1; this.sent = []; this.l = []; }
@@ -52,7 +97,7 @@ const INIT = (data) => {
   window.__fiber = fiber;
 };
 
-async function open(width = 1280, height = 800, motion = false) {
+async function open(width = 1280, height = 800, motion = false, shell = false) {
   const browser = await chromium.launch({ executablePath: CHROME, headless: true });
   const ctx = await browser.newContext({ viewport: { width, height }, reducedMotion: motion ? 'no-preference' : 'reduce' });
   const page = await ctx.newPage();
@@ -60,7 +105,7 @@ async function open(width = 1280, height = 800, motion = false) {
   page.on('pageerror', (e) => errors.push(String(e)));
   page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
   await page.addInitScript(INIT, { catalog: board.catalog, deals: board.deals });
-  await page.route('https://idlecorp.test/', (r) => r.fulfill({ contentType: 'text/html', body: PAGE }));
+  await page.route('https://idlecorp.test/', (r) => r.fulfill({ contentType: 'text/html', body: shell ? SHELL_PAGE : PAGE }));
   await page.goto('https://idlecorp.test/');
   await page.evaluate(() => { document.getElementById('root').__reactContainer$x = window.__fiber; });
   return { browser, page, errors };
@@ -69,9 +114,8 @@ async function open(width = 1280, height = 800, motion = false) {
 
 async function load(page) {
   await page.addScriptTag({ content: script });
-  await page.waitForSelector('.egp-tab', { timeout: 15000 });
-  await page.waitForSelector('.cdf-tab', { timeout: 15000 });
-  await page.waitForSelector('.lab-tab', { timeout: 15000 });
+  // attached, not visible: the game hides its sidebar below 900px (the tabs are still there for its mobile menu)
+  for (const s of ['.egp-tab', '.cdf-tab', '.lab-tab']) await page.waitForSelector(s, { state: 'attached', timeout: 15000 });
 }
 
 let failed = 0;
@@ -646,6 +690,47 @@ async function sectionNarrow() {
   }
 }
 
+async function sectionDocked() {
+  // On the game's real layout the open panel docks as a right rail (a sheet above the bottom bar on phones), like the game's own sidebar.
+  for (const [w, hgt] of [[1440, 900], [390, 844]]) {
+    const n = await open(w, hgt, false, true), p = n.page, tag = w + 'px: ';
+    await load(p);
+    await until(p, () => document.querySelector('.egp-panel.idc-docked'));
+    const d = await p.evaluate(() => { const e = document.querySelector('.egp-panel'), r = e.getBoundingClientRect(); return { docked: e.classList.contains('idc-docked'), l: r.left, r: r.right, t: r.top, b: r.bottom, z: getComputedStyle(e).zIndex, pad: getComputedStyle(document.querySelector('.shell')).paddingRight, vw: innerWidth, vh: innerHeight, chromeTop: document.querySelector('.chrome').getBoundingClientRect().top }; });
+    if (w > 700) ok(d.docked && Math.round(d.r) === d.vw && d.t === 0 && Math.round(d.b) === d.vh && d.pad === '360px' && d.z === '40', tag + 'Autopilot docks as a right rail at the game sidebar level and pushes the content over', JSON.stringify(d));
+    else ok(d.docked && d.l === 0 && Math.round(d.r) === d.vw && d.b <= d.chromeTop + 1 && d.pad === '0px', tag + 'on a phone it docks as a sheet above the game bar', JSON.stringify(d));
+    const onTop = (sel) => p.evaluate((s) => { const b = document.querySelector(s), r = b.getBoundingClientRect(); return b.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)); }, sel);
+    ok(await onTop('.egp-panel .idc-foot .primary'), tag + 'the Start button is not covered by anything');
+    ok(await onTop('.egp-chip'), tag + 'the top-bar chip is not covered by the docked panel');
+    await p.evaluate(() => window.idleCore.toast('hello', 'success'));
+    const tov = await p.evaluate(() => { const t = document.querySelector('.idc-toast').getBoundingClientRect(), e = document.querySelector('.egp-panel').getBoundingClientRect(); return t.left < e.right && t.right > e.left && t.top < e.bottom && t.bottom > e.top; });
+    if (w > 700) ok(!tov, tag + 'toasts sit beside the docked panel, not on it');
+    // one dock: the panel shown last takes it and the other minimizes (floating); the chip brings it back docked
+    await p.evaluate(() => window.cdFarm.panel(true));
+    const one = await p.evaluate(() => ({ docked: [...document.querySelectorAll('.idc-panel.idc-docked')].map((e) => e.classList[1]), egpMin: document.querySelector('.egp-panel').classList.contains('min') }));
+    ok(one.docked.join() === 'cdf-panel' && one.egpMin, tag + 'one docked panel at a time: the newest wins, the other minimizes', JSON.stringify(one));
+    await p.click('.egp-chip');
+    ok(await p.evaluate(() => document.querySelector('.egp-panel.idc-docked') && !document.querySelector('.cdf-panel')), tag + 'the chip expands the minimized panel back into the dock');
+    // a docked header does not drag
+    const hb = await (await p.$('.egp-panel .idc-head')).boundingBox();
+    await p.mouse.move(hb.x + 60, hb.y + 12); await p.mouse.down(); await p.mouse.move(hb.x - 200, hb.y + 100, { steps: 4 }); await p.mouse.up();
+    ok(await p.evaluate(() => JSON.parse(localStorage.getItem('earlyGame.ui')).x == null && !!document.querySelector('.egp-panel.idc-docked')), tag + 'dragging a docked header leaves it docked');
+    // React swaps the layout out: the panel falls back to floating; the layout comes back: it docks again
+    await p.evaluate(() => { window.__shell = document.querySelector('.shell'); window.__shell.remove(); });
+    await until(p, () => !document.querySelector('.egp-panel.idc-docked'));
+    const fl = await p.evaluate(() => { const e = document.querySelector('.egp-panel'), r = e.getBoundingClientRect(); return { docked: e.classList.contains('idc-docked'), h: r.height, z: getComputedStyle(e).zIndex }; });
+    ok(!fl.docked && fl.h > 100 && fl.z === '9999', tag + 'without the game layout the panel floats as before', JSON.stringify(fl));
+    await p.evaluate(() => document.getElementById('root').append(window.__shell));
+    await until(p, () => document.querySelector('.egp-panel.idc-docked'));
+    ok(await p.evaluate(() => !!document.querySelector('.egp-panel.idc-docked') && /^4[01]$/.test(getComputedStyle(document.querySelector('.egp-panel')).zIndex)), tag + 'when the layout comes back it docks again');
+    // Escape still closes and hands focus back
+    await p.focus('.egp-panel .idc-tabbtn[aria-selected=true]');
+    await p.keyboard.press('Escape');
+    ok(await count(p, '.egp-panel') === 0 && await p.evaluate(() => getComputedStyle(document.querySelector('.shell')).paddingRight) === '0px', tag + 'Escape closes the docked panel and the content gets its width back');
+    ok(n.errors.length === 0, tag + 'no errors on the docked layout', JSON.stringify(n.errors));
+    await n.browser.close();
+  }
+}
 async function sectionMotion() {
   // motion on (the checks above run with reduced motion): panels fade in, closed ones leave a fading copy, minimize animates height
   {
@@ -730,6 +815,7 @@ const SHARDS = {
   lab: { main: [sectionLab] },
   utilities: { main: [sectionUtilities, sectionUnload] },
   narrow: { own: sectionNarrow },
+  docked: { own: sectionDocked },
   motion: { own: sectionMotion },
   'auto-a': { auto: autoGroup1 },
   'auto-b': { auto: autoGroup2 },
@@ -796,13 +882,23 @@ const mode = process.argv[2];
   if (mode === 'shots') {
     const out = process.argv[3]; const w = +process.argv[4] || 1280, hgt = +process.argv[5] || 800;
     fs.mkdirSync(out, { recursive: true });
-    const { browser, page, errors } = await open(w, hgt);
+    const { browser, page, errors } = await open(w, hgt, false, true);
     await load(page);
     await page.screenshot({ path: path.join(out, 'closed.png') });
     await page.evaluate(() => { window.earlyGame.panel(true); window.cdFarm.panel(true); });
     await page.waitForTimeout(1200);
     await page.screenshot({ path: path.join(out, 'both-open.png') });
-    for (const [name, sel] of [['autopilot', '.egp-panel'], ['cdfarm', '.cdf-panel']]) {
+    for (const [name, sel, mod] of [['autopilot', '.egp-panel', 'earlyGame'], ['cdfarm', '.cdf-panel', 'cdFarm']]) {
+      await page.evaluate((m) => { window.earlyGame.panel(false); window.cdFarm.panel(false); window[m].panel(true); }, mod);
+      const exp = await page.$(sel + ' button[aria-label="Expand"]');
+      if (exp) await exp.click();
+      await page.waitForTimeout(300);
+      await page.screenshot({ path: path.join(out, name + '-page.png') });
+      if (name === 'autopilot') {
+        await page.evaluate(() => { window.idleCore.toast('Settings reset', { kind: 'success', undo: () => {} }); window.idleCore.toast('Buy failed: not enough cash', 'error'); });
+        await page.waitForTimeout(200);
+        await page.screenshot({ path: path.join(out, 'toasts.png') });
+      }
       const el = await page.$(sel);
       for (const tab of ['status', 'settings', 'log']) {
         const btn = await page.$(sel + ' .idc-tabbtn[id$="-t-' + tab + '"]');

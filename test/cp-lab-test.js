@@ -20,6 +20,8 @@ const RF = (id, quirks = []) => ({ id, kind: 62, name: 'Refiner #' + id, ticks_b
 const CORNER = [{ kind: 'CornerTuned', cell: '1,-1', elsewhere_pct: 48 }];
 const labOf = (d) => d.actions.filter((a) => a.director === 'lab');
 const decideA = (cp, st, ctx = F.ctxOf()) => cp._decide(cp._view(st, F.board.catalog, F.cottonBidDeals()), ctx);
+const inB = (st) => { st.research = { building: B('Assembly Plant') }; return st; };   // Stage B: the Assembly Plant research is running
+const inC = (st) => { st.unlocked_buildings.push(B('Assembly Plant')); return st; };   // Stage C: the Assembly Plant is unlocked
 const installs = (d) => labOf(d).filter((a) => a.steps?.[0]?.msg.type === 'InstallModule').map((a) => a.steps[0].msg);
 
 // A fake Lab runner with the parts of labRunner's API the director uses.
@@ -136,6 +138,7 @@ function fakeLab({ running = true, dryRun = true, mode = 'process', list = [], s
 
   await t('live Stage B snapshot: CreateGroup for the pooled Lab; the Refiner waits (no furniture Workshop), never on Frame Timber', () => {
     const { cp } = F.load(['cp-lab']);
+    cp.cfg.labTarget = 1;   // the second Lab (which may buy its acres) is D2's test
     const st = F.liveB();
     const d = cp._decide(cp._view(st, SB, F.stageB.deals), F.ctxOf());
     assert.strictEqual(d.stage, 'B');
@@ -173,7 +176,7 @@ function fakeLab({ running = true, dryRun = true, mode = 'process', list = [], s
   await t('runner on the live snapshot: CreateGroup applied, then nothing more to send for the Lab group', async () => {
     const st = F.liveB();
     const { cp, w } = F.boot(st, { modules: ['cp-lab'], catalog: SB, deals: F.stageB.deals });
-    cp.cfg.land = false; cp.cfg.unlocks = false;
+    cp.cfg.land = false; cp.cfg.unlocks = false; cp.cfg.labTarget = 1;   // the second Lab is D2's test
     cp.start({ dryRun: false });
     await F.waitFor(() => w.ws.sent.some((m) => m.type === 'CreateGroup'));
     await F.waitFor(() => !cp.active);
@@ -352,6 +355,129 @@ function fakeLab({ running = true, dryRun = true, mode = 'process', list = [], s
     const mine = globalThis.corePlan.duties().flat(Infinity).find((x) => /stacking/.test(x?.duty ?? ''));
     assert.ok(mine && mine.owner === 'you' && mine.done === false, 'manual stacking duty');
     F.unload();
+  });
+
+  await t('D2: second Lab: bought with 1 Lab, the unlocks\' frames + 4, 2 free acres above the buffer and the cash; each gate says why', () => {
+    const { cp } = F.load(['cp-lab']);
+    const lab = B('Manufacturing Lab');
+    // 81 acres bought: 18 free, exactly 2 above the 16-acre buffer; Iron Frames = what the unlocks still need + the Lab's 4
+    const ready = () => { const st = F.stageA(); st.land_bought[0] = 81; st.stock[0][I('Iron Frame')] = cp._ifNeed(cp._view(st, F.board.catalog, []), null) + 4; return st; };
+    const st = ready(), need = st.stock[0][I('Iron Frame')];
+    assert.strictEqual(cp.cfg.labTarget, 2);
+    const a = labOf(decideA(cp, st))[0];
+    assert.strictEqual(a.id, 'lab:buy:1');
+    assert.ok(a.hold);
+    assert.deepStrictEqual(a.steps.map((s) => s.msg), [{ type: 'BuyBuilding', building: lab, amount: 1, region: 0 }, { type: 'AssignBuildings', group: 9, amount: 1 }]);
+    const v = cp._view(st, F.board.catalog, []);
+    assert.deepStrictEqual(cp._lab.pendingInvest(v, F.ctxOf()), [{ what: 'second Manufacturing Lab', paybackH: null }]);
+    // frames short
+    const s1 = ready(); s1.stock[0][I('Iron Frame')] = need - 1;
+    let d = decideA(cp, s1);
+    assert.ok(!labOf(d).some((x) => x.id.startsWith('lab:buy')));
+    assert.match(d.readouts.lab.secondLab, new RegExp('Iron Frame ' + (need - 1) + ' < ' + need));
+    assert.strictEqual(cp._lab.pendingInvest(cp._view(s1, F.board.catalog, []), F.ctxOf()).length, 1, 'still wanted: E5 waits');
+    // one free acre above the buffer: the Lab buys the other in the same held action while the land rule is open
+    const s2 = inC(ready()); s2.land_bought[0] = 80;   // stage C: the Lab may buy land
+    d = decideA(cp, s2);
+    const la = labOf(d).find((x) => x.id.startsWith('lab:buy'));
+    assert.ok(d.rule.lastAcre >= cp._view(s2, F.board.catalog, []).acresOwned + 1, 'fixture: rule open');
+    assert.deepStrictEqual(la.steps.map((s) => s.msg), [{ type: 'BuyLand', amount: 1, region: 0 }, { type: 'BuyBuilding', building: lab, amount: 1, region: 0 }, { type: 'AssignBuildings', group: 9, amount: 1 }]);
+    assert.match(la.text, /buy 1 acre\(s\) \$/);
+    // cash: money floor + Lab + bill floor
+    d = decideA(cp, ready(), F.ctxOf({ floorCents: 5000000 - 1050000 - 4000 + 1 }));
+    assert.ok(!labOf(d).some((x) => x.id.startsWith('lab:buy')));
+    assert.match(d.readouts.lab.secondLab, /cash \$50,000 < /);
+    assert.ok(labOf(decideA(cp, ready(), F.ctxOf({ floorCents: 5000000 - 1050000 - 4000 })))[0].id === 'lab:buy:1', 'cash exactly at the line buys');
+    // never past 2, and not when labTarget is 1
+    const s3 = ready(); s3.groups[9].count = 2;
+    assert.ok(!labOf(decideA(cp, s3)).some((x) => x.id.startsWith('lab:buy')));
+    assert.deepStrictEqual(cp._lab.pendingInvest(cp._view(s3, F.board.catalog, []), F.ctxOf()), []);
+    cp.cfg.labTarget = 1;
+    assert.ok(!labOf(decideA(cp, ready())).some((x) => x.id.startsWith('lab:buy')));
+    F.unload();
+  });
+
+  await t('B1: second Lab with no free acre: buys its own acres in stage C-D inside the land rule (cash counts the land); rule closed: not pending, readout says so', () => {
+    const { cp } = F.load(['cp-lab']);
+    const lab = B('Manufacturing Lab'), cat = F.board.catalog;
+    // E4 at the end: no acre above the 16-acre buffer free
+    const st = F.stageA(); st.stock[0][I('Iron Frame')] = 1000; st.items[F.MONEY] = 1e11;
+    st.land_bought[0] += cp.cfg.bufferAcres - cp._view(st, cat, []).freeAcres;
+    const v = cp._view(st, cat, []);
+    assert.strictEqual(v.freeAcres, cp.cfg.bufferAcres);
+    const open = { lastAcre: v.acresOwned + 2 }, closed = { lastAcre: v.acresOwned + 1 };
+    const r = cp._lab.labBuy(v, F.ctxOf(), cp.cfg, open, 'C');
+    assert.deepStrictEqual(r.action.steps.map((s) => s.msg), [{ type: 'BuyLand', amount: 2, region: 0 }, { type: 'BuyBuilding', building: lab, amount: 1, region: 0 }, { type: 'AssignBuildings', group: 9, amount: 1 }]);
+    assert.strictEqual(cp._lab.pendingInvest(v, F.ctxOf(), open, 'C').length, 1);
+    // cash: money floor + 2 acres + Lab + bill floor
+    const land = cp._acrePriceCents(v.landBought) + cp._acrePriceCents(v.landBought + 1);
+    const price = globalThis.idleCore.planner.price(cat.buildings.find((b) => b.name === 'Manufacturing Lab').cost, 1, 0);
+    const line = land + price + 4000;
+    assert.ok(cp._lab.labBuy(v, F.ctxOf({ floorCents: v.money - line }), cp.cfg, open, 'C').action, 'cash exactly at the line buys');
+    const short = cp._lab.labBuy(v, F.ctxOf({ floorCents: v.money - line + 1 }), cp.cfg, open, 'C');
+    assert.ok(!short.action && short.want);
+    assert.match(short.note, /money floor \+ 2 acre\(s\) \$/);
+    // the rule closes before the 2nd acre: not wanted, so E5 is not held by it
+    const c = cp._lab.labBuy(v, F.ctxOf(), cp.cfg, closed, 'C');
+    assert.ok(!c.action && !c.want);
+    assert.match(c.note, /^second Lab: land rule closed/);
+    assert.deepStrictEqual(cp._lab.pendingInvest(v, F.ctxOf(), closed, 'C'), []);
+    assert.deepStrictEqual(cp._lab.pendingInvest(v, F.ctxOf(), null, 'C'), [], 'no rule: no land');
+    // through decide (verifier probe: E4 free-acre side holds, rule open): the Lab buys its acres, so it never deadlocks E5
+    const s4 = inC(F.stageA()); s4.stock[0][I('Iron Frame')] = 200; s4.items[F.MONEY] = 1e11; F.tight(cp, s4, 80);
+    s4.land_bought[0] += cp.cfg.bufferAcres - cp._view(s4, cat, []).freeAcres;
+    const d = decideA(cp, s4, F.ctxOf({ netIncomeH: 1, tick: 20150000 }));
+    assert.ok(d.rule.lastAcre >= cp._view(s4, cat, []).acresOwned + 2, 'fixture: rule open');
+    assert.deepStrictEqual(labOf(d)[0].steps.map((s) => s.msg.type), ['BuyLand', 'BuyBuilding', 'AssignBuildings']);
+    F.unload();
+  });
+
+  await t('D2: second Lab, stage A-B: no free acre above the buffer buys no land (no action, not pending, readout says why); free acres above it still buy, no BuyLand', () => {
+    const { cp } = F.load(['cp-lab']);
+    const cat = F.board.catalog;
+    // 80 bought + the buffer free: no acre above the 16-acre buffer; money and frames are plentiful, the land rule is open
+    const none = (inStage) => { const s = inStage(F.stageA()); s.stock[0][I('Iron Frame')] = 200; s.items[F.MONEY] = 1e11; F.tight(cp, s, 80); s.land_bought[0] += cp.cfg.bufferAcres - cp._view(s, cat, []).freeAcres; return s; };
+    for (const [stage, inStage] of [['B', inB], ['A', (s) => s]]) {
+      const s = none(inStage), ctx = F.ctxOf({ netIncomeH: 1, tick: 20150000 });
+      const d = decideA(cp, s, ctx), v = cp._view(s, cat, []);
+      assert.strictEqual(d.stage, stage);
+      assert.ok(d.rule.lastAcre >= v.acresOwned + 2, 'fixture: rule open');
+      assert.strictEqual(v.freeAcres, cp.cfg.bufferAcres);
+      assert.ok(!labOf(d).some((x) => x.id.startsWith('lab:buy')), 'stage ' + stage + ': no Lab action');
+      assert.match(d.readouts.lab.secondLab, new RegExp('stage ' + stage + ' buys no land for it'));
+      assert.deepStrictEqual(cp._lab.pendingInvest(v, ctx, d.rule, stage), [], 'stage ' + stage + ': not pending');
+      assert.ok(!cp._lab.labBuy(v, ctx, cp.cfg, d.rule, stage).want);
+      assert.ok(cp._lab.labBuy(v, ctx, cp.cfg, d.rule, 'C').action, 'stage C buys the land');
+    }
+    // 2 free acres above the buffer: stage B still buys, with no BuyLand
+    const s2 = inB(F.stageA()); s2.land_bought[0] = 81; s2.stock[0][I('Iron Frame')] = 200; s2.items[F.MONEY] = 1e11;
+    const d2 = decideA(cp, s2);
+    assert.strictEqual(d2.stage, 'B');
+    assert.deepStrictEqual(labOf(d2).find((x) => x.id.startsWith('lab:buy')).steps.map((x) => x.msg.type), ['BuyBuilding', 'AssignBuildings']);
+    F.unload();
+  });
+
+  await t('D2: a bought Lab whose assign did not land joins the Lab group; no second purchase', () => {
+    const { cp } = F.load(['cp-lab']);
+    const st = F.stageA(); st.land_bought[0] = 90; st.stock[0][I('Iron Frame')] = 200;
+    st.building_pool[0][B('Manufacturing Lab')] = 1;   // BuyBuilding landed, AssignBuildings was lost
+    const acts = labOf(decideA(cp, st));
+    assert.ok(!acts.some((x) => x.id.startsWith('lab:buy')), 'owned is 2 with the pool');
+    assert.deepStrictEqual(acts[0].steps.map((s) => s.msg), [{ type: 'AssignBuildings', group: 9, amount: 1 }]);
+    F.unload();
+  });
+
+  await t('D2 runner: the fake server applies the buy: 2 Labs in the Lab group, one BuyBuilding only', async () => {
+    const st = F.stageA(); st.land_bought[0] = 82;
+    const { cp, w } = F.boot(st, { modules: ['cp-lab'] });
+    Object.assign(cp.cfg, { land: false, unlocks: false, confirmMs: 500 });
+    st.stock[0][I('Iron Frame')] = cp._ifNeed(cp._view(st, F.board.catalog, []), null) + 4;
+    cp.start({ dryRun: false });
+    for (let i = 0; i < 4; i++) { await F.waitFor(() => !cp.active); await cp._step(); }
+    await F.waitFor(() => !cp.active);
+    assert.strictEqual(w.ws.sent.filter((m) => m.type === 'BuyBuilding').length, 1, w.ws.sent.map((m) => m.type).join());
+    assert.strictEqual(st.groups[9].count, 2);
+    cp.stop(); F.unload();
   });
 
   F.done();
