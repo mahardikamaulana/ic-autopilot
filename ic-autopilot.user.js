@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IC Autopilot
 // @namespace    idlecorp-toolkit
-// @version      2.8.6
+// @version      2.8.7
 // @author       XPARAD0X
 // @description  Early-game Autopilot, CD Farm (Construction Data by building and demolishing buildings; Auto picks the cheapest source itself), Lab runner (keeps the Manufacturing Labs researching), Auto ship (an "Auto ship" button on every distributor bid) and Auto utilities (an "Auto" switch that keeps the power and water subscriptions at what the groups need) for IdleCorp, each with a panel, menu or switch in the game UI.
 // @homepageURL  https://github.com/mahardikamaulana/ic-autopilot
@@ -1768,6 +1768,7 @@ try {
   let graceMs = 2000;                 // a timed-out Demolish gets this long to land before the retry looks again
   let waitMaxMs = 600000;             // a run waits this long for cash/items inside the run, then ends and lets Autopilot go
   const RUN_MAX_MS = 900000;          // a run ends after 15 min so Autopilot gets its turn (sales, power, resuming groups); the controller restarts it
+  let segStart = 0;                   // when this run segment began (a start or a resume): RUN_MAX_MS counts from here, so time spent interrupted does not end a resumed run
   const ERR_COOLDOWN_MS = 300000;     // after an error stop: 5 min, doubling, off after 3 in a row               // cents: first bought acre in Heartland
   const HIST_MS = 30 * 60 * 1000;        // window for income, organic CD, net supply
   const SAMPLE_MS = 5000;
@@ -2037,7 +2038,7 @@ try {
     lastEval = ev;
     if (ev.idle) return stopWith(ev.reason);
     if (netSpend() >= cfg.maxSpend) return stopWith(`reached max spend $${fmt(cfg.maxSpend)}`);
-    if (Date.now() - stats.startedAt > RUN_MAX_MS) return stopWith('giving Autopilot its turn');
+    if (Date.now() - segStart > RUN_MAX_MS) return stopWith('giving Autopilot its turn');
     if (cfg.dryRun) {
       // Nothing is sent, land included. Log the plan a few times, then end (a dry run must not hold Autopilot forever).
       const u = ev.plan.units;
@@ -2258,6 +2259,7 @@ try {
         sample();
       }
       resumable = false; began = true;
+      segStart = Date.now();
       save(); render();
 
       if (resume) {
@@ -5308,6 +5310,7 @@ try {
   const lockOwner = () => { try { const l = JSON.parse(store?.getItem(LOCK_KEY) || 'null'); return l && Date.now() - l.t < 15000 ? l.tab : null; } catch { return null; } };
   const takeLock = () => { try { store?.setItem(LOCK_KEY, JSON.stringify({ tab: TAB, t: Date.now() })); } catch {} };
   const dropLock = () => { try { if (lockOwner() === TAB) store?.removeItem(LOCK_KEY); } catch {} };
+  addEventListener?.('pagehide', dropLock);   // as the page goes: a reloaded tab may start Live at once, not after the 15 s lock expires
 
   function start(o = {}) {
     if (running && !(o.dryRun === false && cfg.dryRun)) return status();   // already running; a dry run may still be taken live
@@ -5410,7 +5413,7 @@ try {
     exportCfg() { return { cfg: Object.fromEntries(Object.entries(cfg).filter(([k]) => !SESSION_ONLY.includes(k))) }; },
     resetCfg() { Object.assign(cfg, DEFAULTS); save(); },
     _ifNeed: ifNeed, _view: view, _decide: decide, _step: step, _names: names, _startConditions: startConditions, _endConditions: endConditions, _nextUnlock: nextUnlock, _trackCash: trackCash, _cashTrend60: cashTrend60, _setPacer(p) { pacer = p; },
-    _unload() { unloaded = true; running = false; clearInterval(loopTimer); cancelResume(); loopTimer = 0; core.reserves?.unregister('corePlan'); dropLock(); },
+    _unload() { unloaded = true; running = false; clearInterval(loopTimer); cancelResume(); loopTimer = 0; core.reserves?.unregister('corePlan'); dropLock(); removeEventListener?.('pagehide', dropLock); },
   };
 
   restore();
@@ -7987,6 +7990,8 @@ try {
   }
   const takeLock = () => { try { store?.setItem(LOCK, JSON.stringify({ id: TAB, t: Date.now() })); } catch {} };
   const dropLock = () => { try { if (lockOwner() === TAB) store?.removeItem(LOCK); } catch {} };
+  // A reload or a closed tab never reaches stop(): give the lock up as the page goes, or the reloaded tab is refused for up to a minute.
+  addEventListener?.('pagehide', dropLock);
 
   // ---- clock, cooldowns -----------------------------------------------------
 
@@ -9687,6 +9692,7 @@ try {
     },
     _unload: () => {
       unloaded = true; running = false; holds.clear(); dropLock(); core.setBadge('AP', ''); core.reserves?.unregister('earlyGame');
+      removeEventListener?.('pagehide', dropLock);
       if (HAS_DOM) unmountUi();
     },
   };
@@ -9712,6 +9718,13 @@ try {
       while (!read()?.wsOpen) { if (unloaded) return; await sleep(500); }
       await sleep(2000); // let the fresh snapshot land
       if (unloaded || running) return;
+      // A crashed or discarded tab never released its lock (no pagehide): it expires 60 s after its last heartbeat. A live tab keeps
+      // refreshing its lock, so this waits at most ~66 s for it to let go, then says so in the ledger instead of resuming.
+      for (let w = 0; lockOwner() && lockOwner() !== TAB; w++) {
+        if (w === 33) { core.ledger.add('AP', 'fail', 'not resumed: another tab is running Autopilot'); return; }
+        await sleep(2000);
+        if (unloaded || running) return;
+      }
       let live = false;
       if (cfg.liveResume && liveFlag) { live = await liveCountdown(); if (unloaded || running) return; }
       cfg.dryRun = !live;

@@ -16,6 +16,7 @@
     },
     _unload: () => {
       unloaded = true; running = false; holds.clear(); dropLock(); core.setBadge('AP', ''); core.reserves?.unregister('earlyGame');
+      removeEventListener?.('pagehide', dropLock);
       if (HAS_DOM) unmountUi();
     },
   };
@@ -41,6 +42,13 @@
       while (!read()?.wsOpen) { if (unloaded) return; await sleep(500); }
       await sleep(2000); // let the fresh snapshot land
       if (unloaded || running) return;
+      // A crashed or discarded tab never released its lock (no pagehide): it expires 60 s after its last heartbeat. A live tab keeps
+      // refreshing its lock, so this waits at most ~66 s for it to let go, then says so in the ledger instead of resuming.
+      for (let w = 0; lockOwner() && lockOwner() !== TAB; w++) {
+        if (w === 33) { core.ledger.add('AP', 'fail', 'not resumed: another tab is running Autopilot'); return; }
+        await sleep(2000);
+        if (unloaded || running) return;
+      }
       let live = false;
       if (cfg.liveResume && liveFlag) { live = await liveCountdown(); if (unloaded || running) return; }
       cfg.dryRun = !live;

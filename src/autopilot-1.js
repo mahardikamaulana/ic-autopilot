@@ -178,6 +178,8 @@ try {
   }
   const takeLock = () => { try { store?.setItem(LOCK, JSON.stringify({ id: TAB, t: Date.now() })); } catch {} };
   const dropLock = () => { try { if (lockOwner() === TAB) store?.removeItem(LOCK); } catch {} };
+  // A reload or a closed tab never reaches stop(): give the lock up as the page goes, or the reloaded tab is refused for up to a minute.
+  addEventListener?.('pagehide', dropLock);
 
   // ---- clock, cooldowns -----------------------------------------------------
 

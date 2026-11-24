@@ -117,6 +117,7 @@
   let graceMs = 2000;                 // a timed-out Demolish gets this long to land before the retry looks again
   let waitMaxMs = 600000;             // a run waits this long for cash/items inside the run, then ends and lets Autopilot go
   const RUN_MAX_MS = 900000;          // a run ends after 15 min so Autopilot gets its turn (sales, power, resuming groups); the controller restarts it
+  let segStart = 0;                   // when this run segment began (a start or a resume): RUN_MAX_MS counts from here, so time spent interrupted does not end a resumed run
   const ERR_COOLDOWN_MS = 300000;     // after an error stop: 5 min, doubling, off after 3 in a row               // cents: first bought acre in Heartland
   const HIST_MS = 30 * 60 * 1000;        // window for income, organic CD, net supply
   const SAMPLE_MS = 5000;
@@ -386,7 +387,7 @@
     lastEval = ev;
     if (ev.idle) return stopWith(ev.reason);
     if (netSpend() >= cfg.maxSpend) return stopWith(`reached max spend $${fmt(cfg.maxSpend)}`);
-    if (Date.now() - stats.startedAt > RUN_MAX_MS) return stopWith('giving Autopilot its turn');
+    if (Date.now() - segStart > RUN_MAX_MS) return stopWith('giving Autopilot its turn');
     if (cfg.dryRun) {
       // Nothing is sent, land included. Log the plan a few times, then end (a dry run must not hold Autopilot forever).
       const u = ev.plan.units;

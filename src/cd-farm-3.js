@@ -67,6 +67,7 @@
         sample();
       }
       resumable = false; began = true;
+      segStart = Date.now();
       save(); render();
 
       if (resume) {

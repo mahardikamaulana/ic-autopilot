@@ -310,6 +310,34 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     }
   });
 
+  await t('reload: the old tab gives up the Autopilot lock as the page goes, so the reloaded tab starts at once', async () => {
+    fresh();
+    const disk = {};
+    globalThis.localStorage = { getItem: (k) => disk[k] ?? null, setItem: (k, v) => { disk[k] = String(v); }, removeItem: (k) => { delete disk[k]; } };
+    // A game page that has not rendered yet: each copy's startup poll waits for it (it ends at _unload).
+    const el = () => ({ append() {}, remove() {}, addEventListener() {}, setAttribute() {}, style: {}, classList: { toggle() {} } });
+    globalThis.document = { body: el(), head: el(), title: 'game', getElementById: () => null, createElement: el, querySelector: () => null, hidden: true };
+    let old = null, ap = null;
+    try {
+      (0, eval)(coreSrc + '\n' + apSrc);
+      old = globalThis.earlyGame;
+      old.start({ dryRun: true });                    // the old tab: its loop holds the lock
+      assert.ok(old.running && disk['earlyGame.v2.lock'], 'the old tab holds the lock');
+      dispatchEvent(new Event('pagehide'));           // a reload: the browser says the page is going
+      fresh();                                        // the reloaded page is a new script; the old copy never gets _unload()
+      (0, eval)(coreSrc + '\n' + apSrc);
+      ap = globalThis.earlyGame;
+      ap.start({ dryRun: true });
+      assert.ok(ap.running, 'the reloaded tab did not start (the old tab still holds the lock)');
+    } finally {
+      old?.stop(); ap?.stop();
+      await Promise.all([old && settled(old), ap && settled(ap)]);
+      old?._unload(); ap?._unload();
+      await sleep(550);                               // both startup polls wake, see _unload and return before the stub goes
+      fresh(); delete globalThis.localStorage; delete globalThis.document;
+    }
+  });
+
   // ---- Lab runner: what _decide chooses (state in, decision out: no I/O) -----------------------------------
   const D = (lab, st, over = {}, mem = { counts: {}, next: 0 }) => lab._decide(st, board.catalog, { mode: 'process', tierMode: 'best', mdReserve: 5000, autoClaim: true, list: [], ...over }, mem);
   const startMsg = (product, context, tier, region) => ({ type: 'StartResearch', product, context, tier, region });

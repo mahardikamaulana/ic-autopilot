@@ -565,6 +565,25 @@ const fastPacer = () => ({ beforeCommand: async () => { }, noteConfirm() { }, no
     unload();
   });
 
+  await t('reload: the old tab gives up the Core plan lock as the page goes, so Live starts at once in the reloaded tab', async () => {
+    const disk = {}; globalThis.localStorage = mem(disk); globalThis.sessionStorage = mem();
+    world(stageA());
+    const old = load();
+    old.cp._setPacer(fastPacer());
+    old.cp.start({ dryRun: false });                  // the old tab goes Live and holds the lock
+    assert.ok(old.cp.running && !old.cp.cfg.dryRun && disk['corePlan.v1.lock'], 'the old tab is live');
+    dispatchEvent(new Event('pagehide'));             // a reload: the browser says the page is going
+    // The reloaded page is a new script: nothing from the old copy runs _unload() (load() would).
+    world(stageA());
+    globalThis.idleCore = undefined; globalThis.corePlan = undefined; globalThis.earlyGame = undefined; globalThis.cdFarm = undefined;
+    (0, eval)(SRCS);
+    const cp = globalThis.corePlan;
+    cp._setPacer(fastPacer());
+    cp.start({ dryRun: false });
+    assert.ok(cp.running && !cp.cfg.dryRun, 'Live refused in the reloaded tab: ' + globalThis.idleCore.ledger.text().split('\n').pop());
+    cp.stop(); old.cp._unload(); unload();
+  });
+
   await t('settings: validated, saved without dryRun, exported and imported', () => {
     const disk = {}; globalThis.localStorage = mem(disk);
     const { core, cp } = load();
