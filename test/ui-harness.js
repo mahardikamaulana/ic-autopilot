@@ -153,6 +153,7 @@ async function autoSetup(page) {
           st.items[0] -= Math.round(c * mode.priceMult);
           const now = performance.now(); mode.buildEnd = Math.max(mode.buildEnd || 0, now) + mode.buildMs * o.amount;
           setTimeout(() => { pool[o.building] = (pool[o.building] ?? 0) + o.amount; st.items[24] += o.amount * window.idleCore.planner.cdOf(cat, o.building); }, mode.buildEnd - now);
+          if (mode.cashMidBuild) setTimeout(() => { st.items[0] += mode.cashMidBuild; }, mode.buildMs / 2);   // a queued demolish's refund (or income) landing mid-build
         } else if (mode.lateBuyMs) { const ms = mode.lateBuyMs; mode.lateBuyMs = 0; setTimeout(applyBuy, ms); return; }   // delivered after the client gave up
         else applyBuy();
       } else if (o.type === 'DemolishBuilding') {
@@ -172,7 +173,7 @@ async function autoSetup(page) {
   const reset = (extra = '') => page.evaluate((x) => {
     const st = window.__st, cf = window.cdFarm;
     window.__fake.sent.length = 0;
-    Object.assign(window.__fake.mode, { ackMs: 10, ignoreBuy: false, ignoreDemolishOnce: false, lateDemolishMs: 0, lateBuyMs: 0, buildMs: 0, buildEnd: 0, priceMult: 1 });
+    Object.assign(window.__fake.mode, { ackMs: 10, ignoreBuy: false, ignoreDemolishOnce: false, lateDemolishMs: 0, lateBuyMs: 0, buildMs: 0, buildEnd: 0, priceMult: 1, cashMidBuild: 0 });
     cf._hist.slopes = { money: 0, cd: 0 }; cf._waitMax(1200); cf._graceMs(2000);
     for (const k of Object.keys(cf._quarantine)) delete cf._quarantine[k];
     st.groups = {}; st.building_pool[0] = {}; st.items[0] = 5000000; st.items[24] = 1200; st.land_bought[0] = 0; st.stock[0] = {}; st.unlocked_buildings = [];
@@ -203,6 +204,13 @@ async function autoGroup1(page, { reset, logLines }) {
   const log1b = await logLines();
   ok(a1b.cd === 1212 && Object.values(a1b.pool).every((n) => n === 0), 'Auto: with timed builds it still stops exactly on the need, with the pool empty', JSON.stringify([a1b.cd, a1b.pool]));
   ok(log1b.some((t) => /no CD needed/.test(t)) && !log1b.some((t) => /not confirmed|batch cost|no Construction Data/.test(t)), 'Auto: timed builds confirm in queue order with no mismatch and no stop', JSON.stringify(log1b.slice(-4)));
+
+  // 1c. timed builds with cash landing while they build (refunds of queued demolishes, income): the charge is read when the
+  // Buy is acknowledged, so the cash that arrives before the build lands is not taken for a price mismatch
+  await reset('cf.cfg.targetCd = 1212; window.__fake.mode.buildMs = 400; window.__fake.mode.cashMidBuild = 60000;');
+  await page.evaluate(() => window.cdFarm.start({ by: 'test' }));
+  const log1c = await logLines();
+  ok(!log1c.some((t) => /catalog says|did not match the catalog/.test(t)) && log1c.some((t) => /no CD needed/.test(t)), 'Auto: cash that lands during a timed build is not a price mismatch', JSON.stringify(log1c.slice(-4)));
 
   // 2. a Mine unlocked with Wooden Frames in surplus and no running recipe using them: the Mine is the cheaper CD
   await reset('st.unlocked_buildings = [1]; st.stock[0] = { 41: 100 }; cf.cfg.targetCd = 1208;');

@@ -2400,7 +2400,10 @@ try {
       inFlight.units.push({ b: u.b, n: u.n }); save();   // from here on a reload or error counts these as possibly built
       const d = send({ type: 'BuyBuilding', building: u.b, amount: u.n, region: REGION });
       const bw0 = hr();
-      const r1 = await waitConfirm((r) => (r.pool[u.b] ?? 0) >= (rb.pool[u.b] ?? 0) + u.n, d, readPool, cfg.timeoutMs + Math.ceil((u.n * u.build + rb.queue.build) * 1500));
+      // The game charges on the Buy, but refunds of queued demolishes and income keep landing until the build is done: read the charge at the ack.
+      let rAck = null;
+      const rdAck = (f) => { const r = readPool(f); if (r && !rAck && core.sock.muts > d) rAck = r; return r; };
+      const r1 = await waitConfirm((r) => (r.pool[u.b] ?? 0) >= (rb.pool[u.b] ?? 0) + u.n, d, rdAck, cfg.timeoutMs + Math.ceil((u.n * u.build + rb.queue.build) * 1500));
       buildWait += hr() - bw0;   // the build itself is waited for, not overhead: the round trip above does not include it
       if (!r1) {
         const got = Math.max(0, (readPool(true)?.pool[u.b] ?? 0) - (rb.pool[u.b] ?? 0));
@@ -2417,7 +2420,7 @@ try {
       holding(u.b, u.n);
       inFlight.units = inFlight.units.filter((x) => x.b !== u.b); save();
       // F2: what the game charged and gave must match the catalog.
-      const paid = rb.money - r1.money, allow = Math.max(500, gross * 0.05, Math.max(0, hist.slopes.money ?? 0) * ((rtt ?? 500) + 2000) / 3.6e6);
+      const paid = rb.money - (rAck ?? r1).money, allow = Math.max(500, gross * 0.05, Math.max(0, hist.slopes.money ?? 0) * ((rtt ?? 500) + 2000) / 3.6e6);
       const bad = Math.abs(paid - gross) > allow ? `paid $${fmt(paid / 100)}, catalog says $${fmt(gross / 100)}` : r1.cd - rb.cd === 0 ? 'no Construction Data came with the build' : '';
       if (!bad) mismatch[u.b] = 0;
       else if ((mismatch[u.b] = (mismatch[u.b] ?? 0) + 1) >= 2) { mismatch[u.b] = 0; strike(u.b, u.name, bad); }
