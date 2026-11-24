@@ -1229,7 +1229,13 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
         { utility: 'power', region: 0, state: 'Ended', seller: 1, buyer: 9, delivered: 50 },
         { utility: 'water', region: 0, state: 'Active', seller: 1, buyer: 9, delivered: 50 },
         { utility: 'power', region: 1, state: 'Active', seller: 1, buyer: 9, delivered: 50 }];
-      assert.deepStrictEqual([m('power', st, 100, deals).sold, m('power', st, 100, deals).imported, m('power', st, 100, deals).need], [8, 2, 6 + 8 - 2], 'sold = what is promised (8), bought = what arrives (2)');
+      const bought = (extra) => ({ utility: 'power', region: 0, state: 'Active', seller: 9, buyer: 1, amount: 5, ...extra });
+      const imp = (util, rows) => m(util, st, 100, rows).imported;
+      assert.deepStrictEqual([m('power', st, 100, deals).sold, m('power', st, 100, deals).imported, m('power', st, 100, deals).need], [8, 5, 6 + 8 - 5], 'sold = what is promised (8), bought = its capacity (5)');
+      assert.strictEqual(imp('power', [bought({ drawn: 4, delivered: 4 })]), 5, 'buyer draws less than the capacity, seller delivers: all 5 count');
+      assert.strictEqual(imp('power', [bought({ drawn: 5, delivered: 1 })]), 1, 'short by 4 in grace: 5 less the 4 not delivered');
+      assert.strictEqual(imp('power', [bought({ drawn: 5, delivered: 0 })]), 0, 'nothing delivered: the grid covers all of it');
+      assert.strictEqual(imp('water', [{ utility: 'water', region: 0, state: 'Active', seller: 9, buyer: 1, amount: 6, drawn: 6, delivered: 2 }]), 2, 'water: 6 kL bought, 4 kL short');
       // Water: Chemical Plant draws 4 kL per building, a Pump Station run makes 40 kL, a Water Tower holds spare supply.
       st.groups = { 1: run(CHEM, 2, recOf(CHEM).id), 2: run(PUMP, 1, 117, 1) };
       st.subscriptions = { 0: { water: 30 } };

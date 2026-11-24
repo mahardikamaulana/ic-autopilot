@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IC Autopilot
 // @namespace    idlecorp-toolkit
-// @version      2.8.11
+// @version      2.8.12
 // @author       XPARAD0X
 // @description  Early-game Autopilot, CD Farm (Construction Data by building and demolishing buildings; Auto picks the cheapest source itself), Lab runner (keeps the Manufacturing Labs researching), Auto ship (an "Auto ship" button on every distributor bid) and Auto utilities (an "Auto" switch that keeps the power and water subscriptions at what the groups need) for IdleCorp, each with a panel, menu or switch in the game UI.
 // @homepageURL  https://github.com/mahardikamaulana/ic-autopilot
@@ -4567,7 +4567,7 @@ try {
 //   autoUtil.status() / autoUtil.stop()                          // what it does now / both switches off
 //   autoUtil.cfg                                                 // timings; autoUtil.conf: spare per utility, hold minutes
 //
-// What it follows (the same numbers the game's own page shows; autoUtil._measure is the pure version, used by the tests):
+// What it follows (the game's own page shows the same numbers, except that bought contracts count their capacity less any shortfall; autoUtil._measure is the pure version, used by the tests):
 //   need = load (running groups' building draw + recipe draw) + power sold on contracts (the promised amount) + what stalled groups wait for
 //          - self-generated (generators, at the day/night rate) - storage that can discharge - bought on contracts
 //   The subscription is set to ceil(need) plus the spare you set (default 0), at most 200 MW / 500 kL, one region at a time.
@@ -4677,7 +4677,11 @@ try {
     const discharge = Math.min(dischargeCap, st.stored?.[R]?.[util] ?? 0);
     const corp = st.ssi?.corp_id;
     const deal = (who, field) => (contracts ?? []).filter((c) => c.utility === util && c.region === region && c.state === 'Active' && c[who] === corp).reduce((a, c) => a + (c[field] ?? 0), 0);
-    const imported = deal('buyer', 'delivered'), sold = deal('seller', 'amount');   // what is promised to others is owed, whatever has got through so far
+    // A bought contract counts its whole capacity, less the part of what the buyer draws (up to the contract) that the seller is not
+    // delivering: in a shortfall during its grace period the grid covers that gap. What is promised to others is owed, whatever has got through.
+    const short = (c) => Math.max(0, Math.min(Math.max(c.drawn ?? 0, 0), c.amount ?? 0) - Math.max(c.delivered ?? 0, 0));
+    const bought = (contracts ?? []).filter((c) => c.utility === util && c.region === region && c.state === 'Active' && c.buyer === corp);
+    const imported = bought.reduce((a, c) => a + (c.amount ?? 0) - short(c), 0), sold = deal('seller', 'amount');
     // A group that could start but whose draw is more than the free capacity is stalled; it starts once that much more is free.
     // A group with no machines yet (equipped 0) cannot start whatever the power: the game calls it "unequipped", not stalled.
     const free = Math.max(0, have + gen + discharge + imported - load - sold);
