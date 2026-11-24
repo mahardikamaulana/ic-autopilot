@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IC Autopilot
 // @namespace    idlecorp-toolkit
-// @version      2.8.5
+// @version      2.8.6
 // @author       XPARAD0X
 // @description  Early-game Autopilot, CD Farm (Construction Data by building and demolishing buildings; Auto picks the cheapest source itself), Lab runner (keeps the Manufacturing Labs researching), Auto ship (an "Auto ship" button on every distributor bid) and Auto utilities (an "Auto" switch that keeps the power and water subscriptions at what the groups need) for IdleCorp, each with a panel, menu or switch in the game UI.
 // @homepageURL  https://github.com/mahardikamaulana/ic-autopilot
@@ -485,8 +485,6 @@ body:has(>.idc-docked:not(.idc-ghost)) .idc-toasts{right:calc(var(--idc-dock,360
   const svg = (d) => '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">' + d + '</svg>';
   const ICONS = {
     close: svg('<path d="M4 4l8 8M12 4l-8 8"/>'),
-    min: svg('<path d="M4 8h8"/>'),
-    expand: svg('<path d="M4 10l4-4 4 4"/>'),
     reset: svg('<path d="M3 8a5 5 0 1 0 1.8-3.8M3 3v3h3"/>'),
     lock: svg('<rect x="3.5" y="7" width="9" height="6" rx="1.5"/><path d="M5.5 7V5.5a2.5 2.5 0 0 1 5 0V7"/>'),
   };
@@ -554,7 +552,7 @@ body:has(>.idc-docked:not(.idc-ghost)) .idc-toasts{right:calc(var(--idc-dock,360
     setTimeout(() => ghost.remove(), 500);
   }
 
-  // Panel shell: sticky header (drag, minimize, close), tabs, scrolling body, sticky footer ----------
+  // Panel shell: sticky header (drag, close; double-click minimizes), tabs, scrolling body, sticky footer ----------
   const livePanels = new Set();
   // React can drop or bring back the game's layout: re-place the panels whose docked state no longer matches it.
   let dockObs = null;
@@ -573,9 +571,8 @@ body:has(>.idc-docked:not(.idc-ghost)) .idc-toasts{right:calc(var(--idc-dock,360
   function createPanel(o) {
     const st = o.state, save = o.save || (() => {});
     const dot = h('span', { class: 'idc-dot' });
-    const minBtn = iconBtn('min', 'Minimize', () => setMin(!st.min));
     const closeBtn = iconBtn('close', 'Close', () => o.onClose());
-    const head = h('div', { class: 'idc-head' }, dot, h('span', { class: 'idc-title' }, o.title), ...(o.headExtra || []), minBtn, closeBtn);
+    const head = h('div', { class: 'idc-head' }, dot, h('span', { class: 'idc-title' }, o.title), ...(o.headExtra || []), closeBtn);
     head.addEventListener('dblclick', (e) => { if (!e.target.closest('button')) setMin(!st.min); });
 
     const tabBtns = {}, panes = {}, order = o.tabs.map((t) => t.id);
@@ -623,9 +620,6 @@ body:has(>.idc-docked:not(.idc-ghost)) .idc-toasts{right:calc(var(--idc-dock,360
       const from = !instant && el.isConnected && motionOK() ? el.offsetHeight : 0;
       st.min = !!v; save();
       el.classList.toggle('min', st.min);
-      minBtn.innerHTML = ICONS[st.min ? 'expand' : 'min'];
-      const lab = st.min ? 'Expand' : 'Minimize';
-      minBtn.title = lab; minBtn.setAttribute('aria-label', lab); minBtn.setAttribute('aria-expanded', String(!st.min));
       place();
       if (from && el.offsetHeight !== from) el.animate({ height: [from + 'px', el.offsetHeight + 'px'], overflow: ['hidden', 'hidden'] }, { duration: 220, easing: EASE });
       if (!st.min) o.onTab?.(st.tab);
@@ -7843,7 +7837,7 @@ try {
 //
 // With CD Farm (the CD Farm module in this file): Autopilot pauses while CD Farm runs or finishes a step (CD Farm
 // calls earlyGame.hold before it takes its baseline), never assigns or builds over the camps of an
-// interrupted CD Farm run, and with cfg.boosterVia = 'cdFarm' hands its CD booster to CD Farm.
+// interrupted CD Farm run, and hands its CD booster to CD Farm.
 //
 // Phases (each step is a check on live state, so it starts wherever the corp is):
 //   1-2  Lumber Camps + Farms (Cotton), always the cheaper; part loads until 25 acres are full
@@ -7931,8 +7925,6 @@ try {
     // (+1 CD each, 50% base refunded). Starts with a 1-building probe; disabled for good if the
     // CD isn't kept or the refund doesn't arrive (e.g. patched).
     cdBooster: true,
-    boosterVia: 'builtin',   // 'cdFarm': start CD Farm (Lumber Camps, its own checks) up to the tech's CD instead;
-                             // falls back to 'builtin' when CD Farm isn't loaded
     boosterBatch: 10,       // buildings per build+demolish cycle (limited by free acres)
     boosterFarmGapMs: 30000, // via CD Farm: wait this long after it stops before starting it again
     boosterMinCash: 20000,   // $: only above this much cash
@@ -7983,7 +7975,7 @@ try {
   let running = false;
   const save = () => {
     try {
-      store?.setItem(KEY, JSON.stringify({ cfg: persistable(), userPaused: [...userPaused], billPaused: [...billPaused], keptPaused: [...keptPaused], posted, running, boosterLeft, boosterBad }));
+      store?.setItem(KEY, JSON.stringify({ cfg: persistable(), userPaused: [...userPaused], billPaused: [...billPaused], keptPaused: [...keptPaused], posted, running, boosterLeft }));
     } catch {}
   };
 
@@ -8041,11 +8033,8 @@ try {
     return '';
   }
 
-  // CD booster bookkeeping: buildings it built whose demolish got lost (cleaned up next, never
-  // put to work), and probes where the demolish happened but CD/refund didn't check out.
+  // CD booster leftovers: buildings a build-and-demolish left behind, cleaned up next loop.
   const boosterLeft = { ...(saved.boosterLeft || {}) };
-  let boosterBad = saved.boosterBad || 0;
-  const boosterOff = () => boosterBad >= 2;
 
   // Called every loop. A powered group that becomes paused while cash is under ~2 bills (or
   // the power service dropped) was paused by an unpaid bill; any other pause is yours.
@@ -8106,12 +8095,6 @@ try {
     if (!m) return;
     // A buy order may have been posted even if the board didn't show it: never post twice.
     if (a.key.startsWith('post:')) { posted[m.item] = nowMs(); save(); return; }
-    if (a.key === 'booster' && ok) boosterBad = 0; // only consecutive bad probes turn it off
-    if (a.key === 'booster' && !ok && stepsDone >= 1) {
-      const left = Math.max(0, (s?.pool?.[m.b] ?? 0) - m.p0);
-      if (left > 0) boosterLeft[m.b] = (boosterLeft[m.b] ?? 0) + left; // demolish lost: clean up next loop
-      else boosterBad++;                                               // demolished, but CD/refund wrong
-    }
     if (a.key.startsWith('booster:cleanup') && ok) boosterLeft[m.b] = Math.max(0, (boosterLeft[m.b] ?? 0) - m.n);
     save();
   }
@@ -8666,8 +8649,7 @@ try {
   // Acres held free for the CD booster once it is in use (other builds buy their own).
   function boosterAcresHeld(s) {
     if (!cfg.cdBooster || !s.unlocked(B.WORKSHOP)) return 0;
-    if (!(successes.get('booster') || successes.get('land:booster') || successes.get('booster:cdfarm'))) return 0;
-    if ((boosterOff() && cfg.boosterVia !== 'cdFarm') || !nextTech(s)) return 0;
+    if (!(successes.get('land:booster') || successes.get('booster:cdfarm')) || !nextTech(s)) return 0;
     return Math.min(cfg.boosterAcres, s.freeAcres);
   }
 
@@ -8810,9 +8792,7 @@ try {
     if (!tech || s.cd >= tech.cost || (tech.requires != null && !s.unlocked(tech.requires))) return;
     const fi = farmInfo();
     if (fi?.resumable) { yield { wait: 'CD booster waits: CD Farm has an interrupted run (resume or discard it in CD Farm)' }; return; }
-    const viaFarm = cfg.boosterVia === 'cdFarm' && typeof fi?.f.start === 'function';
-    const verified = (successes.get('booster') ?? 0) > 0;
-    if (boosterOff() && !viaFarm) { yield { wait: 'CD booster off: build-and-demolish did not keep the CD / refund (seen twice)' }; return; }
+    if (typeof fi?.f.start !== 'function') { yield { wait: 'CD booster waits: CD Farm is not loaded' }; return; }
     if (Object.values(boosterLeft).some((n) => n > 0)) return; // clean up first
     if (s.money < cfg.boosterMinCash * 100) return;
     if (s.freeAcres < 1) {
@@ -8827,39 +8807,20 @@ try {
       return;
     }
     const keep = Math.max(moneyFloor(s), cfg.boosterKeepCash * 100);
-    if (viaFarm) {
-      // CD Farm runs the build+demolish cycles itself (and verifies them); we hold until it stops.
-      // Its settings for this run are restored when it stops (runOnly).
-      // Not worth starting when it would stop at once (it needs one camp's cost above the floor), and
-      // after a run ends (stopped by you, error) wait cfg.boosterFarmGapMs instead of restarting it every loop.
-      if (s.money - buildCost(s, B.CAMP) < keep) return;
-      if (nowMs() - farmSeenBusyAt < cfg.boosterFarmGapMs) { yield { wait: `CD booster: CD Farm just stopped, waiting ${cfg.boosterFarmGapMs / 1000} s before starting it again` }; return; }
-      const opts = {
-        targetCd: tech.cost, budget: 'reserve', minMoney: Math.ceil(keep / 100), batch: cfg.boosterBatch,
-        reserveAcres: 0, fullBatch: false, existingPool: 'keep', maxSpendPerMin: Infinity,
-        building: B.CAMP, runOnly: true, by: `Autopilot: CD for ${bname(s, nt.b)}`,
-      };
-      const a = act('booster:cdfarm', `CD booster via CD Farm: farm ${tech.cost - s.cd} CD for ${bname(s, nt.b)} (keeps ${usd(keep)})`);
-      a.call = () => { fi.f.start(opts); return !!W.cdFarm?.running; };
-      a.callInfo = `cdFarm.start(${JSON.stringify(opts)})`;
-      yield a;
-      return;
-    }
-    const b = buildCost(s, B.FARM) < buildCost(s, B.CAMP) ? B.FARM : B.CAMP;
-    const base = s.bld(b).cost, owned = s.owned(b);
-    const max = verified ? Math.min(cfg.boosterBatch, s.freeAcres, tech.cost - s.cd) : 1;
-    let n = 0, cost = 0;
-    while (n < max && s.money - (cost + Math.round(base * (20 + owned + n) / 20)) >= keep) { cost += Math.round(base * (20 + owned + n) / 20); n++; }
-    if (!n) return;
-    const refund = Math.floor(base / 2) * n;
-    const p0 = s.pool[b] ?? 0, cd0 = s.cd, m0 = s.money;
-    const a = act('booster', `CD booster${verified ? '' : ' (1-building test)'}: build + demolish ${n} ${bname(s, b)} → +${n} CD for ~${usd(cost - refund)} (${tech.cost - s.cd} CD short of ${bname(s, nt.b)})`,
-      { msg: { type: 'BuyBuilding', building: b, amount: n, region: REGION }, until: (x) => (x.pool[b] ?? 0) >= p0 + n },
-      { msg: { type: 'DemolishBuilding', building: b, amount: n, region: REGION },
-        // Verified on the result: buildings gone, CD kept, and the refund came back.
-        // Slack covers a $10/MW bill landing between the two steps.
-        until: (x) => (x.pool[b] ?? 0) <= p0 && x.cd >= cd0 + n && x.money >= m0 - (cost - refund) - Math.max(5000, cost * 0.02) - Math.max(s.powerHave, s.powerNeed) * 1000 });
-    a.meta = { b, n, p0 };
+    // CD Farm runs the build+demolish cycles itself (and verifies them); we hold until it stops.
+    // Its settings for this run are restored when it stops (runOnly).
+    // Not worth starting when it would stop at once (it needs one camp's cost above the floor), and
+    // after a run ends (stopped by you, error) wait cfg.boosterFarmGapMs instead of restarting it every loop.
+    if (s.money - buildCost(s, B.CAMP) < keep) return;
+    if (nowMs() - farmSeenBusyAt < cfg.boosterFarmGapMs) { yield { wait: `CD booster: CD Farm just stopped, waiting ${cfg.boosterFarmGapMs / 1000} s before starting it again` }; return; }
+    const opts = {
+      targetCd: tech.cost, budget: 'reserve', minMoney: Math.ceil(keep / 100), batch: cfg.boosterBatch,
+      reserveAcres: 0, fullBatch: false, existingPool: 'keep', maxSpendPerMin: Infinity,
+      building: B.CAMP, runOnly: true, by: `Autopilot: CD for ${bname(s, nt.b)}`,
+    };
+    const a = act('booster:cdfarm', `CD booster via CD Farm: farm ${tech.cost - s.cd} CD for ${bname(s, nt.b)} (keeps ${usd(keep)})`);
+    a.call = () => { fi.f.start(opts); return !!W.cdFarm?.running; };
+    a.callInfo = `cdFarm.start(${JSON.stringify(opts)})`;
     yield a;
   }
 
@@ -9417,10 +9378,6 @@ try {
     ['saveForCritical', 'Save for a ready plan building before buying camps/farms'],
     ['resumePaused', 'Resume groups paused by an unpaid bill'],
   ];
-  const VIA = [
-    { id: 'builtin', label: 'Built-in', desc: 'Builds and demolishes the cheaper of Lumber Camp / Farm itself, after a 1-building test.' },
-    { id: 'cdFarm', label: 'CD Farm', desc: 'Starts CD Farm up to the CD the next unlock needs, then waits until it stops. CD Farm\'s own settings come back afterwards.' },
-  ];
   const MODES = [
     { id: true, label: 'Dry run' },
     { id: false, label: 'Live' },
@@ -9430,7 +9387,6 @@ try {
   const shownOf = (key, v) => (Number.isFinite(v) ? uiNum(FIELDS[key]?.kind === 'pct' ? v * 100 : v) : '');
   const shown = (key) => shownOf(key, cfg[key]);
   const same = (a, b) => (Array.isArray(a) ? JSON.stringify(a) === JSON.stringify(b) : Object.is(a, b));
-  const viaOf = (v) => (v === 'cdFarm' ? 'cdFarm' : 'builtin');
   const parseErr = {};
   function parseField(key, text) {
     const f = FIELDS[key];
@@ -9508,9 +9464,6 @@ try {
 
     // ---- Settings tab
     refs.fields = {};
-    refs.via = K.seg(VIA, () => viaOf(cfg.boosterVia), (id) => setCfg('boosterVia', id), 'CD booster runs through');
-    refs.viaDesc = mk('div', { class: 'idc-desc' });
-    refs.viaField = K.field('CD booster runs through', refs.via.el, refs.viaDesc);
     refs.checks = [...CHECKS, ...ADV_CHECKS].map(([key, label]) => {
       const input = mk('input', { type: 'checkbox', onchange: () => setCfg(key, input.checked) });
       return [key, input, K.check(input, label)];
@@ -9526,7 +9479,7 @@ try {
       K.group('Build targets', mk('div', { class: 'idc-two' }, ...['workshops', 'sawmills', 'ironMines', 'coalMines', 'goldMines', 'ironFrameWorkshops'].map(textField))),
       K.group('Land price limits', mk('div', { class: 'idc-two' }, ...['maxAcrePriceEarly', 'maxAcrePrice'].map(textField)),
         mk('div', { class: 'idc-desc' }, 'The most per acre Autopilot will pay for land, early on and later.')),
-      K.group('CD booster', refs.viaField, mk('div', { class: 'idc-two' }, ...['boosterBatch', 'boosterMinCash', 'boosterKeepCash'].map(textField)), checkEl('cdBooster')),
+      K.group('CD booster', mk('div', { class: 'idc-two' }, ...['boosterBatch', 'boosterMinCash', 'boosterKeepCash'].map(textField)), checkEl('cdBooster')),
       K.group('Automation', ...['sellAll', 'floorUpgrades', 'buyKits', 'postBuyOrders', 'dispatchOffice', 'autoResume'].map(checkEl)),
       K.group('Power bills', K.field('Going offline: keep power bills for',
         mk('div', { class: 'idc-inline' }, mk('div', { class: 'idc-inp' }, refs.hours, mk('span', {}, 'h')), offBtn), refs.billNow)),
@@ -9587,7 +9540,6 @@ try {
     const fi = farmInfo();
     if (fi?.busy) return { text: `CD Farm is running${fi.f.stats?.by ? ` (${fi.f.stats.by})` : ''}. Autopilot waits until it stops.`, btn: true };
     if (fi?.resumable) return { text: 'CD Farm has an interrupted run. Its leftover camps are left alone, and no camps, farms or booster run until you resume or discard it there.', btn: true };
-    if (cfg.boosterVia === 'cdFarm' && !fi) return { text: 'The CD booster is set to CD Farm, but CD Farm isn\'t loaded: the built-in booster is used.', btn: false };
     if (holds.size) return { text: `Held by ${[...holds].join(', ')}. earlyGame.release() to go on.`, btn: false };
     return null;
   }
@@ -9652,11 +9604,6 @@ try {
       if (mod) changed++;
       K.setModified(f.el, mod, 'Reset to the default (' + (shownOf(key, DEFAULTS[key]) || FIELDS[key].empty || 'none') + ')', () => { delete parseErr[key]; setCfg(key, DEFAULTS[key]); });
     }
-    refs.via.sync();
-    refs.viaDesc.textContent = VIA.find((v) => v.id === viaOf(cfg.boosterVia)).desc;
-    const viaMod = viaOf(cfg.boosterVia) !== viaOf(DEFAULTS.boosterVia);
-    if (viaMod) changed++;
-    K.setModified(refs.viaField, viaMod, 'Reset to the default (' + VIA.find((v) => v.id === viaOf(DEFAULTS.boosterVia)).label + ')', () => setCfg('boosterVia', DEFAULTS.boosterVia));
     for (const [key, input, label] of refs.checks) {
       input.checked = !!cfg[key];
       const mod = !!cfg[key] !== !!DEFAULTS[key];
@@ -9736,7 +9683,7 @@ try {
     _core: {
       checkGame, watchStall, stalledNow: () => stalled, resetWatch: () => { stalled = ''; prog.at = 0; lastPhase = null; },
       snapshot: fullSnapshot, normalize, decide, checklist, phaseOf, finish, observe, userPaused, billPaused, floorTable, bomOf,
-      setClock: (fn) => { nowMs = fn; courierHoldUntil = 0; courierMisses = 0; cooldowns.clear(); successes.clear(); failures.clear(); boosterBad = 0; for (const k in boosterLeft) delete boosterLeft[k]; },
+      setClock: (fn) => { nowMs = fn; courierHoldUntil = 0; courierMisses = 0; cooldowns.clear(); successes.clear(); failures.clear(); for (const k in boosterLeft) delete boosterLeft[k]; },
     },
     _unload: () => {
       unloaded = true; running = false; holds.clear(); dropLock(); core.setBadge('AP', ''); core.reserves?.unregister('earlyGame');

@@ -447,12 +447,12 @@ async function sectionChrome(page, { q, attr, count, visible, ui }) {
   ok(await count('.idc-toast') === 3, 'at most 3 toasts at once');
 
   // chip on a minimized panel expands it (does not close it)
-  await page.click('.egp-panel button[aria-label="Minimize"]');
+  await page.dblclick('.egp-panel .idc-title');
   await page.click('.egp-chip');
   ok(await visible('.egp-panel .idc-scroll') && await count('.egp-panel') === 1, 'chip click on a minimized panel expands it');
 
   // minimize / expand, persisted
-  await page.click('.egp-panel button[aria-label="Minimize"]');
+  await page.dblclick('.egp-panel .idc-title');
   ok(!(await visible('.egp-panel .idc-scroll')) && !(await visible('.egp-panel .idc-foot')) && (await ui('earlyGame.ui')).min === true, 'minimize hides body + footer and is saved');
   await page.dblclick('.egp-panel .idc-title');
   ok(await visible('.egp-panel .idc-scroll') && (await ui('earlyGame.ui')).min === false, 'double-clicking the header expands again');
@@ -681,7 +681,7 @@ async function sectionNarrow() {
     await n.page.click('.lab-chip');
     ok((await openPanels()).length === 0, 'clicking the open panel\'s chip closes it');
     await n.page.click('.cdf-chip');
-    await n.page.click('.cdf-panel button[aria-label="Minimize"], .cdf-panel button[title="Minimize"]');
+    await n.page.dblclick('.cdf-panel .idc-title');
     await n.page.click('.egp-chip');
     ok(JSON.stringify(await openPanels()) === '["egp"]', 'switching away from a minimized panel closes it too', JSON.stringify(await openPanels()));
     ok(await n.page.evaluate(() => JSON.parse(localStorage.getItem('cdFarm.ui') || '{}').open === false), 'the closed panel is saved as closed');
@@ -741,7 +741,7 @@ async function sectionMotion() {
     ok(await n.page.$eval('.cdf-panel', (e) => e.getAnimations().some((a) => a.animationName === 'idc-panel-in')), 'motion: a panel fades in when it opens');
     await n.page.click('.cdf-panel .idc-tabbtn:nth-child(2)');
     ok(await n.page.$eval('.cdf-panel .idc-pane:not([hidden])', (e) => e.getAnimations().some((a) => a.animationName === 'idc-pane-in')), 'motion: the new tab fades in');
-    await n.page.click('.cdf-panel button[aria-label="Minimize"], .cdf-panel button[title="Minimize"]');
+    await n.page.dblclick('.cdf-panel .idc-title');
     ok(await n.page.$eval('.cdf-panel', (e) => e.getAnimations().some((a) => !a.animationName)), 'motion: minimize animates the height');
     await n.page.click('.lab-chip');
     const live = await n.page.$$eval('.idc-panel:not(.idc-ghost)', (p) => p.length);
@@ -890,8 +890,7 @@ const mode = process.argv[2];
     await page.screenshot({ path: path.join(out, 'both-open.png') });
     for (const [name, sel, mod] of [['autopilot', '.egp-panel', 'earlyGame'], ['cdfarm', '.cdf-panel', 'cdFarm']]) {
       await page.evaluate((m) => { window.earlyGame.panel(false); window.cdFarm.panel(false); window[m].panel(true); }, mod);
-      const exp = await page.$(sel + ' button[aria-label="Expand"]');
-      if (exp) await exp.click();
+      if (await page.$eval(sel, (e) => e.classList.contains('min')).catch(() => false)) await page.dblclick(sel + ' .idc-title');
       await page.waitForTimeout(300);
       await page.screenshot({ path: path.join(out, name + '-page.png') });
       if (name === 'autopilot') {

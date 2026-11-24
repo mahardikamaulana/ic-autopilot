@@ -140,8 +140,7 @@
   // Acres held free for the CD booster once it is in use (other builds buy their own).
   function boosterAcresHeld(s) {
     if (!cfg.cdBooster || !s.unlocked(B.WORKSHOP)) return 0;
-    if (!(successes.get('booster') || successes.get('land:booster') || successes.get('booster:cdfarm'))) return 0;
-    if ((boosterOff() && cfg.boosterVia !== 'cdFarm') || !nextTech(s)) return 0;
+    if (!(successes.get('land:booster') || successes.get('booster:cdfarm')) || !nextTech(s)) return 0;
     return Math.min(cfg.boosterAcres, s.freeAcres);
   }
 
@@ -284,9 +283,7 @@
     if (!tech || s.cd >= tech.cost || (tech.requires != null && !s.unlocked(tech.requires))) return;
     const fi = farmInfo();
     if (fi?.resumable) { yield { wait: 'CD booster waits: CD Farm has an interrupted run (resume or discard it in CD Farm)' }; return; }
-    const viaFarm = cfg.boosterVia === 'cdFarm' && typeof fi?.f.start === 'function';
-    const verified = (successes.get('booster') ?? 0) > 0;
-    if (boosterOff() && !viaFarm) { yield { wait: 'CD booster off: build-and-demolish did not keep the CD / refund (seen twice)' }; return; }
+    if (typeof fi?.f.start !== 'function') { yield { wait: 'CD booster waits: CD Farm is not loaded' }; return; }
     if (Object.values(boosterLeft).some((n) => n > 0)) return; // clean up first
     if (s.money < cfg.boosterMinCash * 100) return;
     if (s.freeAcres < 1) {
@@ -301,39 +298,20 @@
       return;
     }
     const keep = Math.max(moneyFloor(s), cfg.boosterKeepCash * 100);
-    if (viaFarm) {
-      // CD Farm runs the build+demolish cycles itself (and verifies them); we hold until it stops.
-      // Its settings for this run are restored when it stops (runOnly).
-      // Not worth starting when it would stop at once (it needs one camp's cost above the floor), and
-      // after a run ends (stopped by you, error) wait cfg.boosterFarmGapMs instead of restarting it every loop.
-      if (s.money - buildCost(s, B.CAMP) < keep) return;
-      if (nowMs() - farmSeenBusyAt < cfg.boosterFarmGapMs) { yield { wait: `CD booster: CD Farm just stopped, waiting ${cfg.boosterFarmGapMs / 1000} s before starting it again` }; return; }
-      const opts = {
-        targetCd: tech.cost, budget: 'reserve', minMoney: Math.ceil(keep / 100), batch: cfg.boosterBatch,
-        reserveAcres: 0, fullBatch: false, existingPool: 'keep', maxSpendPerMin: Infinity,
-        building: B.CAMP, runOnly: true, by: `Autopilot: CD for ${bname(s, nt.b)}`,
-      };
-      const a = act('booster:cdfarm', `CD booster via CD Farm: farm ${tech.cost - s.cd} CD for ${bname(s, nt.b)} (keeps ${usd(keep)})`);
-      a.call = () => { fi.f.start(opts); return !!W.cdFarm?.running; };
-      a.callInfo = `cdFarm.start(${JSON.stringify(opts)})`;
-      yield a;
-      return;
-    }
-    const b = buildCost(s, B.FARM) < buildCost(s, B.CAMP) ? B.FARM : B.CAMP;
-    const base = s.bld(b).cost, owned = s.owned(b);
-    const max = verified ? Math.min(cfg.boosterBatch, s.freeAcres, tech.cost - s.cd) : 1;
-    let n = 0, cost = 0;
-    while (n < max && s.money - (cost + Math.round(base * (20 + owned + n) / 20)) >= keep) { cost += Math.round(base * (20 + owned + n) / 20); n++; }
-    if (!n) return;
-    const refund = Math.floor(base / 2) * n;
-    const p0 = s.pool[b] ?? 0, cd0 = s.cd, m0 = s.money;
-    const a = act('booster', `CD booster${verified ? '' : ' (1-building test)'}: build + demolish ${n} ${bname(s, b)} → +${n} CD for ~${usd(cost - refund)} (${tech.cost - s.cd} CD short of ${bname(s, nt.b)})`,
-      { msg: { type: 'BuyBuilding', building: b, amount: n, region: REGION }, until: (x) => (x.pool[b] ?? 0) >= p0 + n },
-      { msg: { type: 'DemolishBuilding', building: b, amount: n, region: REGION },
-        // Verified on the result: buildings gone, CD kept, and the refund came back.
-        // Slack covers a $10/MW bill landing between the two steps.
-        until: (x) => (x.pool[b] ?? 0) <= p0 && x.cd >= cd0 + n && x.money >= m0 - (cost - refund) - Math.max(5000, cost * 0.02) - Math.max(s.powerHave, s.powerNeed) * 1000 });
-    a.meta = { b, n, p0 };
+    // CD Farm runs the build+demolish cycles itself (and verifies them); we hold until it stops.
+    // Its settings for this run are restored when it stops (runOnly).
+    // Not worth starting when it would stop at once (it needs one camp's cost above the floor), and
+    // after a run ends (stopped by you, error) wait cfg.boosterFarmGapMs instead of restarting it every loop.
+    if (s.money - buildCost(s, B.CAMP) < keep) return;
+    if (nowMs() - farmSeenBusyAt < cfg.boosterFarmGapMs) { yield { wait: `CD booster: CD Farm just stopped, waiting ${cfg.boosterFarmGapMs / 1000} s before starting it again` }; return; }
+    const opts = {
+      targetCd: tech.cost, budget: 'reserve', minMoney: Math.ceil(keep / 100), batch: cfg.boosterBatch,
+      reserveAcres: 0, fullBatch: false, existingPool: 'keep', maxSpendPerMin: Infinity,
+      building: B.CAMP, runOnly: true, by: `Autopilot: CD for ${bname(s, nt.b)}`,
+    };
+    const a = act('booster:cdfarm', `CD booster via CD Farm: farm ${tech.cost - s.cd} CD for ${bname(s, nt.b)} (keeps ${usd(keep)})`);
+    a.call = () => { fi.f.start(opts); return !!W.cdFarm?.running; };
+    a.callInfo = `cdFarm.start(${JSON.stringify(opts)})`;
     yield a;
   }
 

@@ -69,10 +69,6 @@
     ['saveForCritical', 'Save for a ready plan building before buying camps/farms'],
     ['resumePaused', 'Resume groups paused by an unpaid bill'],
   ];
-  const VIA = [
-    { id: 'builtin', label: 'Built-in', desc: 'Builds and demolishes the cheaper of Lumber Camp / Farm itself, after a 1-building test.' },
-    { id: 'cdFarm', label: 'CD Farm', desc: 'Starts CD Farm up to the CD the next unlock needs, then waits until it stops. CD Farm\'s own settings come back afterwards.' },
-  ];
   const MODES = [
     { id: true, label: 'Dry run' },
     { id: false, label: 'Live' },
@@ -82,7 +78,6 @@
   const shownOf = (key, v) => (Number.isFinite(v) ? uiNum(FIELDS[key]?.kind === 'pct' ? v * 100 : v) : '');
   const shown = (key) => shownOf(key, cfg[key]);
   const same = (a, b) => (Array.isArray(a) ? JSON.stringify(a) === JSON.stringify(b) : Object.is(a, b));
-  const viaOf = (v) => (v === 'cdFarm' ? 'cdFarm' : 'builtin');
   const parseErr = {};
   function parseField(key, text) {
     const f = FIELDS[key];
@@ -160,9 +155,6 @@
 
     // ---- Settings tab
     refs.fields = {};
-    refs.via = K.seg(VIA, () => viaOf(cfg.boosterVia), (id) => setCfg('boosterVia', id), 'CD booster runs through');
-    refs.viaDesc = mk('div', { class: 'idc-desc' });
-    refs.viaField = K.field('CD booster runs through', refs.via.el, refs.viaDesc);
     refs.checks = [...CHECKS, ...ADV_CHECKS].map(([key, label]) => {
       const input = mk('input', { type: 'checkbox', onchange: () => setCfg(key, input.checked) });
       return [key, input, K.check(input, label)];
@@ -178,7 +170,7 @@
       K.group('Build targets', mk('div', { class: 'idc-two' }, ...['workshops', 'sawmills', 'ironMines', 'coalMines', 'goldMines', 'ironFrameWorkshops'].map(textField))),
       K.group('Land price limits', mk('div', { class: 'idc-two' }, ...['maxAcrePriceEarly', 'maxAcrePrice'].map(textField)),
         mk('div', { class: 'idc-desc' }, 'The most per acre Autopilot will pay for land, early on and later.')),
-      K.group('CD booster', refs.viaField, mk('div', { class: 'idc-two' }, ...['boosterBatch', 'boosterMinCash', 'boosterKeepCash'].map(textField)), checkEl('cdBooster')),
+      K.group('CD booster', mk('div', { class: 'idc-two' }, ...['boosterBatch', 'boosterMinCash', 'boosterKeepCash'].map(textField)), checkEl('cdBooster')),
       K.group('Automation', ...['sellAll', 'floorUpgrades', 'buyKits', 'postBuyOrders', 'dispatchOffice', 'autoResume'].map(checkEl)),
       K.group('Power bills', K.field('Going offline: keep power bills for',
         mk('div', { class: 'idc-inline' }, mk('div', { class: 'idc-inp' }, refs.hours, mk('span', {}, 'h')), offBtn), refs.billNow)),
@@ -239,7 +231,6 @@
     const fi = farmInfo();
     if (fi?.busy) return { text: `CD Farm is running${fi.f.stats?.by ? ` (${fi.f.stats.by})` : ''}. Autopilot waits until it stops.`, btn: true };
     if (fi?.resumable) return { text: 'CD Farm has an interrupted run. Its leftover camps are left alone, and no camps, farms or booster run until you resume or discard it there.', btn: true };
-    if (cfg.boosterVia === 'cdFarm' && !fi) return { text: 'The CD booster is set to CD Farm, but CD Farm isn\'t loaded: the built-in booster is used.', btn: false };
     if (holds.size) return { text: `Held by ${[...holds].join(', ')}. earlyGame.release() to go on.`, btn: false };
     return null;
   }
@@ -304,11 +295,6 @@
       if (mod) changed++;
       K.setModified(f.el, mod, 'Reset to the default (' + (shownOf(key, DEFAULTS[key]) || FIELDS[key].empty || 'none') + ')', () => { delete parseErr[key]; setCfg(key, DEFAULTS[key]); });
     }
-    refs.via.sync();
-    refs.viaDesc.textContent = VIA.find((v) => v.id === viaOf(cfg.boosterVia)).desc;
-    const viaMod = viaOf(cfg.boosterVia) !== viaOf(DEFAULTS.boosterVia);
-    if (viaMod) changed++;
-    K.setModified(refs.viaField, viaMod, 'Reset to the default (' + VIA.find((v) => v.id === viaOf(DEFAULTS.boosterVia)).label + ')', () => setCfg('boosterVia', DEFAULTS.boosterVia));
     for (const [key, input, label] of refs.checks) {
       input.checked = !!cfg[key];
       const mod = !!cfg[key] !== !!DEFAULTS[key];

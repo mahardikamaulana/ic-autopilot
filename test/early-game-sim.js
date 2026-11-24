@@ -4,9 +4,8 @@
 //   bun test/early-game-sim.js live 16         # only the sellers on the saved live board
 //   bun test/early-game-sim.js chaos 30        # rich + dropped commands, deal churn,
 //                                                      #   a cash shock that pauses groups, a disconnect
-//   bun test/early-game-sim.js patched 40      # build-and-demolish patched: booster must switch off
 //   bun test/early-game-sim.js nobooster 40    # cfg.cdBooster = false
-//   bun test/early-game-sim.js cdfarm 40       # cfg.boosterVia = 'cdFarm' with a stand-in CD Farm
+//   bun test/early-game-sim.js cdfarm 40       # the CD booster through a stand-in CD Farm
 //   bun test/early-game-sim.js all 44          # every scenario, summary only
 //
 // Uses the real catalog and deal board saved from the page (live-board.json) and the script's
@@ -30,7 +29,6 @@ const src = coreSrc + '\n' + full.slice(full.indexOf('// @@MODULE early-game'));
 
 function run(scenario, HOURS, quiet) {
   globalThis.earlyGame = undefined;
-  globalThis.cdFarm = undefined;
   globalThis.idleCore?._unload?.();
   globalThis.idleCore = undefined;
   (0, eval)(src);
@@ -38,7 +36,6 @@ function run(scenario, HOURS, quiet) {
   const core = globalThis.earlyGame._core;
   const C = core.normalize(board.catalog);
   const chaos = scenario === 'chaos';
-  const patched = scenario === 'patched';            // build-and-demolish no longer pays: no refund, CD taken back
   if (scenario === 'nobooster') globalThis.earlyGame.cfg.cdBooster = false;
   let demolishes = 0;
   let seed = 12345;
@@ -136,8 +133,7 @@ function run(scenario, HOURS, quiet) {
         if ((p[m.building] ?? 0) < m.amount) return err('Demolish: not in pool');
         p[m.building] -= m.amount;
         demolishes++;
-        if (patched) st.items[24] -= m.amount;
-        else st.items[0] += Math.floor(C.buildings[m.building].cost / 2) * m.amount; // 50% of base, cash only
+        st.items[0] += Math.floor(C.buildings[m.building].cost / 2) * m.amount; // 50% of base, cash only
         return true;
       }
       case 'SetPaused': st.groups[m.group].paused = m.paused; return true;
@@ -295,31 +291,28 @@ function run(scenario, HOURS, quiet) {
   // the options Autopilot passes (target CD, cash floor, batch, spare acres) and reports running
   // until the next decision round, like the real one that Autopilot then waits for.
   let farmRuns = 0, farmBuilt = 0, farmStopNext = false;
-  if (scenario === 'cdfarm') {
-    globalThis.earlyGame.cfg.boosterVia = 'cdFarm';
-    const farm = globalThis.cdFarm = {
-      running: false, active: false, resumable: false, stats: { baselinePool: 0 },
-      start(o) {
-        if (farm.running) return;
-        farm.running = true; farmRuns++; farmStopNext = true;
-        farm.stats.baselinePool = st.building_pool[0][0] ?? 0;
-        const base = C.buildings[0].cost;
-        while ((st.items[24] ?? 0) < o.targetCd) {
-          const free = core.snapshot(st, C, deals, orders, tick).freeAcres - o.reserveAcres;
-          let n = 0, cost = 0;
-          const own = owned(0);
-          while (n < Math.min(o.batch, free) && st.items[0] - cost - Math.round(base * (20 + own + n) / 20) >= o.minMoney * 100) { cost += Math.round(base * (20 + own + n) / 20); n++; }
-          if (n < 1) break;
-          const before = errors.length;
-          let got = 0; // the sim engine builds one per BuyBuilding
-          while (got < n && apply({ type: 'BuyBuilding', building: 0, amount: 1, region: 0 })) got++;
-          if (got) apply({ type: 'DemolishBuilding', building: 0, amount: got, region: 0 });
-          farmBuilt += got;
-          if (errors.length > before) break;
-        }
-      },
-    };
-  }
+  const farm = globalThis.cdFarm = {
+    running: false, active: false, resumable: false, stats: { baselinePool: 0 },
+    start(o) {
+      if (farm.running) return;
+      farm.running = true; farmRuns++; farmStopNext = true;
+      farm.stats.baselinePool = st.building_pool[0][0] ?? 0;
+      const base = C.buildings[0].cost;
+      while ((st.items[24] ?? 0) < o.targetCd) {
+        const free = core.snapshot(st, C, deals, orders, tick).freeAcres - o.reserveAcres;
+        let n = 0, cost = 0;
+        const own = owned(0);
+        while (n < Math.min(o.batch, free) && st.items[0] - cost - Math.round(base * (20 + own + n) / 20) >= o.minMoney * 100) { cost += Math.round(base * (20 + own + n) / 20); n++; }
+        if (n < 1) break;
+        const before = errors.length;
+        let got = 0; // the sim engine builds one per BuyBuilding
+        while (got < n && apply({ type: 'BuyBuilding', building: 0, amount: 1, region: 0 })) got++;
+        if (got) apply({ type: 'DemolishBuilding', building: 0, amount: got, region: 0 });
+        farmBuilt += got;
+        if (errors.length > before) break;
+      }
+    },
+  };
   const grp = (b, r) => Object.values(st.groups).filter((x) => x.building === b && (r == null || x.recipe === r));
   const running = (b, r) => grp(b, r).some((x) => x.equipped > 0 && !x.paused);
 
@@ -411,7 +404,7 @@ function run(scenario, HOURS, quiet) {
 const scenario = process.argv[2] || 'rich';
 const hours = Number(process.argv[3] || (scenario === 'live' ? 16 : 30));
 if (scenario === 'all') {
-  const results = ['rich', 'live', 'chaos', 'patched', 'nobooster', 'cdfarm'].map((sc) => run(sc, hours, true));
+  const results = ['rich', 'live', 'chaos', 'nobooster', 'cdfarm'].map((sc) => run(sc, hours, true));
   const rows = results.map((r) => ({
     scenario: r.scenario, phase: r.phase, 'courier misses': r.courierRejects, 'wood sold': r.woodSold, floors: r.floorSwitches.length, 'buy orders': r.postedOrders, demolishes: r.demolishes, errors: r.errors.length, actions: r.actions,
     'lowest $ powered': r.minPowered === Infinity ? '—' : (r.minPowered / 100).toFixed(0), 'bill pauses': r.pausedByBill, 'paused at end': r.stillPaused, 'your pause kept': r.userKept,

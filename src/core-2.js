@@ -164,8 +164,6 @@ body:has(>.idc-docked:not(.idc-ghost)) .idc-toasts{right:calc(var(--idc-dock,360
   const svg = (d) => '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">' + d + '</svg>';
   const ICONS = {
     close: svg('<path d="M4 4l8 8M12 4l-8 8"/>'),
-    min: svg('<path d="M4 8h8"/>'),
-    expand: svg('<path d="M4 10l4-4 4 4"/>'),
     reset: svg('<path d="M3 8a5 5 0 1 0 1.8-3.8M3 3v3h3"/>'),
     lock: svg('<rect x="3.5" y="7" width="9" height="6" rx="1.5"/><path d="M5.5 7V5.5a2.5 2.5 0 0 1 5 0V7"/>'),
   };
@@ -233,7 +231,7 @@ body:has(>.idc-docked:not(.idc-ghost)) .idc-toasts{right:calc(var(--idc-dock,360
     setTimeout(() => ghost.remove(), 500);
   }
 
-  // Panel shell: sticky header (drag, minimize, close), tabs, scrolling body, sticky footer ----------
+  // Panel shell: sticky header (drag, close; double-click minimizes), tabs, scrolling body, sticky footer ----------
   const livePanels = new Set();
   // React can drop or bring back the game's layout: re-place the panels whose docked state no longer matches it.
   let dockObs = null;
@@ -252,9 +250,8 @@ body:has(>.idc-docked:not(.idc-ghost)) .idc-toasts{right:calc(var(--idc-dock,360
   function createPanel(o) {
     const st = o.state, save = o.save || (() => {});
     const dot = h('span', { class: 'idc-dot' });
-    const minBtn = iconBtn('min', 'Minimize', () => setMin(!st.min));
     const closeBtn = iconBtn('close', 'Close', () => o.onClose());
-    const head = h('div', { class: 'idc-head' }, dot, h('span', { class: 'idc-title' }, o.title), ...(o.headExtra || []), minBtn, closeBtn);
+    const head = h('div', { class: 'idc-head' }, dot, h('span', { class: 'idc-title' }, o.title), ...(o.headExtra || []), closeBtn);
     head.addEventListener('dblclick', (e) => { if (!e.target.closest('button')) setMin(!st.min); });
 
     const tabBtns = {}, panes = {}, order = o.tabs.map((t) => t.id);
@@ -302,9 +299,6 @@ body:has(>.idc-docked:not(.idc-ghost)) .idc-toasts{right:calc(var(--idc-dock,360
       const from = !instant && el.isConnected && motionOK() ? el.offsetHeight : 0;
       st.min = !!v; save();
       el.classList.toggle('min', st.min);
-      minBtn.innerHTML = ICONS[st.min ? 'expand' : 'min'];
-      const lab = st.min ? 'Expand' : 'Minimize';
-      minBtn.title = lab; minBtn.setAttribute('aria-label', lab); minBtn.setAttribute('aria-expanded', String(!st.min));
       place();
       if (from && el.offsetHeight !== from) el.animate({ height: [from + 'px', el.offsetHeight + 'px'], overflow: ['hidden', 'hidden'] }, { duration: 220, easing: EASE });
       if (!st.min) o.onTab?.(st.tab);

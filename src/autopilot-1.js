@@ -28,7 +28,7 @@
 //
 // With CD Farm (the CD Farm module in this file): Autopilot pauses while CD Farm runs or finishes a step (CD Farm
 // calls earlyGame.hold before it takes its baseline), never assigns or builds over the camps of an
-// interrupted CD Farm run, and with cfg.boosterVia = 'cdFarm' hands its CD booster to CD Farm.
+// interrupted CD Farm run, and hands its CD booster to CD Farm.
 //
 // Phases (each step is a check on live state, so it starts wherever the corp is):
 //   1-2  Lumber Camps + Farms (Cotton), always the cheaper; part loads until 25 acres are full
@@ -116,8 +116,6 @@ try {
     // (+1 CD each, 50% base refunded). Starts with a 1-building probe; disabled for good if the
     // CD isn't kept or the refund doesn't arrive (e.g. patched).
     cdBooster: true,
-    boosterVia: 'builtin',   // 'cdFarm': start CD Farm (Lumber Camps, its own checks) up to the tech's CD instead;
-                             // falls back to 'builtin' when CD Farm isn't loaded
     boosterBatch: 10,       // buildings per build+demolish cycle (limited by free acres)
     boosterFarmGapMs: 30000, // via CD Farm: wait this long after it stops before starting it again
     boosterMinCash: 20000,   // $: only above this much cash
@@ -168,7 +166,7 @@ try {
   let running = false;
   const save = () => {
     try {
-      store?.setItem(KEY, JSON.stringify({ cfg: persistable(), userPaused: [...userPaused], billPaused: [...billPaused], keptPaused: [...keptPaused], posted, running, boosterLeft, boosterBad }));
+      store?.setItem(KEY, JSON.stringify({ cfg: persistable(), userPaused: [...userPaused], billPaused: [...billPaused], keptPaused: [...keptPaused], posted, running, boosterLeft }));
     } catch {}
   };
 
@@ -226,11 +224,8 @@ try {
     return '';
   }
 
-  // CD booster bookkeeping: buildings it built whose demolish got lost (cleaned up next, never
-  // put to work), and probes where the demolish happened but CD/refund didn't check out.
+  // CD booster leftovers: buildings a build-and-demolish left behind, cleaned up next loop.
   const boosterLeft = { ...(saved.boosterLeft || {}) };
-  let boosterBad = saved.boosterBad || 0;
-  const boosterOff = () => boosterBad >= 2;
 
   // Called every loop. A powered group that becomes paused while cash is under ~2 bills (or
   // the power service dropped) was paused by an unpaid bill; any other pause is yours.
@@ -291,12 +286,6 @@ try {
     if (!m) return;
     // A buy order may have been posted even if the board didn't show it: never post twice.
     if (a.key.startsWith('post:')) { posted[m.item] = nowMs(); save(); return; }
-    if (a.key === 'booster' && ok) boosterBad = 0; // only consecutive bad probes turn it off
-    if (a.key === 'booster' && !ok && stepsDone >= 1) {
-      const left = Math.max(0, (s?.pool?.[m.b] ?? 0) - m.p0);
-      if (left > 0) boosterLeft[m.b] = (boosterLeft[m.b] ?? 0) + left; // demolish lost: clean up next loop
-      else boosterBad++;                                               // demolished, but CD/refund wrong
-    }
     if (a.key.startsWith('booster:cleanup') && ok) boosterLeft[m.b] = Math.max(0, (boosterLeft[m.b] ?? 0) - m.n);
     save();
   }

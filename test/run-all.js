@@ -26,7 +26,7 @@ const SH = ['chrome', 'cdfarm', 'lab', 'utilities', 'narrow', 'docked', 'motion'
 const UI_EST = { chrome: 8, cdfarm: 10, lab: 8, utilities: 4, narrow: 2, docked: 3, motion: 2, 'auto-a': 7, 'auto-b': 10, 'auto-c': 7 };
 for (const s of SH) add('ui:' + s, ['bun', T('ui-harness.js'), 'check', s], [BUILT, T('ui-harness.js'), ...BOARD], UI_EST[s], true);
 for (let k = 0; k < 3; k++) add('toolkit:' + k, ['bun', T('toolkit-test.js'), '--shard=' + k + '/3'], [BUILT, T('toolkit-test.js'), ...BOARD], 4);
-for (const s of ['rich', 'live', 'chaos', 'patched', 'nobooster', 'cdfarm']) add('sim:' + s, ['bun', T('early-game-sim.js'), s, '44'], [BUILT, T('early-game-sim.js'), ...BOARD], 2);
+for (const s of ['rich', 'live', 'chaos', 'nobooster', 'cdfarm']) add('sim:' + s, ['bun', T('early-game-sim.js'), s, '44'], [BUILT, T('early-game-sim.js'), ...BOARD], 2);
 add('pacer', ['bun', T('pacer-test.js')], ['src/core-1.js', 'src/core-2.js', 'src/core-3.js', 'src/pacer.js', T('pacer-test.js')], 1);
 add('sim:coreplan', ['bun', T('core-plan-sim.js')], [BUILT, T('core-plan-sim.js'), T('live-board.json')], 6);
 for (const m of ['cp-buildout', 'cp-retail', 'cp-lab', 'cp-ladder', 'cp-cadence', 'cp-endgame']) add(m, ['bun', T(m + '-test.js')], [BUILT, T(m + '-test.js'), T('cp-fixtures.js'), T('live-board.json'), T('live-stageB.json')], 4);
