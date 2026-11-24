@@ -17,7 +17,7 @@ try {
   // Floors the plan assumes: Camp x3, Sawmill x2, Workshop v1 x5.
   const M = { camp: 3, sawmill: 2, workshop: 5 };
   const MIX = [0.4, 0.3, 0.3];                       // Bookshelf, Table, Chair share of planks
-  const RETAIL = 1.52, WALL_CD = 755000, BLD_ACRE = 1200, FIXED_EXTRA = 3 + 5;   // Retail Store 3 + Assembly Plant 5
+  const RETAIL = 1.52, WALL_CD = 505000, BLD_ACRE = 1200, FIXED_EXTRA = 3 + 5;   // Retail Store 3 + Assembly Plant 5; WALL_CD = Oil Rig 5,000 + Refinery 500,000 (2026-11-24 catalog)
   const FURNITURE = ['Make Bookshelf', 'Make Table', 'Make Chair'];
 
   // CD ladder: price of the i-th building in a batch = base x (20 + owned + i) / 20, refund 50% of base.
@@ -28,14 +28,19 @@ try {
     for (let i = 0; i < k; i++) c += Math.floor(t.base * 100 * (20 + owned + i) / 20) / 100 - t.base / 2 + t.items;
     return c;
   };
+  // Demolitions cap at 360 CD/h. Batch size only sets the price, so the cheapest batch that reaches the cap wins (same as my-plan.js).
   function bestBatch(type, owned, income, cycles) {
-    let best = { k: 1, perCd: batchCost(type, owned, 1), cdH: cycles };
+    const cap = 360 * TYPES[type].cd;
+    let best = null;
     for (let k = 1; k <= 200; k++) {
       const c = batchCost(type, owned, k);
-      if (cycles * c > income) break;
-      best = { k, perCd: c / (k * TYPES[type].cd), cdH: cycles * k * TYPES[type].cd, spendH: cycles * c };
+      const batchesH = Math.min(cycles, cap / (k * TYPES[type].cd));
+      const spendH = batchesH * c;
+      if (spendH > income) break;
+      const cdH = batchesH * k * TYPES[type].cd, perCd = c / (k * TYPES[type].cd);
+      if (!best || cdH > best.cdH + 1e-9 || (Math.abs(cdH - best.cdH) < 1e-9 && perCd < best.perCd)) best = { k, perCd, cdH, spendH };
     }
-    return best;
+    return best ?? { k: 1, perCd: batchCost(type, owned, 1), cdH: 0, spendH: 0 };
   }
 
   // Price of the next acre after n bought ones, starting at `first`.
@@ -92,7 +97,7 @@ try {
     const m = engineModel(catalog);
     const st = state;
     const cycles = opts.cyclesPerHour ?? st.cyclesPerHour ?? 600;
-    const fixed = (st.fixedAcres ?? 0) + (st.fixedExtra ?? FIXED_EXTRA), buffer = st.cdBufferAcres ?? 16;
+    const fixed = (st.fixedAcres ?? 0) + (st.fixedExtra ?? FIXED_EXTRA), buffer = st.cdBufferAcres ?? 2;   // one building being built + one waiting for demolition (batch 1)
     const Ecap = opts.planksCap != null ? m.acresOf(Math.max(0, opts.planksCap)) : Infinity;   // engine acres the capped planks need
     let E = Math.min(150, Ecap), rule = null;
     for (let it = 0; it < 40; it++) {

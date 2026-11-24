@@ -20,7 +20,7 @@
   // ---- control -----------------------------------------------------------
 
   const fmt = (x) => Number(x).toLocaleString('en-US', { maximumFractionDigits: 2 });
-  const perCd = () => (stats.built ? (netSpend() / stats.built).toFixed(2) : '-');
+  const perCd = () => { const netCd = stats.built - (stats.rushCd ?? 0); return netCd > 0 ? (netSpend() / netCd).toFixed(2) : '-'; };
 
   async function start(opts = {}) {
     if (running) return console.warn('[cdFarm] already running');

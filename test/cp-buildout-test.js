@@ -183,6 +183,7 @@ const wsGroups = (st) => Object.values(st.groups).filter((g) => g.building === B
 
   await F.t('gates each say why: acre (Stage B), kit, wood (R8), bill floor, money floor', () => {
     const { cp } = F.load(['cp-buildout']);
+    cp.cfg.bufferAcres = 16;   // these scenarios count free acres against the 16-acre buffer
     const nb = cp._buildout.nextBuildStep;
     const ctx = (o) => F.ctxOf({ retailBoard: retail, ...o });
     const ruleOf = (st) => cp._decide(cp._view(st, cat, deals), ctx()).rule;
@@ -632,7 +633,7 @@ const wsGroups = (st) => Object.values(st.groups).filter((g) => g.building === B
     const st = switched(liveReady());
     st.groups[10].paused = false;                       // Glass Kiln running, Glass 150 and Concrete 500: at the gates
     const { cp, w } = F.boot(st, { modules: ['cp-buildout'], catalog: cat, deals, retail });
-    Object.assign(cp.cfg, { land: false, unlocks: false, confirmMs: 300, applyFurnitureFloor: false, landPaybackAB: 0 });   // Stage B buys no acre here (plan D-1 rule closed)
+    Object.assign(cp.cfg, { land: false, unlocks: false, confirmMs: 300, applyFurnitureFloor: false, landPaybackAB: 0, bufferAcres: 16 });   // Stage B buys no acre here (plan D-1 rule closed)
     cp.start({ dryRun: false });
     const step = async () => { await F.waitFor(() => !cp.active); await cp._step(); await F.waitFor(() => !cp.active); };
     await step();

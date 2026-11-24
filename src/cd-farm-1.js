@@ -8,8 +8,10 @@
 //
 // Each Lumber Camp or Farm (Settings > Building, or start({ building: 10 })) earns 1 CD on build;
 // CD is kept after demolish. Both cost $41 base, refund 50% of base ($20.50) and need 1 free acre.
-// The i-th one costs base x (20 + owned + i) / 20, where owned counts every building of that type
-// you hold, so pick the type you own fewer of (the wiki's CD farm section has the table).
+// The i-th one costs base x (20 + owned + i) / 20, where owned counts every building of that type you hold or have queued
+// (a queued demolition still counts until it finishes), so pick the type you own fewer of. The demolish queue takes one
+// building at a time (10 s per Lumber Camp), so camps and farms top out near 6 CD a minute; frame buildings are rushed when
+// the queue is full (the wiki's CD farm section has the numbers).
 // While running, any unassigned buildings of the chosen type above the count at start are
 // treated as the farm's own and may be demolished.
 //
@@ -40,8 +42,6 @@ try {
   const STARTER_ACRES = 25;
   const RATE_WINDOW_MS = 15 * 60 * 1000;
 
-  // Acres per building id (wiki/data/buildings.md).
-  const ACRES = [1, 2, 2, 3, 1, 2, 2, 6, 2, 5, 1, 1, 2, 4, 2, 3, 1, 5, 1, 3, 8, 1, 2, 2, 3, 1, 1, 1, 6, 1, 2, 1, 1, 1, 3, 1, 1, 2, 3];
 
   const cfg = {
     building: 'auto',      // 'auto': the planner picks types and batch every cycle; or an id to cycle: 0 Lumber Camp, 10 Farm
@@ -77,7 +77,7 @@ try {
 
   const freshStats = () => ({
     cycles: 0, built: 0, spent: 0, refunded: 0,
-    cdStart: 0, moneyStart: 0, startedAt: 0, baselinePool: 0,
+    cdStart: 0, moneyStart: 0, startedAt: 0, baselinePool: 0, rushCd: 0,
     samples: [], spends: [], last: '', by: '', building: null,
     baseline: {}, types: [], byType: {}, land: 0, acresBought: 0, holding: {},   // Auto: per-type pool baseline, types touched, spend per type
   });
@@ -128,22 +128,25 @@ try {
 
   // Live snapshot. Every decision in the script goes through this.
   function read(fresh = false) {
-    const { ws, st } = core.walk(fresh);
-    if (!st) return null;
+    const { ws, st, catalog } = core.walk(fresh);
+    if (!st || !catalog) return null;
+    const C = PL().normalize(catalog);
     const regionPool = st.building_pool?.[REGION] ?? {};
     const unassignedCamps = regionPool[farmId()] ?? 0;
+    // Queued builds and demolitions count in the price and hold acres: a queued demolition keeps its acre until it finishes.
+    const q = PL().queued({ st, catalog, region: REGION });
 
-    let campsInGroups = 0, acresUsed = 0;
+    let campsInGroups = 0, acresUsed = q.acres;
     for (const g of Object.values(st.groups)) {
       if ((g.region ?? REGION) !== REGION) continue;
       if (g.building === farmId()) campsInGroups += g.count;
-      acresUsed += (ACRES[g.building] ?? 1) * g.count;
+      acresUsed += C.buildings[g.building].acres * g.count;
     }
-    for (const [b, n] of Object.entries(regionPool)) acresUsed += (ACRES[b] ?? 1) * n;
+    for (const [b, n] of Object.entries(regionPool)) acresUsed += C.buildings[b].acres * n;
 
     const acresOwned = STARTER_ACRES + (st.land_bought?.[REGION] ?? 0);
     const money = (st.items?.[MONEY] ?? 0) / 100;
-    const ownedCamps = campsInGroups + unassignedCamps;
+    const ownedCamps = campsInGroups + unassignedCamps + (q.owned[farmId()] ?? 0);
     const freeAcres = Math.max(0, acresOwned - acresUsed);
     const usableAcres = Math.max(0, freeAcres - cfg.reserveAcres);
     // 'income' keeps the money you have at Start; with no run on, that is the money now (stats.moneyStart is from the last run).
@@ -152,12 +155,14 @@ try {
     let affordable = 0;
     while (affordable < cfg.batch && money - campCost(ownedCamps, affordable + 1) >= floor) affordable++;
     const nextBatch = Math.min(cfg.batch, usableAcres, affordable);
+    const sec = PL().secsOf(C, farmId());
 
     return {
       money, cd: st.items?.[CD] ?? 0,
       unassignedCamps, campsInGroups, ownedCamps,
       acresOwned, acresUsed, freeAcres, usableAcres, moneyFloor: floor,
       nextBatch, nextBatchCost: campCost(ownedCamps, nextBatch),
+      buildSec: sec.build, demolishSec: sec.demolish, queue: { build: q.build, demolish: q.demolish }, acresComing: q.demolishAcres,
       mutTick: st.ssi?.last_user_mutation_tick ?? 0,
       wsOpen: ws?.readyState === 1, ws,
     };
@@ -199,8 +204,8 @@ try {
   // Falls back to state polling if no text messages have been seen on the socket.
   // Waits for the server to confirm a command, and feeds the round trip (core.lastRtt: ws.send to the
   // confirming Diff, sub-millisecond) to the measurements and the pacer's backoff / breaker.
-  async function waitConfirm(pred, d0, rd = read) {
-    const r = await core.waitConfirm({ read: rd, pred, d0, timeoutMs: cfg.timeoutMs, closed: () => { throw new ConnError('socket closed while waiting'); } });
+  async function waitConfirm(pred, d0, rd = read, timeoutMs = cfg.timeoutMs) {
+    const r = await core.waitConfirm({ read: rd, pred, d0, timeoutMs, closed: () => { throw new ConnError('socket closed while waiting'); } });
     const rtt = r ? core.lastRtt() : null;
     const p = getPacer();
     p.noteConfirm({ ok: !!r, rtt }); p.noteResult(!!r);

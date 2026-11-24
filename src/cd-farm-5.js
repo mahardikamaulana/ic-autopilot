@@ -30,9 +30,16 @@
     save(); render();
     return { applied, skipped };
   }
+  // Settings back to the defaults (the run's own numbers stay); refused while a run is going.
+  function resetCfg() {
+    if (running || active) throw new Error('stop the CD Farm run first');
+    if (resumable) throw new Error('discard or resume the interrupted CD Farm run first');
+    for (const k of Object.keys(DEFAULTS)) if (!RUN_ONLY.includes(k)) cfg[k] = DEFAULTS[k];
+    save(); render();
+  }
 
   window.cdFarm = {
-    read, status, start, resume, stop, reset, panel, rates, cfg, exportCfg, importCfg, pauseAuto,
+    read, status, start, resume, stop, reset, panel, rates, cfg, exportCfg, importCfg, resetCfg, pauseAuto,
     get running() { return running; },
     get active() { return active; },        // a run is still executing (maybe finishing a step after stop())
     get resumable() { return resumable; },  // an interrupted run waits for Resume / Discard

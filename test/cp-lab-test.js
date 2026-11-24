@@ -359,6 +359,7 @@ function fakeLab({ running = true, dryRun = true, mode = 'process', list = [], s
 
   await t('D2: second Lab: bought with 1 Lab, the unlocks\' frames + 4, 2 free acres above the buffer and the cash; each gate says why', () => {
     const { cp } = F.load(['cp-lab']);
+    cp.cfg.bufferAcres = 16;   // the scenario below counts free acres against the 16-acre buffer
     const lab = B('Manufacturing Lab');
     // 81 acres bought: 18 free, exactly 2 above the 16-acre buffer; Iron Frames = what the unlocks still need + the Lab's 4
     const ready = () => { const st = F.stageA(); st.land_bought[0] = 81; st.stock[0][I('Iron Frame')] = cp._ifNeed(cp._view(st, F.board.catalog, []), null) + 4; return st; };

@@ -148,8 +148,13 @@ async function autoSetup(page) {
           let c = 0; for (let i = 0; i < o.amount; i++) c += price(o.building, i);
           st.items[0] -= Math.round(c * mode.priceMult); pool[o.building] = (pool[o.building] ?? 0) + o.amount; st.items[24] += o.amount * window.idleCore.planner.cdOf(cat, o.building);
         };
-        if (mode.lateBuyMs) { const ms = mode.lateBuyMs; mode.lateBuyMs = 0; setTimeout(applyBuy, ms); return; }   // delivered after the client gave up
-        applyBuy();
+        if (mode.buildMs) {   // a timed build: the money goes at order; the building and its CD land when it finishes, one build after another
+          let c = 0; for (let i = 0; i < o.amount; i++) c += price(o.building, i);
+          st.items[0] -= Math.round(c * mode.priceMult);
+          const now = performance.now(); mode.buildEnd = Math.max(mode.buildEnd || 0, now) + mode.buildMs * o.amount;
+          setTimeout(() => { pool[o.building] = (pool[o.building] ?? 0) + o.amount; st.items[24] += o.amount * window.idleCore.planner.cdOf(cat, o.building); }, mode.buildEnd - now);
+        } else if (mode.lateBuyMs) { const ms = mode.lateBuyMs; mode.lateBuyMs = 0; setTimeout(applyBuy, ms); return; }   // delivered after the client gave up
+        else applyBuy();
       } else if (o.type === 'DemolishBuilding') {
         if (mode.ignoreDemolishOnce) { mode.ignoreDemolishOnce = false; return; }
         const apply = () => { pool[o.building] = (pool[o.building] ?? 0) - o.amount; st.items[0] += Math.floor(B[o.building].cost / 2) * o.amount; };
@@ -167,7 +172,7 @@ async function autoSetup(page) {
   const reset = (extra = '') => page.evaluate((x) => {
     const st = window.__st, cf = window.cdFarm;
     window.__fake.sent.length = 0;
-    Object.assign(window.__fake.mode, { ackMs: 10, ignoreBuy: false, ignoreDemolishOnce: false, lateDemolishMs: 0, lateBuyMs: 0, priceMult: 1 });
+    Object.assign(window.__fake.mode, { ackMs: 10, ignoreBuy: false, ignoreDemolishOnce: false, lateDemolishMs: 0, lateBuyMs: 0, buildMs: 0, buildEnd: 0, priceMult: 1 });
     cf._hist.slopes = { money: 0, cd: 0 }; cf._waitMax(1200); cf._graceMs(2000);
     for (const k of Object.keys(cf._quarantine)) delete cf._quarantine[k];
     st.groups = {}; st.building_pool[0] = {}; st.items[0] = 5000000; st.items[24] = 1200; st.land_bought[0] = 0; st.stock[0] = {}; st.unlocked_buildings = [];
@@ -189,6 +194,15 @@ async function autoGroup1(page, { reset, logLines }) {
   ok((await logLines()).some((t) => /no CD needed/.test(t)), 'Auto: the log says why it stopped (no CD needed)');
   ok(a1.stats.cycles >= 1 && Object.keys(a1.stats.byType).every((b) => [0, 10].includes(+b)), 'Auto: per-type stats are kept', JSON.stringify(a1.stats.byType));
   ok(await page.evaluate(() => window.idleCore.measure.get('rtt').n > 3 && window.idleCore.measure.get('rtt').median > 0), 'Auto: round trips are measured from send to the confirming Diff');
+
+  // 1b. timed builds (the game charges at order and pays the CD when each build lands): the run still confirms the batch in
+  // queue order, buys and demolishes it, and the cash check against the catalog passes without a stop
+  await reset('cf.cfg.targetCd = 1212; window.__fake.mode.buildMs = 400;');
+  await page.evaluate(() => window.cdFarm.start({ by: 'test' }));
+  const a1b = await page.evaluate(() => ({ types: window.__fake.sent.map((m) => m.type), pool: window.__st.building_pool[0], cd: window.__st.items[24] }));
+  const log1b = await logLines();
+  ok(a1b.cd === 1212 && Object.values(a1b.pool).every((n) => n === 0), 'Auto: with timed builds it still stops exactly on the need, with the pool empty', JSON.stringify([a1b.cd, a1b.pool]));
+  ok(log1b.some((t) => /no CD needed/.test(t)) && !log1b.some((t) => /not confirmed|batch cost|no Construction Data/.test(t)), 'Auto: timed builds confirm in queue order with no mismatch and no stop', JSON.stringify(log1b.slice(-4)));
 
   // 2. a Mine unlocked with Wooden Frames in surplus and no running recipe using them: the Mine is the cheaper CD
   await reset('st.unlocked_buildings = [1]; st.stock[0] = { 41: 100 }; cf.cfg.targetCd = 1208;');
@@ -404,8 +418,10 @@ async function sectionChrome(page, { q, attr, count, visible, ui }) {
 
   // segmented control: roving tabindex + arrows
   await page.click('.egp-panel [id$="-t-settings"]');
+  await page.check('.egp-panel .idc-check:has-text("Dry run switch") input');   // the footer switch only exists with the Experimental switch on
   await page.focus('.egp-panel .idc-foot .idc-seg button[aria-checked=true]');
   ok(await page.$$eval('.egp-panel .idc-foot .idc-seg button', (b) => b.map((x) => x.tabIndex).join()) === '0,-1', 'seg has a single tab stop');
+  await page.uncheck('.egp-panel .idc-check:has-text("Dry run switch") input');
 
   // log tab: filter + clear with undo
   await page.evaluate(() => { const L = window.idleCore.ledger; L.add('AP', 'action', 'built a thing'); L.add('AP', 'fail', 'it broke'); L.add('CD', 'alert', 'heads up'); });
@@ -487,6 +503,19 @@ async function sectionChrome(page, { q, attr, count, visible, ui }) {
 
   // dry run start/stop through the footer button; pill appears
   await page.click('.egp-chip');
+  // Dry run is experimental and off by default: Start is Live (asks to confirm). Settings > Experimental shows the switch.
+  await page.click('.egp-panel [id$="-t-settings"]');
+  ok(!(await visible('.egp-panel .idc-foot .idc-seg')) && (await page.$eval('.egp-panel .idc-foot .primary', (e) => e.textContent)) === 'Start live', 'Autopilot: Dry run switch hidden by default; Start is Live');
+  // The console default (earlyGame.start() with no options) is still a dry run while the switch is off and the panel is open.
+  const sentBefore = await page.evaluate(() => window.__ws.sent.length);
+  await page.evaluate(() => { window.earlyGame.cfg.dryRun = true; });
+  await page.waitForTimeout(1200);   // the panel renders every second: a render must not flip the mode back
+  ok(await page.evaluate(() => window.earlyGame.cfg.dryRun === true) && (await page.$eval('.egp-panel .idc-badge', (e) => e.textContent)) === 'Dry run', 'Autopilot: a render with the switch off keeps the dry run');
+  await page.evaluate(() => window.earlyGame.start());
+  ok(await page.evaluate(() => window.earlyGame.running && window.earlyGame.cfg.dryRun === true) && (await page.evaluate(() => window.__ws.sent.length)) === sentBefore, 'Autopilot: console start() stays a dry run with the switch off, and sends nothing');
+  await page.evaluate(() => window.earlyGame.stop());
+  await until(page, () => !window.earlyGame.running);
+  await page.check('.egp-panel .idc-check:has-text("Dry run switch") input');
   await page.click('.egp-panel .idc-foot .primary');
   await until(page, () => window.earlyGame.running && document.querySelector('.egp-tab .idc-pill'));
   ok(await page.evaluate(() => window.earlyGame.running), 'Start dry run starts');
@@ -553,7 +582,7 @@ async function sectionCdFarm(page, { q, attr, count, visible, ui }) {
 
 async function sectionLab(page, { q, attr, count, visible, ui }) {
   // Lab runner: panel, status, settings, custom list editor, dry run / live start. The game is fake: nothing leaves this page.
-  ok(await page.evaluate(() => window.labRunner.cfg.dryRun === true && !window.labRunner.running) && await count('.lab-panel') === 0, 'Lab: starts as a dry run, not running, panel closed');
+  ok(await page.evaluate(() => window.labRunner.cfg.dryRun === false && !window.labRunner.running) && await count('.lab-panel') === 0, 'Lab: starts Live (the Dry run switch is off by default), not running, panel closed');
   await page.evaluate(() => {   // a Heartland Lab; groups making Planks, Iron Frame and Wood; 36,000 MD, 3 RD
     const st = window.__st;
     st.items[25] = 36000; st.items[26] = 3; st.building_pool[0][14] = 1;
@@ -569,6 +598,12 @@ async function sectionLab(page, { q, attr, count, visible, ui }) {
   ok((await page.$eval('.lab-chip', (e) => e.textContent.trim())) === 'Lab 0/1' && (await page.$eval('.lab-panel .idc-big', (e) => e.textContent)) === '0 of 1', 'Lab: chip and hero count busy Labs');
   ok(rows.some((t) => t === 'Heartlandready: Iron Frame · Process study · Tier I'), 'Lab: Status shows the free Heartland Lab and the project it would start', JSON.stringify(rows));
   ok(rows.includes('MD36,000 · keeps 5,000') && rows.includes('RD3') && rows.includes('Results waiting0'), 'Lab: Status shows MD, RD and waiting results', JSON.stringify(rows));
+  // The Dry run switch is experimental and off by default: the footer has no dry run switch and Start is Live. Settings > Experimental turns it on.
+  await page.click('.lab-panel [id$="-t-settings"]');
+  ok(!(await visible('.lab-panel .idc-foot .idc-seg')) && (await page.$eval('.lab-panel .idc-foot .primary', (e) => e.textContent)) === 'Start live', 'Lab: Dry run switch is hidden by default and Start is Live');
+  await page.check('.lab-panel .idc-check:has-text("Dry run switch") input');
+  ok(await visible('.lab-panel .idc-foot .idc-seg'), 'Lab: the Experimental Dry run switch shows the footer switch');
+  await page.click('.lab-panel [id$="-t-status"]');
   ok((await page.$eval('.lab-panel .idc-badge', (e) => e.textContent)) === 'Dry run', 'Lab: header badge says Dry run');
   await page.evaluate(() => { window.__st.mfg_research = { 0: { product: 9, context: 0, tier: 0, remaining: 3840 } }; window.__st.pending_results = [{ tick: 5, product: 41, context: 1, tier: 1, reward: 'x' }]; });
   await until(page, () => [...document.querySelectorAll('.lab-panel [id$="-p-status"] .idc-row')].some((e) => /32m left/.test(e.textContent)));
@@ -618,8 +653,8 @@ async function sectionLab(page, { q, attr, count, visible, ui }) {
 
   // dry run vs live: the footer button, the confirm step, what is sent
   const main = '.lab-panel .idc-foot .primary';
-  ok(await page.isChecked('.lab-panel .idc-check:has-text("Dry run") input') && (await page.$eval(main, (e) => e.textContent)) === 'Start dry run', 'Lab: Dry run is ticked and the footer offers Start dry run');
-  await page.uncheck('.lab-panel .idc-check:has-text("Dry run") input');
+  ok((await page.$eval('.lab-panel .idc-foot .idc-seg button[aria-checked=true]', (e) => e.textContent)) === 'Dry run' && (await page.$eval(main, (e) => e.textContent)) === 'Start dry run', 'Lab: the footer segment is on Dry run and offers Start dry run');
+  await page.click('.lab-panel .idc-foot .idc-seg button:text-is("Live")');
   ok(await page.evaluate(() => window.labRunner.cfg.dryRun) === false && (await page.$eval('.lab-panel .idc-badge', (e) => e.textContent)) === 'Live' && (await page.$eval(main, (e) => e.textContent)) === 'Start live', 'Lab: unticking Dry run switches to Live: badge and button say so');
   await page.click(main);
   ok((await page.$eval(main, (e) => e.textContent)) === 'Confirm start' && !(await page.evaluate(() => window.labRunner.running)), 'Lab: Live needs a second click');
@@ -636,7 +671,7 @@ async function sectionLab(page, { q, attr, count, visible, ui }) {
   await page.click(main);
   await page.waitForFunction(() => !window.labRunner.active, null, { timeout: 5000 });
   ok(!(await page.evaluate(() => window.labRunner.running)) && (await page.$eval(main, (e) => e.textContent)) === 'Start live', 'Lab: Stop stops');
-  await page.check('.lab-panel .idc-check:has-text("Dry run") input');
+  await page.click('.lab-panel .idc-foot .idc-seg button:text-is("Dry run")');
   const before = await page.evaluate(() => window.__ws.sent.length);
   await page.click(main);
   await until(page, () => window.labRunner.running && document.querySelector('.lab-tab .idc-pill')?.textContent === 'Dry run');

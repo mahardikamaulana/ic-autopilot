@@ -10,6 +10,9 @@
     if (!r0) throw new ConnError('game state not found');
     if (r0.cd >= cfg.targetCd) return stopWith(`reached target CD ${fmt(cfg.targetCd)}`);
     if (netSpend() >= cfg.maxSpend) return stopWith(`reached max spend $${fmt(cfg.maxSpend)}`);
+    // Acres held by queued demolitions come back as each one finishes (10 s per camp): wait for them. Stop only for acres that will not return.
+    const short = r0.usableAcres === 0 || (cfg.fullBatch && r0.usableAcres < cfg.batch);
+    if (short && r0.acresComing > 0) { phase = 'waiting: queued demolitions free acres'; return 'wait'; }
     if (r0.usableAcres === 0) return stopWith(`no free acres above the ${cfg.reserveAcres}-acre reserve (${r0.freeAcres} free)`);
     if (cfg.fullBatch && r0.usableAcres < cfg.batch) return stopWith(`need ${cfg.batch} free acres above the ${cfg.reserveAcres}-acre reserve for a full batch, have ${r0.usableAcres}`);
     if (cfg.fullBatch ? r0.nextBatch < cfg.batch : r0.nextBatch === 0) {
@@ -36,7 +39,7 @@
     if (rb.nextBatch < n) { phase = 'waiting: money or land changed'; return 'wait'; } // the plan above no longer fits
     inFlight = { action: 'build', amount: n, at: Date.now() }; save();
     const d = send({ type: 'BuyBuilding', building: farmId(), amount: n, region: REGION });
-    const r1 = await waitConfirm((r) => r.unassignedCamps >= rb.unassignedCamps + n, d);
+    const r1 = await waitConfirm((r) => r.unassignedCamps >= rb.unassignedCamps + n, d, read, cfg.timeoutMs + Math.ceil((n * rb.buildSec + rb.queue.build) * 1500));
     if (!r1) {
       const r = mustRead();
       const got = r.unassignedCamps - rb.unassignedCamps;
@@ -58,10 +61,7 @@
 
     // Demolish
     phase = 'demolishing';
-    const refund = await demolish(n);
-    if (Math.abs(refund - n * unitRefund()) > Math.max(5, n * unitRefund() * 0.2)) {
-      console.warn(`[cdFarm] money rose $${fmt(refund)}, expected ~$${fmt(n * unitRefund())} refund`);
-    }
+    await demolish(n);
 
     stats.cycles++;
     sample();
@@ -168,6 +168,10 @@
       recipes.push(g.recipe);
       for (const i of cat.recipes[g.recipe]?.inputs ?? []) running.add(i.item);
     }
+    // Queued builds and demolitions count in the price and hold acres (see PL().queued).
+    const q = PL().queued({ st, catalog, region: REGION });
+    for (const [b, n] of Object.entries(q.owned)) owned[b] = (owned[b] ?? 0) + n;
+    acresUsed += q.acres;
     // Best open bid per unit (side 'Sell' rows are bids you can sell into).
     const bids = {};
     for (const d of deals ?? []) if (d.region === REGION && d.side === 'Sell' && d.amount > 0) bids[d.item] = Math.max(bids[d.item] ?? 0, d.price / d.amount);
@@ -175,7 +179,7 @@
     const landBought = st.land_bought?.[REGION] ?? 0;
     const acresOwned = STARTER_ACRES + landBought;
     return {
-      ws, wsOpen: ws?.readyState === 1, cat, pool, owned, running, recipes, bids, unlocked, landBought, acresOwned, acresUsed,
+      ws, wsOpen: ws?.readyState === 1, cat, pool, owned, running, recipes, bids, unlocked, landBought, acresOwned, acresUsed, queue: { build: q.build, demolish: q.demolish },
       freeAcres: Math.max(0, acresOwned - acresUsed), stock: st.stock?.[REGION] ?? {},
       money: st.items?.[MONEY] ?? 0, cd: st.items?.[CD] ?? 0, retail: unlocked.includes(RETAIL) || (owned[RETAIL] ?? 0) > 0,
       mutTick: st.ssi?.last_user_mutation_tick ?? 0,
@@ -286,7 +290,7 @@
     const input = {
       catalog: c.cat, unlocked: c.unlocked, owned: c.owned, usableAcres: Math.max(0, c.freeAcres - cfg.reserveAcres), money: c.money, floor: floorC,
       stock: c.stock, reserve: ap?.items ?? {}, netSupply, burn, itemValue: PL().itemValues({ catalog: c.cat, bids: c.bids, runningInputs: [...c.running] }),
-      quarantine: activeQuarantine(), R: need - c.cd, T: t.T, TperType: t.perType, I,
+      quarantine: activeQuarantine(), R: need - c.cd, T: t.T, TperType: t.perType, I, queue: c.queue, cdHave: c.cd,
       minUnits: recovering ? 1 : pace.minUnits, maxBatch: recovering ? 1 : cfg.batch, maxTypes: recovering ? 1 : cfg.maxTypes,
     };
     reportValues(c, input.itemValue);
@@ -320,6 +324,7 @@
   function recheck(rb, u, ev) {
     const base = rb.cat.buildings[u.b];
     if ((rb.owned[u.b] ?? 0) !== (ev.c.owned[u.b] ?? 0)) return u.name + ' count changed since the plan';
+    if (rb.freeAcres - cfg.reserveAcres < base.acres * u.n) return u.name + ' has no free acres left';
     if (rb.money - PL().batchCost(base.cost, rb.owned[u.b] ?? 0, u.n) < ev.floorC) return 'money would fall below the floor';
     for (const { item, amount } of base.build_items ?? []) {
       if (!PL().itemOk({ need: u.n * amount, stock: rb.stock[item] ?? 0, reserve: ev.ap?.items?.[item] ?? 0 }).ok) return (rb.cat.items[item]?.name ?? 'an item') + ' surplus is gone';
@@ -363,6 +368,24 @@
     core.ledger.add('CD', 'action', `Auto: bought ${k} acre(s) for $${fmt(ev.land.priceCents / 100)} (real cost $${fmt(ev.land.realCostCents / 100)}): ${ev.land.note}`);
     save();
     await pause('cycle');
+  }
+
+  // Demolishes `want` units of one type and confirms on the pool count. DemolishBuilding queues them (they leave the pool
+  // now; each refund comes when it finishes). DemolishNow takes them out at once for ceil(CD/2) CD each.
+  async function demolishUnits(b, want, type) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      // A Demolish that timed out may still be applied: give it time to land before looking again and retrying.
+      if (attempt) await sleep(Math.max(graceMs, 4 * (core.measure.get('rtt').p90 ?? 0)));
+      await jitter();
+      const r0 = readPool(true);
+      if (!r0) throw new ConnError('game state not found');
+      // Never more than the farm holds: a first attempt that the server applied late must not make the retry eat your own buildings.
+      const amt = Math.min(want, (r0.pool[b] ?? 0) - (stats.baseline?.[b] ?? 0));
+      if (amt <= 0) return { ok: true, rtt: 0 };
+      const d = send({ type, building: b, amount: amt, region: REGION });
+      if (await waitConfirm((r) => (r.pool[b] ?? 0) <= (r0.pool[b] ?? 0) - amt, d, readPool)) return { ok: true, rtt: core.lastRtt() ?? 0 };
+    }
+    return { ok: false, rtt: 0 };
   }
 
   // Three failed commands in a row, or a latency spike: clean up, wait, retry once at batch 1; a second trip stops.
@@ -414,7 +437,7 @@
     stats.spends = stats.spends.filter((s) => now - s.t < 60000);
     if (stats.spends.reduce((a, s) => a + s.amount, 0) + net > cfg.maxSpendPerMin && stats.spends.length) { phase = 'waiting: spend limit'; await pause('poll'); return 'ok'; }
     // Build every type of the plan (in random order), then demolish what was built.
-    const t0 = hr(); acc.wait = 0; let rttSum = 0;
+    const t0 = hr(); acc.wait = 0; let rttSum = 0, buildWait = 0;
     phase = 'building';
     for (const u of units) if (!stats.types.includes(u.b)) stats.types.push(u.b);
     inFlight = { action: 'build', units: [], at: Date.now() }; save();
@@ -430,7 +453,9 @@
       const base = rb.cat.buildings[u.b], owned = rb.owned[u.b] ?? 0;
       inFlight.units.push({ b: u.b, n: u.n }); save();   // from here on a reload or error counts these as possibly built
       const d = send({ type: 'BuyBuilding', building: u.b, amount: u.n, region: REGION });
-      const r1 = await waitConfirm((r) => (r.pool[u.b] ?? 0) >= (rb.pool[u.b] ?? 0) + u.n, d, readPool);
+      const bw0 = hr();
+      const r1 = await waitConfirm((r) => (r.pool[u.b] ?? 0) >= (rb.pool[u.b] ?? 0) + u.n, d, readPool, cfg.timeoutMs + Math.ceil((u.n * u.build + rb.queue.build) * 1500));
+      buildWait += hr() - bw0;   // the build itself is waited for, not overhead: the round trip above does not include it
       if (!r1) {
         const got = Math.max(0, (readPool(true)?.pool[u.b] ?? 0) - (rb.pool[u.b] ?? 0));
         if (got > 0) { accountBuild(u, got, owned, base); built.push({ u, got, base }); }
@@ -440,7 +465,7 @@
         halted = `build of ${u.n} ${u.name} not confirmed (${got} appeared)`;
         break;
       }
-      const rtt = core.lastRtt(); rttSum += rtt ?? 0;
+      const rtt = core.lastRtt();   // the Buy's round trip sits inside buildWait, so it is not added to rttSum again
       const gross = accountBuild(u, u.n, owned, base);
       built.push({ u, got: u.n, base });
       holding(u.b, u.n);
@@ -455,28 +480,22 @@
     inFlight = { action: 'demolish', units: [], at: Date.now() }; save();
     if (built.length) { phase = 'demolishing'; await pause('step'); }
     for (const x of shuffle(built)) {
-      let done = false;
-      for (let attempt = 0; attempt < 2 && !done; attempt++) {
-        // A Demolish that timed out may still be applied: give it time to land before looking again and retrying.
-        if (attempt) await sleep(Math.max(graceMs, 4 * (core.measure.get('rtt').p90 ?? 0)));
-        await jitter();
-        const r0 = readPool(true);
-        if (!r0) throw new ConnError('game state not found');
-        // Never more than the farm holds: a first attempt that the server applied late must not make the retry eat your own buildings.
-        const amt = Math.min(x.got, (r0.pool[x.u.b] ?? 0) - (stats.baseline?.[x.u.b] ?? 0));
-        if (amt <= 0) done = true;
-        else {
-          const d = send({ type: 'DemolishBuilding', building: x.u.b, amount: amt, region: REGION });
-          done = !!(await waitConfirm((r) => (r.pool[x.u.b] ?? 0) <= (r0.pool[x.u.b] ?? 0) - amt, d, readPool));
-        }
-        if (done) {
-          holding(x.u.b, -x.got); save();
-          if (amt > 0) rttSum += core.lastRtt() ?? 0;
-          const refund = Math.floor(x.base.cost / 2) * x.got;
-          stats.refunded += refund / 100; stats.byType[x.u.b].refunded += refund / 100; hist.cum.net -= refund;
-        }
+      // Rushed units leave at once for ceil(CD/2) CD each, while the stock covers them; the rest queue, and their refund
+      // comes when each one finishes.
+      const cdNow = readPool(true)?.cd ?? 0;
+      const rushN = Math.min(x.u.rush ?? 0, x.got, Math.floor(cdNow / Math.max(1, x.u.rushEach)));
+      const q = x.got > rushN ? await demolishUnits(x.u.b, x.got - rushN, 'DemolishBuilding') : { ok: true, rtt: 0 };
+      const r = rushN ? await demolishUnits(x.u.b, rushN, 'DemolishNow') : { ok: true, rtt: 0 };
+      if (!q.ok || !r.ok) throw new Error(`demolish of ${x.got} ${x.u.name} not confirmed`);
+      rttSum += q.rtt + r.rtt;
+      holding(x.u.b, -x.got); save();
+      const refund = Math.floor(x.base.cost / 2) * x.got;
+      stats.refunded += refund / 100; stats.byType[x.u.b].refunded += refund / 100; hist.cum.net -= refund;
+      if (rushN) {
+        const spent = rushN * x.u.rushEach;
+        stats.rushCd = (stats.rushCd ?? 0) + spent;
+        hist.cum.farmCd -= spent;   // CD spent on rushing is not farm output: keep the organic CD slope clean
       }
-      if (!done) throw new Error(`demolish of ${x.got} ${x.u.name} not confirmed`);
     }
     inFlight = null;
     if (halted && halted !== 'stopped') { phase = 'waiting: ' + halted; core.ledger.add('CD', 'info', 'Auto: ' + halted); }
@@ -487,7 +506,7 @@
       stats.cycles++; sample();
       const wall = hr() - t0;
       core.measure.get('cycle').add(wall);
-      core.measure.get('overhead').add(Math.max(0, wall - acc.wait - rttSum));
+      core.measure.get('overhead').add(Math.max(0, wall - acc.wait - rttSum - buildWait));
       const r2 = readPool();
       stats.last = `#${stats.cycles} | ${built.map((x) => x.got + ' ' + x.u.name).join(' + ')} | CD ${fmt(r2?.cd ?? 0)} (+${fmt(stats.built)}) | $${fmt((r2?.money ?? 0) / 100)} | $/CD ${perCd()}`;
       console.log('[cdFarm] ' + stats.last);

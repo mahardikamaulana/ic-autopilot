@@ -240,7 +240,7 @@ const fastPacer = () => ({ beforeCommand: async () => { }, noteConfirm() { }, no
     const old = ruleOf({});
     assert.ok(old.E[3].ok, old.E[3].why);
     assert.match(old.E[3].why, /T_wall [\d.]+ h from the model CD rate/);
-    // a measured CD rate at half the model's: T_wall doubles, the rule reaches further, E4 does not hold. It counts once CD Farm has
+    // a measured CD rate at half the model's: T_wall doubles. The 360-acre cap binds at both, so E4 holds at both (wiki 4.3). It counts once CD Farm has
     // measured for 30 min without a gap, as the mean of the last 30 min, so a short dip moves the land rule little.
     const mkMem = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set: (p) => (m[n] = { ...(m[n] ?? {}), ...p }) }); };
     const mm = mkMem(), half = model.cdPerHour / 2, t0 = 1.8e12;
@@ -255,7 +255,7 @@ const fastPacer = () => ({ beforeCommand: async () => { }, noteConfirm() { }, no
     assert.strictEqual(at(40, half).rule.tWallFrom, 'model', 'a 9 min gap starts the 30 min again');
     assert.strictEqual(at(41, null).rule.tWallFrom, 'model', 'no rate: the model');
     assert.ok(Math.abs(slow.rule.tWall - 2 * model.tWall) < 0.01, slow.rule.tWall + ' vs ' + model.tWall);
-    assert.ok(!slow.E[3].ok && /from the measured CD rate/.test(slow.E[3].why), slow.E[3].why);
+    assert.ok(slow.E[3].ok && /from the measured CD rate/.test(slow.E[3].why), slow.E[3].why);
     assert.ok(ruleOf({ ladder: { rates: { cdh15: null } } }).rule.tWallFrom === 'model', 'no 15-min rate: the model');
     unload();
   });

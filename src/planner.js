@@ -33,6 +33,38 @@ try {
     return Math.max(1, cd);
   }
 
+  // Engine build and demolish times in seconds (checked in the sandbox on a Lumber Camp and a Mine): building takes 2 + B
+  // ticks and demolishing 20 + B ticks, one at a time per queue, where B = sum of build items x frame weight. A tick is 0.5 s.
+  const TICK_WEIGHT = { 'Wooden Frame': 2, 'Iron Frame': 4, 'Wired Frame': 8, 'Light Frame': 16, 'Machine Frame': 30, 'Automated Frame': 60, 'Smart Frame': 120 };
+  function secsOf(catalog, b) {
+    const C = normalize(catalog);
+    const bld = typeof b === 'object' ? b : C.buildings[b];
+    let B = 0;
+    for (const { item, amount } of bld?.build_items ?? []) B += amount * (TICK_WEIGHT[C.items[item]?.name] ?? 0);
+    return { build: (2 + B) / 2, demolish: (20 + B) / 2 };
+  }
+  // What the build and demolish queues hold. The price counts every queued build and demolition (all regions). The acres
+  // count too: a queued build reserves its acres when ordered, and a queued demolition keeps them until it finishes.
+  function queued({ st, catalog, region = 0 }) {
+    const C = normalize(catalog);
+    const out = { owned: {}, acres: 0, demolishAcres: 0, build: 0, demolish: 0 };
+    for (const x of st.construction?.builds ?? []) {
+      out.owned[x.building] = (out.owned[x.building] ?? 0) + x.count;
+      out.build += secsOf(C, x.building).build * x.count;
+      if ((x.region ?? region) === region) out.acres += C.buildings[x.building].acres * x.count;
+    }
+    for (const x of st.construction?.demolitions ?? []) {
+      out.owned[x.building] = (out.owned[x.building] ?? 0) + x.count;
+      out.demolish += secsOf(C, x.building).demolish * x.count;
+      if ((x.region ?? region) === region) { out.acres += C.buildings[x.building].acres * x.count; out.demolishAcres += C.buildings[x.building].acres * x.count; }
+    }
+    // The head of each queue has progressed: the engine counts its progress in ticks (see ON in the client), so the seconds
+    // left are the queue's full length less that progress.
+    out.build = Math.max(0, out.build - (st.construction?.build_progress ?? 0) / 2);
+    out.demolish = Math.max(0, out.demolish - (st.construction?.demolish_progress ?? 0) / 2);
+    return out;
+  }
+
   const price = (baseCents, owned, i) => Math.floor(baseCents * (20 + owned + i) / 20);
   function batchCost(baseCents, owned, n) {
     let s = 0;
@@ -93,45 +125,70 @@ try {
         const r = itemCheck(input, item, amount);
         if (!r.ok) { dropped = 'item:' + item + ':' + r.reason; break; }
       }
-      return { b: bld.id, name: bld.name, cd: cdOf(C, bld), acres: bld.acres, base: bld.cost, items, matCents, dropped };
+    const cd = cdOf(C, bld), sec = secsOf(C, bld);
+    return { b: bld.id, name: bld.name, cd, acres: bld.acres, base: bld.cost, items, matCents, dropped, build: sec.build, demo: sec.demolish, rush: Math.ceil(cd / 2) };
     });
   }
 
   function plan(input) {
     const C = normalize(input.catalog);
     const { money = 0, floor = 0, R = Infinity, T = 0, TperType = 0, I = 0, minUnits = 1, maxBatch = 100, maxTypes = 2 } = input;
+    const queueNow = input.queue ?? {};   // seconds already queued: { build, demolish }
+    const cdHave = input.cdHave ?? 0;     // CD in stock: what rushed demolitions may spend
+    const backlog0 = queueNow.demolish ?? 0;   // demolish seconds queued before this plan (they drain during this cycle)
     const cands = candidates(input);
     const live = cands.filter((c) => !c.dropped);
     const owned = (b) => input.owned?.[b] ?? 0;
-    const n = {}, order = [], barred = new Set();
-    let acresLeft = input.usableAcres ?? 0, gross = 0, cdTotal = 0, units = 0, binding = null, blocked = null;
+    const n = {}, rushN = {}, order = [], barred = new Set();
+    let acresLeft = input.usableAcres ?? 0, gross = 0, cdGross = 0, rushCd = 0, units = 0, binding = null, blocked = null;
+    let buildSec = queueNow.build ?? 0, demoSec = queueNow.demolish ?? 0;
     const Reff = Math.min(R, 1e9);
     const notes = [];
+    // A cycle is the measured overhead (T, plus a step per extra type) and the builds it waits for, one after the other. The
+    // demolish queue runs beside the cycle, so the cycle is at least as long as the queue it receives (else the queue grows).
+    const period = (types, bSec, dSec) => Math.max(T + TperType * Math.max(0, types - 1) + bSec, dSec);
 
     while (true) {
-      if (cdTotal >= R) { binding = 'target'; break; }
+      if (cdGross - rushCd >= R) { binding = 'target'; break; }
       if (units >= maxBatch) { binding = 'batch'; break; }
+      const P0 = period(order.length, buildSec, demoSec - backlog0);
       const steps = live.map((c) => {
         const k = n[c.b] ?? 0;
+        const types = order.length + (k ? 0 : 1);
         const unitGross = price(c.base, owned(c.b), k);
+        const bSec = buildSec + c.build;
         const unitCost = unitGross - Math.floor(c.base / 2) + c.matCents;
-        let block = null;
+        // Route. A unit queues its demolish while the backlog from earlier cycles drains within this cycle (it is gone before
+        // this cycle's demolishes start) and this batch's own demolishes fit in one cycle (they drain in the next; the first unit
+        // always fits). Otherwise the unit is rushed (demolished at once for ceil(CD/2) CD) when the cycle time it saves is worth
+        // more than that CD at the unit's cash per CD and the income I, or it waits for the queue.
+        const Pq = period(types, bSec, 0);
+        const batchNext = demoSec - backlog0 + c.demo;
+        const fitsQueue = backlog0 <= Pq && batchNext <= Math.max(Pq, c.demo);
+        let route = 'queue', block = null, P1 = period(types, bSec, batchNext);
+        if (!fitsQueue) {
+          const P1rush = period(types, bSec, demoSec - backlog0);
+          const affordable = 2 * c.rush <= c.cd && cdHave - rushCd >= c.rush;
+          if (affordable && I / 3600 * (P1 - P1rush) >= c.rush * unitCost / c.cd) { route = 'rush'; P1 = P1rush; }
+          else block = 'queue';
+        }
+        const rushNow = route === 'rush' ? c.rush : 0;
         if (c.acres > acresLeft) block = 'acres';
         else if (money - (gross + unitGross) < floor) block = 'money';
         else if (c.items.some(({ item, amount }) => !itemCheck(input, item, (k + 1) * amount).ok)) block = 'items';
         else if (!k && order.length >= maxTypes) block = 'types';
         else if (!k && barred.has(c.b)) block = 'time';
-        return { c, k, unitGross, unitCost, perCd: unitCost / c.cd, block };
-      }).sort((a, b) => a.perCd - b.perCd || a.c.b - b.c.b);
+        const netCd = c.cd - rushNow, perCd = unitCost / netCd;
+        // Ranked by cash per net CD plus the time it costs per net CD (the cycle the unit lengthens, valued at the income I).
+        // At I = 0 (Thrifty) this is the cheapest cash per CD; a high I favours the type that makes CD fastest per second.
+        return { c, k, types, route, rushNow, unitGross, unitCost, netCd, P1, perCd, score: perCd + I / 3600 * P1 / netCd, block };
+      }).sort((a, b) => a.score - b.score || a.c.b - b.c.b);
       const best = steps.find((s) => !s.block);
       if (!best) { blocked = steps[0] ?? null; binding = blocked?.block ?? null; break; }
-      const types = order.length + (best.k ? 0 : 1);
-      // Time value of shortening every remaining cycle by growing the batch from N to N + cd.
-      const N = cdTotal;
-      // Cycle time is T plus a step per extra type; a new type lengthens every cycle, so compare the real before and after.
-      const T0 = T + TperType * Math.max(0, order.length - 1), T1 = T + TperType * (types - 1);
+      // Time value of shortening every remaining cycle by growing the batch from N to N + this unit's net CD.
+      const N = cdGross - rushCd;
       const worth = N === 0 || units < minUnits
-        || best.unitCost <= I / 3600 * Reff * (T0 / N - T1 / (N + best.c.cd));
+        || best.unitCost <= I / 3600 * Reff * (P0 / N - best.P1 / (N + best.netCd));
       if (!worth) {
         // A new type pays an extra step on every cycle; the next unit of a type already in the plan does not, so try that instead.
         if (!best.k) { barred.add(best.c.b); continue; }
@@ -139,18 +196,29 @@ try {
       }
       if (!best.k) order.push(best.c);
       n[best.c.b] = best.k + 1;
-      gross += best.unitGross; cdTotal += best.c.cd; acresLeft -= best.c.acres; units++;
+      if (best.route === 'rush') { rushN[best.c.b] = (rushN[best.c.b] ?? 0) + 1; rushCd += best.rushNow; }
+      else demoSec += best.c.demo;
+      buildSec += best.c.build;
+      gross += best.unitGross; cdGross += best.c.cd; acresLeft -= best.c.acres; units++;
     }
-
+    // Final pass: a rushed unit goes back into the queue when it fits the same two limits in the finished cycle.
+    const Pb = period(order.length, buildSec, 0);
+    for (const c of order) {
+      while ((rushN[c.b] ?? 0) > 0 && backlog0 <= Pb && demoSec - backlog0 + c.demo <= Math.max(Pb, c.demo)) {
+        rushN[c.b] -= 1; rushCd -= c.rush; demoSec += c.demo;
+      }
+    }
     // No live candidate at all: say whether acres or items emptied the list.
     if (!live.length) binding = cands.some((c) => c.dropped === 'no-acres') ? 'acres' : cands.some((c) => c.dropped?.startsWith('item:')) ? 'items' : null;
 
     const out = order.map((c) => {
       const g = batchCost(c.base, owned(c.b), n[c.b]);
-      return { b: c.b, name: c.name, n: n[c.b], cd: c.cd, grossCents: g, netCents: g - n[c.b] * Math.floor(c.base / 2), matCents: n[c.b] * c.matCents };
+      return { b: c.b, name: c.name, n: n[c.b], rush: rushN[c.b] ?? 0, rushEach: c.rush, cd: c.cd, build: c.build, demolish: c.demo,
+        grossCents: g, netCents: g - n[c.b] * Math.floor(c.base / 2), matCents: n[c.b] * c.matCents };
     });
     const netCents = out.reduce((a, u) => a + u.netCents, 0);
     const matCents = out.reduce((a, u) => a + u.matCents, 0);
+    const cdTotal = cdGross - rushCd;   // net: a rushed demolish spends CD
 
     let wait = null;
     if (!units) {
@@ -158,6 +226,7 @@ try {
         const shortfallCents = floor + blocked.unitGross - money;
         wait = { gate: 'G5', reason: 'need ' + dollars(shortfallCents) + ' more above the floor', shortfallCents };
       } else if (binding === 'acres') wait = { gate: 'G5', reason: 'no free acres above the spare' };
+      else if (binding === 'queue') wait = { gate: 'G5', reason: 'demolish queue ' + Math.round(queueNow.demolish ?? 0) + ' s deep; waiting for it to drain' };
       else if (binding === 'items') {
         const why = cands.filter((c) => c.dropped?.startsWith('item:')).map((c) => {
           const [, item, reason] = c.dropped.split(':');
@@ -170,7 +239,7 @@ try {
     if (binding) notes.push('bound by ' + binding);
 
     return {
-      units: out, cdTotal, grossCents: gross, netCents,
+      units: out, cdTotal, cdGross, rushCd, grossCents: gross, netCents,
       perCdCents: cdTotal ? Math.round((netCents + matCents) / cdTotal) : 0,
       wait, binding, candidates: cands, notes,
     };
@@ -223,7 +292,7 @@ try {
     return (h >>> 0).toString(36);
   }
 
-  core.planner = { normalize, cdOf, price, batchCost, acrePrice, landCost, itemValues, surplus, itemOk, candidates, plan, gates, land, signature, FRAME_CD };
+  core.planner = { normalize, cdOf, secsOf, queued, price, batchCost, acrePrice, landCost, itemValues, surplus, itemOk, candidates, plan, gates, land, signature, FRAME_CD };
 })();
 } catch (e) { console.error('[IdleCorp] planner failed to load:', e); }
 // @@END planner

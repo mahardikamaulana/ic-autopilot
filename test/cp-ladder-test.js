@@ -74,9 +74,9 @@ async function sync(cp, st, ctx) { for (let i = 0; i < 4; i++) { const a = act(d
     const d = dec(cp, st, ctx);
     const a = act(d, /^ladder:tune/);
     assert.ok(a, lwait(d));
-    assert.strictEqual(d.readouts.ladder.batch, 16, 'wiki 11.4: $350k/h -> batch 16');
+    assert.strictEqual(d.readouts.ladder.batch, 1, 'capped at 360 CD/h: batch 1 at $350k/h');
     await a.run();
-    assert.deepStrictEqual(cf.calls[0], { land: 'off', pace: 'fast', reserveAcres: 0, batch: 16, maxTypes: 1 }, 'Stage D ladder: pace fast (plan step 1); autoStart already matches: not sent');
+    assert.deepStrictEqual(cf.calls[0], { land: 'off', pace: 'fast', reserveAcres: 0, batch: 1, maxTypes: 1 }, 'Stage D ladder: pace fast (plan step 1); autoStart already matches: not sent');
     assert.ok(!act(dec(cp, st, ctx), /^ladder:tune/), 'in sync: nothing to apply');
     cf.cfg.land = 'plan';
     const a2 = act(dec(cp, st, ctx), /^ladder:tune/);
@@ -192,9 +192,9 @@ async function sync(cp, st, ctx) { for (let i = 0; i < 4; i++) { const a = act(d
     assert.ok(!act(d1, /^ladder:tune/) || !act(d1, /^ladder:tune/).text.includes('autoStart'), 'not armed while a gate fails');
     const tightSt = stD();
     const v = cp._view(tightSt, cat, deals);
-    tightSt.land_bought[0] -= v.freeAcres - 5;           // 5 free acres
+    tightSt.land_bought[0] -= v.freeAcres;               // 0 free acres
     const d2 = dec(cp, tightSt, ctx);
-    assert.match(lwait(d2), /free acres 5 < batch \d+ \+ spare 0/);
+    assert.match(lwait(d2), /free acres 0 < batch \d+ \+ spare 0/);
     assert.strictEqual(d2.cdNeed, false);
     const d3 = dec(cp, stD(), ctx);
     assert.strictEqual(d3.cdNeed.name, 'Oil Rig');
@@ -212,7 +212,7 @@ async function sync(cp, st, ctx) { for (let i = 0; i < 4; i++) { const a = act(d
     assert.ok(!run([u('Farm', 16)]).alerts.length);
     assert.ok(!run([u('Farm', 12), u('Lumber Camp', 4)]).alerts.length, 'Farm + 1 type is fine');
     const r = run([u('Farm', 16)], { cdh15: 9600, cdhAll: 8000 });
-    assert.deepStrictEqual(r.tWallHours.measured, 78.6);
+    assert.deepStrictEqual(r.tWallHours.measured, +(505000 / 9600).toFixed(1));   // WALL_CD / the fixture cdh15
     assert.strictEqual(r.cdPerHour.measured, 9600);
     assert.ok(r.tWallHours.model > 0 && r.cdPerHour.model > 0, JSON.stringify(r));
     assert.strictEqual(run([u('Farm', 16)], { cdh15: null, cdhAll: 6000 }).cdPerHour.measured, 6000, 'falls back to the whole-run rate');
@@ -319,9 +319,9 @@ async function sync(cp, st, ctx) { for (let i = 0; i < 4; i++) { const a = act(d
     const d = dec(cp, stD(), ctx);
     assert.ok(d.readouts.ladder.alerts.some((x) => /did not take land off/.test(x)));
     // batch moves by 2 or more only
-    const cf2 = fakeFarm({ cfg: { pace: 'fast', reserveAcres: 0, maxTypes: 1, land: 'off', batch: 16 }, ev: { idle: false, income: 36000000, plan: { units: [] } } });
+    const cf2 = fakeFarm({ cfg: { pace: 'fast', reserveAcres: 0, maxTypes: 1, land: 'off', batch: 1 }, ev: { idle: false, income: 36000000, plan: { units: [] } } });
     const d2 = dec(cp, stD(), F.ctxOf({ retailOk: true, mods: { cdFarm: cf2 } }));
-    assert.ok(!act(d2, /^ladder:tune/), 'batch ' + d2.readouts.ladder.batch + ' vs 16: within 1, not sent');
+    assert.ok(!act(d2, /^ladder:tune/), 'batch ' + d2.readouts.ladder.batch + ' vs 1: within 1, not sent');
     F.unload();
   });
 

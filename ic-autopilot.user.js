@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IC Autopilot
 // @namespace    idlecorp-toolkit
-// @version      2.8.7
+// @version      2.8.8
 // @author       XPARAD0X
 // @description  Early-game Autopilot, CD Farm (Construction Data by building and demolishing buildings; Auto picks the cheapest source itself), Lab runner (keeps the Manufacturing Labs researching), Auto ship (an "Auto ship" button on every distributor bid) and Auto utilities (an "Auto" switch that keeps the power and water subscriptions at what the groups need) for IdleCorp, each with a panel, menu or switch in the game UI.
 // @homepageURL  https://github.com/mahardikamaulana/ic-autopilot
@@ -380,14 +380,14 @@ body:has(.shell)>.idc-panel{--idc-bottom:calc(var(--chrome-h,120px) + 8px)}
 .idc-group{display:grid;gap:10px;min-width:0}
 .idc-group+.idc-group{padding-top:14px;border-top:1px solid var(--border,rgba(255,255,255,.09))}
 .idc-gh{margin:0;font-size:10.5px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--idc-muted)}
-.idc-sub>summary,.idc-sec>summary{cursor:pointer;color:var(--ink-2,#b6b6ba);font-size:12.5px;list-style:none;display:flex;justify-content:space-between}
-.idc-sub>summary::-webkit-details-marker,.idc-sec>summary::-webkit-details-marker{display:none}
-.idc-sub>summary::after,.idc-sec>summary::after{content:"›";display:inline-block;transition:transform .15s}
-.idc-sub[open]>summary::after,.idc-sec[open]>summary::after{transform:rotate(90deg)}
-.idc-sub[open]>summary,.idc-sec[open]>summary{margin-bottom:12px}
-.idc-sub>.idc-group{gap:12px}
+.idc-sec>summary{cursor:pointer;color:var(--ink-2,#b6b6ba);font-size:12.5px;list-style:none;display:flex;justify-content:space-between}
+.idc-sec>summary::-webkit-details-marker{display:none}
+.idc-sec>summary::after{content:"›";display:inline-block;transition:transform .15s}
+.idc-sec[open]>summary::after{transform:rotate(90deg)}
+.idc-sec[open]>summary{margin-bottom:12px}
+.idc-sec>.idc-group{gap:12px}
 fieldset.idc-form{border:0;margin:0;padding:0;min-width:0;display:grid;gap:14px}
-fieldset.idc-form:disabled .idc-field,fieldset.idc-form:disabled .idc-check,fieldset.idc-form:disabled .idc-sub{opacity:.6}
+fieldset.idc-form:disabled .idc-field,fieldset.idc-form:disabled .idc-check,fieldset.idc-form:disabled .idc-sec{opacity:.6}
 .idc-lock{display:flex;gap:8px;align-items:center;padding:8px 10px;border-radius:8px;background:var(--surface-2,#1d1d20);font-size:12px;color:var(--ink-2,#b6b6ba)}
 .idc-field{display:grid;grid-template-columns:minmax(0,1fr);gap:6px;min-width:0}
 .idc-fl{display:flex;align-items:center;justify-content:space-between;gap:6px;min-height:18px}
@@ -516,10 +516,9 @@ body:has(>.idc-docked:not(.idc-ghost)) .idc-toasts{right:calc(var(--idc-dock,360
     const box = h('div', { class: 'idc-inp' }, ...(prefix ? [h('span', {}, prefix)] : []), input, ...(suffix ? [h('span', {}, suffix)] : []));
     return { input, box };
   }
-  function check(input, text, hint) { return h('label', { class: 'idc-check' }, input, h('span', {}, text, ...(hint ? [h('small', {}, hint)] : []))); }
   // Segmented radio group with roving tabindex and arrow keys.
   function seg(opts, cur, onPick, label = '') {
-    const btns = opts.map((o) => h('button', { type: 'button', role: 'radio', onclick: () => onPick(o.id) }, o.label));
+    const btns = opts.map((o) => h('button', { type: 'button', role: 'radio', onclick: () => onPick(o.id), ...(o.full ? { title: o.full, 'aria-label': o.full } : {}) }, o.label));
     const el = h('div', { class: 'idc-seg', role: 'radiogroup', 'aria-label': label }, ...btns);
     el.addEventListener('keydown', (e) => {
       const d = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
@@ -767,6 +766,224 @@ body:has(>.idc-docked:not(.idc-ghost)) .idc-toasts{right:calc(var(--idc-dock,360
   }
 
 // continues the core closure from core-2.js (same try / IIFE)
+// ---- shared panel parts ------------------------------------------------------------------------------------------
+// Every floating panel (Autopilot, CD Farm, Lab) is built from these, so the layout and the controls match:
+// status (hero, rows, state line, banners), settings (amount, toggle, choice and quick-pick fields, Advanced, Backup),
+// a footer (run mode, plan sentence, Cancel and the main action) and a log tab. A module keeps its own state, rules
+// and wording; it does not build these controls itself. Nothing here touches the DOM until a builder is called.
+
+const fmt = (x) => Number(x).toLocaleString('en-US', { maximumFractionDigits: 2 });
+const short = (x) => (x >= 1e6 ? `${+(x / 1e6).toFixed(2)}M` : x >= 1e3 ? `${+(x / 1e3).toFixed(1)}k` : String(Math.round(x)));
+// "100k", "1.5m", "$100,000" -> whole number, or null when it is not an amount.
+function parseAmount(s) {
+  const m = String(s).trim().replace(/[$,\s_]/g, '').match(/^(\d*\.?\d+)([kmb])?$/i);
+  if (!m) return null;
+  return Math.round(Number(m[1]) * ({ k: 1e3, m: 1e6, b: 1e9 }[m[2]?.toLowerCase()] || 1));
+}
+const setText = (el, t) => { if (el.textContent !== t) el.textContent = t; };
+const setOn = (b, on) => { b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on)); };
+// A message under a field or block: { level: 'error' | 'warn' | '', text }.
+function setMsg(el, m) { el.hidden = !m; el.className = 'idc-msg ' + (m?.level || ''); el.textContent = m?.text || ''; }
+// The status dot: tone is '' | 'run' | 'wait' | 'err'.
+const setTone = (el, tone) => { el.className = 'idc-dot ' + tone; };
+
+// ---- status tab ----
+// Hero: a label, the big figure with a short qualifier, and a progress bar (pct 0-100).
+function hero(label) {
+  const big = h('span', { class: 'idc-big' }), sub = h('span', { class: 'idc-label' }), bar = h('i');
+  return {
+    el: h('div', {}, h('div', { class: 'idc-label' }, label), h('div', { class: 'idc-hero' }, big, sub), h('div', { class: 'idc-bar' }, bar)),
+    set(b, s, pct) { setText(big, b); setText(sub, s); bar.style.width = pct + '%'; },
+  };
+}
+// Key / value rows: set([[label, value], ...]).
+function rowList() {
+  const el = h('div', { class: 'idc-rows' });
+  return { el, set(pairs) { el.replaceChildren(...pairs.map(([k, v]) => row(k, v))); } };
+}
+// The one-line state under the rows: a dot and a sentence.
+function stateLine() {
+  const dot = h('span', { class: 'idc-dot' }), text = h('span');
+  return { el: h('div', { class: 'idc-state' }, dot, text), set(tone, msg) { setTone(dot, tone); setText(text, msg); } };
+}
+// A banner: a sentence and an optional button. Hidden when the sentence is empty.
+function banner(onButton, label = '') {
+  const text = h('span');
+  const btn = h('button', { type: 'button', onclick: () => onButton?.() }, label);
+  const el = h('div', { class: 'idc-note', hidden: true }, text, btn);
+  return { el, set(msg, showBtn = !!onButton) { el.hidden = !msg; setText(text, msg || ''); btn.hidden = !showBtn; } };
+}
+// A collapsible block (Checklist, Advanced). onToggle(open) remembers the state.
+function disclosure(title, kids, { open = false, onToggle } = {}) {
+  const d = h('details', { class: 'idc-sec', open }, h('summary', {}, title), ...kids);
+  if (onToggle) d.addEventListener('toggle', () => onToggle(d.open));
+  return d;
+}
+
+// ---- settings fields ----
+// Amount or number text field. It checks every keystroke: a valid value is saved at once (set), an invalid one shows its
+// message and is not saved. Blur or Escape puts the saved value back. `issue` (from a plan check) shows a message too.
+// spec: { label, prefix, suffix, placeholder, extra: [el], parse(text) -> {v} | {err}, format(v) -> text, get(), set(v), def, redraw() }
+function amountField({ label, prefix = '', suffix, placeholder = '', extra = [], parse, format, get, set, def, redraw }) {
+  const { input, box } = inputBox({ label, prefix, suffix, placeholder });
+  const msg = h('div', { class: 'idc-msg', hidden: true });
+  const el = field(label, box, ...extra, msg);
+  let typed = '';   // the parse error of what is typed now
+  const revert = () => { typed = ''; input.value = format(get()); };
+  input.addEventListener('input', () => {
+    const p = parse(input.value);
+    if (p.err) { typed = p.err; redraw(); } else { typed = ''; set(p.v); }
+  });
+  input.addEventListener('blur', () => { revert(); redraw(); });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') input.blur();
+    if (e.key === 'Escape') { revert(); input.blur(); }
+  });
+  return {
+    el, input, box, msg,
+    get error() { return typed; },
+    // Returns true when the value differs from its default (the reset button shows then).
+    sync(issue) {
+      const m = typed ? { level: 'error', text: typed } : issue || null;
+      setMsg(msg, m); box.classList.toggle('bad', m?.level === 'error');
+      if (document.activeElement !== input) input.value = format(get());
+      const modified = !Object.is(get(), def);
+      setModified(el, modified, 'Reset to the default (' + (format(def) || placeholder || 'none') + ')', () => { typed = ''; set(def); });
+      return modified;
+    },
+  };
+}
+// On / off setting with its own line of help. Changed-from-default is marked on the label.
+function toggleField(text, hint, { get, set, def }) {
+  const input = h('input', { type: 'checkbox', onchange: () => set(input.checked) });
+  const small = h('small', {}, hint || '');
+  const el = h('label', { class: 'idc-check' }, input, h('span', {}, text, ...(hint ? [small] : [])));
+  return {
+    el, input, small,
+    sync() {
+      input.checked = !!get();
+      const m = !!get() !== !!def;
+      el.classList.toggle('mod', m); el.title = m ? 'Changed from the default' : '';
+      return m;
+    },
+  };
+}
+// One of several choices: a segmented control and a line describing the current one (describe(value), or text given to sync).
+function segField(label, opts, { get, set, def, describe = () => '' }) {
+  const sg = seg(opts, get, set, label);
+  const desc = h('div', { class: 'idc-desc' });
+  const el = field(label, sg.el, desc);
+  const defLabel = opts.find((o) => Object.is(o.id, def))?.label ?? '';
+  return {
+    el, seg: sg, desc,
+    sync(text) {
+      sg.sync();
+      setText(desc, text ?? describe(get()) ?? '');
+      const m = !Object.is(get(), def);
+      setModified(el, m, 'Reset to the default (' + defLabel + ')', () => set(def));
+      return m;
+    },
+  };
+}
+// Quick picks under a field ("50k", "100k", ...): the one that equals the value is on. items: [[value, label]].
+function quickPicks(onPick) {
+  const el = h('div', { class: 'idc-quicks' });
+  let key = '', btns = [];
+  return {
+    el,
+    sync(items, current) {
+      const k = items.map(([v, label]) => v + '=' + label).join('|');
+      if (k !== key) { key = k; btns = items.map(([v, label]) => h('button', { type: 'button', onclick: () => onPick(v) }, label)); el.replaceChildren(...btns); }
+      items.forEach(([v], i) => setOn(btns[i], Object.is(current, v)));
+    },
+  };
+}
+// Dry run / Live: the footer switch of every module that sends actions. Live needs the confirm step.
+const runModeSeg = (get, set) => seg([{ id: true, label: 'Dry run' }, { id: false, label: 'Live' }], get, set, 'Run mode');
+
+// ---- settings tab ----
+// Backup: export and import the toolkit's settings, and reset this module's to the defaults (the second click confirms).
+function backupGroup({ onExport, onImport, onReset }) {
+  const importBtn = h('button', { type: 'button', onclick: () => onImport() }, 'Import settings');
+  const resetBtn = confirmBtn('Reset settings', onReset, 'Click again to reset');
+  return {
+    el: group('Backup', h('div', { class: 'idc-tools' }, h('button', { type: 'button', onclick: () => onExport() }, 'Export settings'), importBtn, resetBtn)),
+    sync(locked) { importBtn.disabled = resetBtn.disabled = locked; },
+  };
+}
+// The settings tab: groups inside one fieldset (disabled while `locked`), a lock note with the caller's text, Advanced and Backup.
+// content is the tab's children; sync(locked) shows the lock note and disables the groups.
+function settingsTab({ groups, advanced = null, tail = [], backup, lockText }) {
+  const lockIcon = h('span', { 'aria-hidden': 'true' });
+  lockIcon.innerHTML = ICONS.lock;
+  const lock = h('div', { class: 'idc-lock', hidden: true }, lockIcon, lockText);
+  const fs = h('fieldset', { class: 'idc-form' }, ...groups, ...(advanced ? [advanced] : []), ...tail);
+  const bk = backupGroup(backup);
+  return {
+    content: [lock, fs, bk.el],
+    sync(locked) { lock.hidden = !locked; fs.disabled = locked; bk.sync(locked); },
+  };
+}
+
+// ---- footer ----
+// The plan sentence above the buttons: plain, hot (waiting for the confirm click) or bad (fix the settings first).
+function planLine() {
+  const el = h('div', { class: 'idc-plan' });
+  return {
+    el,
+    set(text, { hidden = false, hot = false, bad = false } = {}) {
+      el.hidden = hidden; el.classList.toggle('hot', hot); el.classList.toggle('bad', bad); setText(el, text);
+    },
+  };
+}
+// Footer: optional rows on top (run mode, a warning), the plan sentence, then Cancel and the main action.
+function footer({ top = [], main, alt }) {
+  const plan = planLine();
+  return { el: h('div', { class: 'idc-foot' }, ...top, plan.el, h('div', { class: 'idc-btns' }, alt, main)), plan };
+}
+
+// ---- log tab ----
+// The log view (this panel's lines when mod is set; all lines otherwise), Copy log (every module's lines), Clear log with
+// Undo (all modules' lines: only where the panel already offered it), and the shared shortcut note.
+function logTab({ mod = null, extra = [], clearable = true }) {
+  const logv = createLogView({ mod });
+  const clear = h('button', {
+    type: 'button', class: 'danger', onclick: () => {
+      const snap = ledgerApi.list();
+      ledgerApi.clear(); logv.render();
+      toast('Log cleared', { undo: () => { if (unloaded) return; ledgerApi.restore(snap); logv.render(); } });
+    }
+  }, 'Clear log');
+  const note = (mod ? 'Shows this panel\'s lines only; Copy log copies every module\'s lines. ' : '') + 'Alt+Shift+X stops Autopilot, CD Farm and the Lab runner from anywhere on the page.';
+  const tools = [h('button', { type: 'button', onclick: () => ledgerApi.copy() }, 'Copy log'), ...(clearable ? [clear] : []), ...extra];
+  return {
+    content: [logv.el, h('div', { class: 'idc-tools' }, ...tools), h('div', { class: 'idc-desc' }, note)],
+    logv,
+  };
+}
+// Keeps the log tab in step with its panel: drawn and marked seen while open; other tabs show a badge for new problems.
+function syncLog(P, st, logv) {
+  if (st.tab === 'log' && !st.min) { logv.render(); logv.markSeen(); }
+  const unseen = st.tab === 'log' ? 0 : logv.unseen();
+  P.setTabBadge('log', unseen ? unseen + ' new problem' + (unseen > 1 ? 's' : '') : '', true);
+}
+// Reset a module's settings to the defaults; the toast's Undo puts back what was there.
+function resetSettings(name, { snapshot, reset, restore }) {
+  try {
+    const snap = snapshot();
+    reset();
+    toast(name + ' settings are back to their defaults', { undo: () => { if (unloaded) return; try { restore(snap); } catch (e) { toast(e.message, 'error'); } } });
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+const ui = {
+  ensureStyle, ICONS, group, field, inputBox, createPanel, createChrome, createLogView, togglePanel,
+  fmt, short, parseAmount, setOn, setMsg, setTone,
+  hero, rowList, stateLine, banner, disclosure,
+  amountField, toggleField, segField, quickPicks, runModeSeg,
+  settingsTab, planLine, footer, logTab, syncLog, resetSettings,
+};
+// continues the core closure from core-2.js (same try / IIFE)
   // ---- reserves: what each spending module keeps back, shared by CD Farm Auto --------------------------------------
   // A provider is { reserve(): { moneyFloor (cents), items: {id: n}, nextTech, phase } | null, busy(): bool, hold?(who): Promise, release?(who) }.
   // Autopilot registers itself; Core plan registers its own. CD Farm reads the merged view instead of asking Autopilot alone:
@@ -809,7 +1026,6 @@ body:has(>.idc-docked:not(.idc-ghost)) .idc-toasts{right:calc(var(--idc-dock,360
     smeltX3: '0,0:123:1 0,1:127:1 0,2:123:1 0,3:123:0 1,0:113:0 1,2:123:3 1,3:126:0 2,3:123:0 3,0:123:0 3,2:123:0 3,3:126:0 4,0:123:0 4,1:113:0 4,3:123:0 5,0:123:0 5,3:123:0 6,0:123:0 6,1:123:0 6,2:113:0 7,0:123:0 7,1:123:0 8,0:123:0 8,1:123:0 8,2:123:0 9,0:114:0 9,1:114:0 9,2:114:0',
   });
 
-  const ui = { ensureStyle, ICONS, row, group, field, setModified, inputBox, check, seg, confirmBtn, createPanel, createChrome, createLogView, togglePanel };
 
   const titleTimer = HAS_DOM ? setInterval(applyTitle, 2000) : 0;
   addEventListener?.('pagehide', flushLedger);
@@ -1064,6 +1280,38 @@ try {
     return Math.max(1, cd);
   }
 
+  // Engine build and demolish times in seconds (checked in the sandbox on a Lumber Camp and a Mine): building takes 2 + B
+  // ticks and demolishing 20 + B ticks, one at a time per queue, where B = sum of build items x frame weight. A tick is 0.5 s.
+  const TICK_WEIGHT = { 'Wooden Frame': 2, 'Iron Frame': 4, 'Wired Frame': 8, 'Light Frame': 16, 'Machine Frame': 30, 'Automated Frame': 60, 'Smart Frame': 120 };
+  function secsOf(catalog, b) {
+    const C = normalize(catalog);
+    const bld = typeof b === 'object' ? b : C.buildings[b];
+    let B = 0;
+    for (const { item, amount } of bld?.build_items ?? []) B += amount * (TICK_WEIGHT[C.items[item]?.name] ?? 0);
+    return { build: (2 + B) / 2, demolish: (20 + B) / 2 };
+  }
+  // What the build and demolish queues hold. The price counts every queued build and demolition (all regions). The acres
+  // count too: a queued build reserves its acres when ordered, and a queued demolition keeps them until it finishes.
+  function queued({ st, catalog, region = 0 }) {
+    const C = normalize(catalog);
+    const out = { owned: {}, acres: 0, demolishAcres: 0, build: 0, demolish: 0 };
+    for (const x of st.construction?.builds ?? []) {
+      out.owned[x.building] = (out.owned[x.building] ?? 0) + x.count;
+      out.build += secsOf(C, x.building).build * x.count;
+      if ((x.region ?? region) === region) out.acres += C.buildings[x.building].acres * x.count;
+    }
+    for (const x of st.construction?.demolitions ?? []) {
+      out.owned[x.building] = (out.owned[x.building] ?? 0) + x.count;
+      out.demolish += secsOf(C, x.building).demolish * x.count;
+      if ((x.region ?? region) === region) { out.acres += C.buildings[x.building].acres * x.count; out.demolishAcres += C.buildings[x.building].acres * x.count; }
+    }
+    // The head of each queue has progressed: the engine counts its progress in ticks (see ON in the client), so the seconds
+    // left are the queue's full length less that progress.
+    out.build = Math.max(0, out.build - (st.construction?.build_progress ?? 0) / 2);
+    out.demolish = Math.max(0, out.demolish - (st.construction?.demolish_progress ?? 0) / 2);
+    return out;
+  }
+
   const price = (baseCents, owned, i) => Math.floor(baseCents * (20 + owned + i) / 20);
   function batchCost(baseCents, owned, n) {
     let s = 0;
@@ -1124,45 +1372,70 @@ try {
         const r = itemCheck(input, item, amount);
         if (!r.ok) { dropped = 'item:' + item + ':' + r.reason; break; }
       }
-      return { b: bld.id, name: bld.name, cd: cdOf(C, bld), acres: bld.acres, base: bld.cost, items, matCents, dropped };
+    const cd = cdOf(C, bld), sec = secsOf(C, bld);
+    return { b: bld.id, name: bld.name, cd, acres: bld.acres, base: bld.cost, items, matCents, dropped, build: sec.build, demo: sec.demolish, rush: Math.ceil(cd / 2) };
     });
   }
 
   function plan(input) {
     const C = normalize(input.catalog);
     const { money = 0, floor = 0, R = Infinity, T = 0, TperType = 0, I = 0, minUnits = 1, maxBatch = 100, maxTypes = 2 } = input;
+    const queueNow = input.queue ?? {};   // seconds already queued: { build, demolish }
+    const cdHave = input.cdHave ?? 0;     // CD in stock: what rushed demolitions may spend
+    const backlog0 = queueNow.demolish ?? 0;   // demolish seconds queued before this plan (they drain during this cycle)
     const cands = candidates(input);
     const live = cands.filter((c) => !c.dropped);
     const owned = (b) => input.owned?.[b] ?? 0;
-    const n = {}, order = [], barred = new Set();
-    let acresLeft = input.usableAcres ?? 0, gross = 0, cdTotal = 0, units = 0, binding = null, blocked = null;
+    const n = {}, rushN = {}, order = [], barred = new Set();
+    let acresLeft = input.usableAcres ?? 0, gross = 0, cdGross = 0, rushCd = 0, units = 0, binding = null, blocked = null;
+    let buildSec = queueNow.build ?? 0, demoSec = queueNow.demolish ?? 0;
     const Reff = Math.min(R, 1e9);
     const notes = [];
+    // A cycle is the measured overhead (T, plus a step per extra type) and the builds it waits for, one after the other. The
+    // demolish queue runs beside the cycle, so the cycle is at least as long as the queue it receives (else the queue grows).
+    const period = (types, bSec, dSec) => Math.max(T + TperType * Math.max(0, types - 1) + bSec, dSec);
 
     while (true) {
-      if (cdTotal >= R) { binding = 'target'; break; }
+      if (cdGross - rushCd >= R) { binding = 'target'; break; }
       if (units >= maxBatch) { binding = 'batch'; break; }
+      const P0 = period(order.length, buildSec, demoSec - backlog0);
       const steps = live.map((c) => {
         const k = n[c.b] ?? 0;
+        const types = order.length + (k ? 0 : 1);
         const unitGross = price(c.base, owned(c.b), k);
+        const bSec = buildSec + c.build;
         const unitCost = unitGross - Math.floor(c.base / 2) + c.matCents;
-        let block = null;
+        // Route. A unit queues its demolish while the backlog from earlier cycles drains within this cycle (it is gone before
+        // this cycle's demolishes start) and this batch's own demolishes fit in one cycle (they drain in the next; the first unit
+        // always fits). Otherwise the unit is rushed (demolished at once for ceil(CD/2) CD) when the cycle time it saves is worth
+        // more than that CD at the unit's cash per CD and the income I, or it waits for the queue.
+        const Pq = period(types, bSec, 0);
+        const batchNext = demoSec - backlog0 + c.demo;
+        const fitsQueue = backlog0 <= Pq && batchNext <= Math.max(Pq, c.demo);
+        let route = 'queue', block = null, P1 = period(types, bSec, batchNext);
+        if (!fitsQueue) {
+          const P1rush = period(types, bSec, demoSec - backlog0);
+          const affordable = 2 * c.rush <= c.cd && cdHave - rushCd >= c.rush;
+          if (affordable && I / 3600 * (P1 - P1rush) >= c.rush * unitCost / c.cd) { route = 'rush'; P1 = P1rush; }
+          else block = 'queue';
+        }
+        const rushNow = route === 'rush' ? c.rush : 0;
         if (c.acres > acresLeft) block = 'acres';
         else if (money - (gross + unitGross) < floor) block = 'money';
         else if (c.items.some(({ item, amount }) => !itemCheck(input, item, (k + 1) * amount).ok)) block = 'items';
         else if (!k && order.length >= maxTypes) block = 'types';
         else if (!k && barred.has(c.b)) block = 'time';
-        return { c, k, unitGross, unitCost, perCd: unitCost / c.cd, block };
-      }).sort((a, b) => a.perCd - b.perCd || a.c.b - b.c.b);
+        const netCd = c.cd - rushNow, perCd = unitCost / netCd;
+        // Ranked by cash per net CD plus the time it costs per net CD (the cycle the unit lengthens, valued at the income I).
+        // At I = 0 (Thrifty) this is the cheapest cash per CD; a high I favours the type that makes CD fastest per second.
+        return { c, k, types, route, rushNow, unitGross, unitCost, netCd, P1, perCd, score: perCd + I / 3600 * P1 / netCd, block };
+      }).sort((a, b) => a.score - b.score || a.c.b - b.c.b);
       const best = steps.find((s) => !s.block);
       if (!best) { blocked = steps[0] ?? null; binding = blocked?.block ?? null; break; }
-      const types = order.length + (best.k ? 0 : 1);
-      // Time value of shortening every remaining cycle by growing the batch from N to N + cd.
-      const N = cdTotal;
-      // Cycle time is T plus a step per extra type; a new type lengthens every cycle, so compare the real before and after.
-      const T0 = T + TperType * Math.max(0, order.length - 1), T1 = T + TperType * (types - 1);
+      // Time value of shortening every remaining cycle by growing the batch from N to N + this unit's net CD.
+      const N = cdGross - rushCd;
       const worth = N === 0 || units < minUnits
-        || best.unitCost <= I / 3600 * Reff * (T0 / N - T1 / (N + best.c.cd));
+        || best.unitCost <= I / 3600 * Reff * (P0 / N - best.P1 / (N + best.netCd));
       if (!worth) {
         // A new type pays an extra step on every cycle; the next unit of a type already in the plan does not, so try that instead.
         if (!best.k) { barred.add(best.c.b); continue; }
@@ -1170,18 +1443,29 @@ try {
       }
       if (!best.k) order.push(best.c);
       n[best.c.b] = best.k + 1;
-      gross += best.unitGross; cdTotal += best.c.cd; acresLeft -= best.c.acres; units++;
+      if (best.route === 'rush') { rushN[best.c.b] = (rushN[best.c.b] ?? 0) + 1; rushCd += best.rushNow; }
+      else demoSec += best.c.demo;
+      buildSec += best.c.build;
+      gross += best.unitGross; cdGross += best.c.cd; acresLeft -= best.c.acres; units++;
     }
-
+    // Final pass: a rushed unit goes back into the queue when it fits the same two limits in the finished cycle.
+    const Pb = period(order.length, buildSec, 0);
+    for (const c of order) {
+      while ((rushN[c.b] ?? 0) > 0 && backlog0 <= Pb && demoSec - backlog0 + c.demo <= Math.max(Pb, c.demo)) {
+        rushN[c.b] -= 1; rushCd -= c.rush; demoSec += c.demo;
+      }
+    }
     // No live candidate at all: say whether acres or items emptied the list.
     if (!live.length) binding = cands.some((c) => c.dropped === 'no-acres') ? 'acres' : cands.some((c) => c.dropped?.startsWith('item:')) ? 'items' : null;
 
     const out = order.map((c) => {
       const g = batchCost(c.base, owned(c.b), n[c.b]);
-      return { b: c.b, name: c.name, n: n[c.b], cd: c.cd, grossCents: g, netCents: g - n[c.b] * Math.floor(c.base / 2), matCents: n[c.b] * c.matCents };
+      return { b: c.b, name: c.name, n: n[c.b], rush: rushN[c.b] ?? 0, rushEach: c.rush, cd: c.cd, build: c.build, demolish: c.demo,
+        grossCents: g, netCents: g - n[c.b] * Math.floor(c.base / 2), matCents: n[c.b] * c.matCents };
     });
     const netCents = out.reduce((a, u) => a + u.netCents, 0);
     const matCents = out.reduce((a, u) => a + u.matCents, 0);
+    const cdTotal = cdGross - rushCd;   // net: a rushed demolish spends CD
 
     let wait = null;
     if (!units) {
@@ -1189,6 +1473,7 @@ try {
         const shortfallCents = floor + blocked.unitGross - money;
         wait = { gate: 'G5', reason: 'need ' + dollars(shortfallCents) + ' more above the floor', shortfallCents };
       } else if (binding === 'acres') wait = { gate: 'G5', reason: 'no free acres above the spare' };
+      else if (binding === 'queue') wait = { gate: 'G5', reason: 'demolish queue ' + Math.round(queueNow.demolish ?? 0) + ' s deep; waiting for it to drain' };
       else if (binding === 'items') {
         const why = cands.filter((c) => c.dropped?.startsWith('item:')).map((c) => {
           const [, item, reason] = c.dropped.split(':');
@@ -1201,7 +1486,7 @@ try {
     if (binding) notes.push('bound by ' + binding);
 
     return {
-      units: out, cdTotal, grossCents: gross, netCents,
+      units: out, cdTotal, cdGross, rushCd, grossCents: gross, netCents,
       perCdCents: cdTotal ? Math.round((netCents + matCents) / cdTotal) : 0,
       wait, binding, candidates: cands, notes,
     };
@@ -1254,7 +1539,7 @@ try {
     return (h >>> 0).toString(36);
   }
 
-  core.planner = { normalize, cdOf, price, batchCost, acrePrice, landCost, itemValues, surplus, itemOk, candidates, plan, gates, land, signature, FRAME_CD };
+  core.planner = { normalize, cdOf, secsOf, queued, price, batchCost, acrePrice, landCost, itemValues, surplus, itemOk, candidates, plan, gates, land, signature, FRAME_CD };
 })();
 } catch (e) { console.error('[IdleCorp] planner failed to load:', e); }
 // @@END planner
@@ -1277,7 +1562,7 @@ try {
   // Floors the plan assumes: Camp x3, Sawmill x2, Workshop v1 x5.
   const M = { camp: 3, sawmill: 2, workshop: 5 };
   const MIX = [0.4, 0.3, 0.3];                       // Bookshelf, Table, Chair share of planks
-  const RETAIL = 1.52, WALL_CD = 755000, BLD_ACRE = 1200, FIXED_EXTRA = 3 + 5;   // Retail Store 3 + Assembly Plant 5
+  const RETAIL = 1.52, WALL_CD = 505000, BLD_ACRE = 1200, FIXED_EXTRA = 3 + 5;   // Retail Store 3 + Assembly Plant 5; WALL_CD = Oil Rig 5,000 + Refinery 500,000 (2026-11-24 catalog)
   const FURNITURE = ['Make Bookshelf', 'Make Table', 'Make Chair'];
 
   // CD ladder: price of the i-th building in a batch = base x (20 + owned + i) / 20, refund 50% of base.
@@ -1288,14 +1573,19 @@ try {
     for (let i = 0; i < k; i++) c += Math.floor(t.base * 100 * (20 + owned + i) / 20) / 100 - t.base / 2 + t.items;
     return c;
   };
+  // Demolitions cap at 360 CD/h. Batch size only sets the price, so the cheapest batch that reaches the cap wins (same as my-plan.js).
   function bestBatch(type, owned, income, cycles) {
-    let best = { k: 1, perCd: batchCost(type, owned, 1), cdH: cycles };
+    const cap = 360 * TYPES[type].cd;
+    let best = null;
     for (let k = 1; k <= 200; k++) {
       const c = batchCost(type, owned, k);
-      if (cycles * c > income) break;
-      best = { k, perCd: c / (k * TYPES[type].cd), cdH: cycles * k * TYPES[type].cd, spendH: cycles * c };
+      const batchesH = Math.min(cycles, cap / (k * TYPES[type].cd));
+      const spendH = batchesH * c;
+      if (spendH > income) break;
+      const cdH = batchesH * k * TYPES[type].cd, perCd = c / (k * TYPES[type].cd);
+      if (!best || cdH > best.cdH + 1e-9 || (Math.abs(cdH - best.cdH) < 1e-9 && perCd < best.perCd)) best = { k, perCd, cdH, spendH };
     }
-    return best;
+    return best ?? { k: 1, perCd: batchCost(type, owned, 1), cdH: 0, spendH: 0 };
   }
 
   // Price of the next acre after n bought ones, starting at `first`.
@@ -1352,7 +1642,7 @@ try {
     const m = engineModel(catalog);
     const st = state;
     const cycles = opts.cyclesPerHour ?? st.cyclesPerHour ?? 600;
-    const fixed = (st.fixedAcres ?? 0) + (st.fixedExtra ?? FIXED_EXTRA), buffer = st.cdBufferAcres ?? 16;
+    const fixed = (st.fixedAcres ?? 0) + (st.fixedExtra ?? FIXED_EXTRA), buffer = st.cdBufferAcres ?? 2;   // one building being built + one waiting for demolition (batch 1)
     const Ecap = opts.planksCap != null ? m.acresOf(Math.max(0, opts.planksCap)) : Infinity;   // engine acres the capped planks need
     let E = Math.min(150, Ecap), rule = null;
     for (let it = 0; it < 40; it++) {
@@ -1403,8 +1693,10 @@ try {
 //
 // Each Lumber Camp or Farm (Settings > Building, or start({ building: 10 })) earns 1 CD on build;
 // CD is kept after demolish. Both cost $41 base, refund 50% of base ($20.50) and need 1 free acre.
-// The i-th one costs base x (20 + owned + i) / 20, where owned counts every building of that type
-// you hold, so pick the type you own fewer of (the wiki's CD farm section has the table).
+// The i-th one costs base x (20 + owned + i) / 20, where owned counts every building of that type you hold or have queued
+// (a queued demolition still counts until it finishes), so pick the type you own fewer of. The demolish queue takes one
+// building at a time (10 s per Lumber Camp), so camps and farms top out near 6 CD a minute; frame buildings are rushed when
+// the queue is full (the wiki's CD farm section has the numbers).
 // While running, any unassigned buildings of the chosen type above the count at start are
 // treated as the farm's own and may be demolished.
 //
@@ -1435,8 +1727,6 @@ try {
   const STARTER_ACRES = 25;
   const RATE_WINDOW_MS = 15 * 60 * 1000;
 
-  // Acres per building id (wiki/data/buildings.md).
-  const ACRES = [1, 2, 2, 3, 1, 2, 2, 6, 2, 5, 1, 1, 2, 4, 2, 3, 1, 5, 1, 3, 8, 1, 2, 2, 3, 1, 1, 1, 6, 1, 2, 1, 1, 1, 3, 1, 1, 2, 3];
 
   const cfg = {
     building: 'auto',      // 'auto': the planner picks types and batch every cycle; or an id to cycle: 0 Lumber Camp, 10 Farm
@@ -1472,7 +1762,7 @@ try {
 
   const freshStats = () => ({
     cycles: 0, built: 0, spent: 0, refunded: 0,
-    cdStart: 0, moneyStart: 0, startedAt: 0, baselinePool: 0,
+    cdStart: 0, moneyStart: 0, startedAt: 0, baselinePool: 0, rushCd: 0,
     samples: [], spends: [], last: '', by: '', building: null,
     baseline: {}, types: [], byType: {}, land: 0, acresBought: 0, holding: {},   // Auto: per-type pool baseline, types touched, spend per type
   });
@@ -1523,22 +1813,25 @@ try {
 
   // Live snapshot. Every decision in the script goes through this.
   function read(fresh = false) {
-    const { ws, st } = core.walk(fresh);
-    if (!st) return null;
+    const { ws, st, catalog } = core.walk(fresh);
+    if (!st || !catalog) return null;
+    const C = PL().normalize(catalog);
     const regionPool = st.building_pool?.[REGION] ?? {};
     const unassignedCamps = regionPool[farmId()] ?? 0;
+    // Queued builds and demolitions count in the price and hold acres: a queued demolition keeps its acre until it finishes.
+    const q = PL().queued({ st, catalog, region: REGION });
 
-    let campsInGroups = 0, acresUsed = 0;
+    let campsInGroups = 0, acresUsed = q.acres;
     for (const g of Object.values(st.groups)) {
       if ((g.region ?? REGION) !== REGION) continue;
       if (g.building === farmId()) campsInGroups += g.count;
-      acresUsed += (ACRES[g.building] ?? 1) * g.count;
+      acresUsed += C.buildings[g.building].acres * g.count;
     }
-    for (const [b, n] of Object.entries(regionPool)) acresUsed += (ACRES[b] ?? 1) * n;
+    for (const [b, n] of Object.entries(regionPool)) acresUsed += C.buildings[b].acres * n;
 
     const acresOwned = STARTER_ACRES + (st.land_bought?.[REGION] ?? 0);
     const money = (st.items?.[MONEY] ?? 0) / 100;
-    const ownedCamps = campsInGroups + unassignedCamps;
+    const ownedCamps = campsInGroups + unassignedCamps + (q.owned[farmId()] ?? 0);
     const freeAcres = Math.max(0, acresOwned - acresUsed);
     const usableAcres = Math.max(0, freeAcres - cfg.reserveAcres);
     // 'income' keeps the money you have at Start; with no run on, that is the money now (stats.moneyStart is from the last run).
@@ -1547,12 +1840,14 @@ try {
     let affordable = 0;
     while (affordable < cfg.batch && money - campCost(ownedCamps, affordable + 1) >= floor) affordable++;
     const nextBatch = Math.min(cfg.batch, usableAcres, affordable);
+    const sec = PL().secsOf(C, farmId());
 
     return {
       money, cd: st.items?.[CD] ?? 0,
       unassignedCamps, campsInGroups, ownedCamps,
       acresOwned, acresUsed, freeAcres, usableAcres, moneyFloor: floor,
       nextBatch, nextBatchCost: campCost(ownedCamps, nextBatch),
+      buildSec: sec.build, demolishSec: sec.demolish, queue: { build: q.build, demolish: q.demolish }, acresComing: q.demolishAcres,
       mutTick: st.ssi?.last_user_mutation_tick ?? 0,
       wsOpen: ws?.readyState === 1, ws,
     };
@@ -1594,8 +1889,8 @@ try {
   // Falls back to state polling if no text messages have been seen on the socket.
   // Waits for the server to confirm a command, and feeds the round trip (core.lastRtt: ws.send to the
   // confirming Diff, sub-millisecond) to the measurements and the pacer's backoff / breaker.
-  async function waitConfirm(pred, d0, rd = read) {
-    const r = await core.waitConfirm({ read: rd, pred, d0, timeoutMs: cfg.timeoutMs, closed: () => { throw new ConnError('socket closed while waiting'); } });
+  async function waitConfirm(pred, d0, rd = read, timeoutMs = cfg.timeoutMs) {
+    const r = await core.waitConfirm({ read: rd, pred, d0, timeoutMs, closed: () => { throw new ConnError('socket closed while waiting'); } });
     const rtt = r ? core.lastRtt() : null;
     const p = getPacer();
     p.noteConfirm({ ok: !!r, rtt }); p.noteResult(!!r);
@@ -1661,6 +1956,9 @@ try {
     if (!r0) throw new ConnError('game state not found');
     if (r0.cd >= cfg.targetCd) return stopWith(`reached target CD ${fmt(cfg.targetCd)}`);
     if (netSpend() >= cfg.maxSpend) return stopWith(`reached max spend $${fmt(cfg.maxSpend)}`);
+    // Acres held by queued demolitions come back as each one finishes (10 s per camp): wait for them. Stop only for acres that will not return.
+    const short = r0.usableAcres === 0 || (cfg.fullBatch && r0.usableAcres < cfg.batch);
+    if (short && r0.acresComing > 0) { phase = 'waiting: queued demolitions free acres'; return 'wait'; }
     if (r0.usableAcres === 0) return stopWith(`no free acres above the ${cfg.reserveAcres}-acre reserve (${r0.freeAcres} free)`);
     if (cfg.fullBatch && r0.usableAcres < cfg.batch) return stopWith(`need ${cfg.batch} free acres above the ${cfg.reserveAcres}-acre reserve for a full batch, have ${r0.usableAcres}`);
     if (cfg.fullBatch ? r0.nextBatch < cfg.batch : r0.nextBatch === 0) {
@@ -1687,7 +1985,7 @@ try {
     if (rb.nextBatch < n) { phase = 'waiting: money or land changed'; return 'wait'; } // the plan above no longer fits
     inFlight = { action: 'build', amount: n, at: Date.now() }; save();
     const d = send({ type: 'BuyBuilding', building: farmId(), amount: n, region: REGION });
-    const r1 = await waitConfirm((r) => r.unassignedCamps >= rb.unassignedCamps + n, d);
+    const r1 = await waitConfirm((r) => r.unassignedCamps >= rb.unassignedCamps + n, d, read, cfg.timeoutMs + Math.ceil((n * rb.buildSec + rb.queue.build) * 1500));
     if (!r1) {
       const r = mustRead();
       const got = r.unassignedCamps - rb.unassignedCamps;
@@ -1709,10 +2007,7 @@ try {
 
     // Demolish
     phase = 'demolishing';
-    const refund = await demolish(n);
-    if (Math.abs(refund - n * unitRefund()) > Math.max(5, n * unitRefund() * 0.2)) {
-      console.warn(`[cdFarm] money rose $${fmt(refund)}, expected ~$${fmt(n * unitRefund())} refund`);
-    }
+    await demolish(n);
 
     stats.cycles++;
     sample();
@@ -1819,6 +2114,10 @@ try {
       recipes.push(g.recipe);
       for (const i of cat.recipes[g.recipe]?.inputs ?? []) running.add(i.item);
     }
+    // Queued builds and demolitions count in the price and hold acres (see PL().queued).
+    const q = PL().queued({ st, catalog, region: REGION });
+    for (const [b, n] of Object.entries(q.owned)) owned[b] = (owned[b] ?? 0) + n;
+    acresUsed += q.acres;
     // Best open bid per unit (side 'Sell' rows are bids you can sell into).
     const bids = {};
     for (const d of deals ?? []) if (d.region === REGION && d.side === 'Sell' && d.amount > 0) bids[d.item] = Math.max(bids[d.item] ?? 0, d.price / d.amount);
@@ -1826,7 +2125,7 @@ try {
     const landBought = st.land_bought?.[REGION] ?? 0;
     const acresOwned = STARTER_ACRES + landBought;
     return {
-      ws, wsOpen: ws?.readyState === 1, cat, pool, owned, running, recipes, bids, unlocked, landBought, acresOwned, acresUsed,
+      ws, wsOpen: ws?.readyState === 1, cat, pool, owned, running, recipes, bids, unlocked, landBought, acresOwned, acresUsed, queue: { build: q.build, demolish: q.demolish },
       freeAcres: Math.max(0, acresOwned - acresUsed), stock: st.stock?.[REGION] ?? {},
       money: st.items?.[MONEY] ?? 0, cd: st.items?.[CD] ?? 0, retail: unlocked.includes(RETAIL) || (owned[RETAIL] ?? 0) > 0,
       mutTick: st.ssi?.last_user_mutation_tick ?? 0,
@@ -1937,7 +2236,7 @@ try {
     const input = {
       catalog: c.cat, unlocked: c.unlocked, owned: c.owned, usableAcres: Math.max(0, c.freeAcres - cfg.reserveAcres), money: c.money, floor: floorC,
       stock: c.stock, reserve: ap?.items ?? {}, netSupply, burn, itemValue: PL().itemValues({ catalog: c.cat, bids: c.bids, runningInputs: [...c.running] }),
-      quarantine: activeQuarantine(), R: need - c.cd, T: t.T, TperType: t.perType, I,
+      quarantine: activeQuarantine(), R: need - c.cd, T: t.T, TperType: t.perType, I, queue: c.queue, cdHave: c.cd,
       minUnits: recovering ? 1 : pace.minUnits, maxBatch: recovering ? 1 : cfg.batch, maxTypes: recovering ? 1 : cfg.maxTypes,
     };
     reportValues(c, input.itemValue);
@@ -1971,6 +2270,7 @@ try {
   function recheck(rb, u, ev) {
     const base = rb.cat.buildings[u.b];
     if ((rb.owned[u.b] ?? 0) !== (ev.c.owned[u.b] ?? 0)) return u.name + ' count changed since the plan';
+    if (rb.freeAcres - cfg.reserveAcres < base.acres * u.n) return u.name + ' has no free acres left';
     if (rb.money - PL().batchCost(base.cost, rb.owned[u.b] ?? 0, u.n) < ev.floorC) return 'money would fall below the floor';
     for (const { item, amount } of base.build_items ?? []) {
       if (!PL().itemOk({ need: u.n * amount, stock: rb.stock[item] ?? 0, reserve: ev.ap?.items?.[item] ?? 0 }).ok) return (rb.cat.items[item]?.name ?? 'an item') + ' surplus is gone';
@@ -2014,6 +2314,24 @@ try {
     core.ledger.add('CD', 'action', `Auto: bought ${k} acre(s) for $${fmt(ev.land.priceCents / 100)} (real cost $${fmt(ev.land.realCostCents / 100)}): ${ev.land.note}`);
     save();
     await pause('cycle');
+  }
+
+  // Demolishes `want` units of one type and confirms on the pool count. DemolishBuilding queues them (they leave the pool
+  // now; each refund comes when it finishes). DemolishNow takes them out at once for ceil(CD/2) CD each.
+  async function demolishUnits(b, want, type) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      // A Demolish that timed out may still be applied: give it time to land before looking again and retrying.
+      if (attempt) await sleep(Math.max(graceMs, 4 * (core.measure.get('rtt').p90 ?? 0)));
+      await jitter();
+      const r0 = readPool(true);
+      if (!r0) throw new ConnError('game state not found');
+      // Never more than the farm holds: a first attempt that the server applied late must not make the retry eat your own buildings.
+      const amt = Math.min(want, (r0.pool[b] ?? 0) - (stats.baseline?.[b] ?? 0));
+      if (amt <= 0) return { ok: true, rtt: 0 };
+      const d = send({ type, building: b, amount: amt, region: REGION });
+      if (await waitConfirm((r) => (r.pool[b] ?? 0) <= (r0.pool[b] ?? 0) - amt, d, readPool)) return { ok: true, rtt: core.lastRtt() ?? 0 };
+    }
+    return { ok: false, rtt: 0 };
   }
 
   // Three failed commands in a row, or a latency spike: clean up, wait, retry once at batch 1; a second trip stops.
@@ -2065,7 +2383,7 @@ try {
     stats.spends = stats.spends.filter((s) => now - s.t < 60000);
     if (stats.spends.reduce((a, s) => a + s.amount, 0) + net > cfg.maxSpendPerMin && stats.spends.length) { phase = 'waiting: spend limit'; await pause('poll'); return 'ok'; }
     // Build every type of the plan (in random order), then demolish what was built.
-    const t0 = hr(); acc.wait = 0; let rttSum = 0;
+    const t0 = hr(); acc.wait = 0; let rttSum = 0, buildWait = 0;
     phase = 'building';
     for (const u of units) if (!stats.types.includes(u.b)) stats.types.push(u.b);
     inFlight = { action: 'build', units: [], at: Date.now() }; save();
@@ -2081,7 +2399,9 @@ try {
       const base = rb.cat.buildings[u.b], owned = rb.owned[u.b] ?? 0;
       inFlight.units.push({ b: u.b, n: u.n }); save();   // from here on a reload or error counts these as possibly built
       const d = send({ type: 'BuyBuilding', building: u.b, amount: u.n, region: REGION });
-      const r1 = await waitConfirm((r) => (r.pool[u.b] ?? 0) >= (rb.pool[u.b] ?? 0) + u.n, d, readPool);
+      const bw0 = hr();
+      const r1 = await waitConfirm((r) => (r.pool[u.b] ?? 0) >= (rb.pool[u.b] ?? 0) + u.n, d, readPool, cfg.timeoutMs + Math.ceil((u.n * u.build + rb.queue.build) * 1500));
+      buildWait += hr() - bw0;   // the build itself is waited for, not overhead: the round trip above does not include it
       if (!r1) {
         const got = Math.max(0, (readPool(true)?.pool[u.b] ?? 0) - (rb.pool[u.b] ?? 0));
         if (got > 0) { accountBuild(u, got, owned, base); built.push({ u, got, base }); }
@@ -2091,7 +2411,7 @@ try {
         halted = `build of ${u.n} ${u.name} not confirmed (${got} appeared)`;
         break;
       }
-      const rtt = core.lastRtt(); rttSum += rtt ?? 0;
+      const rtt = core.lastRtt();   // the Buy's round trip sits inside buildWait, so it is not added to rttSum again
       const gross = accountBuild(u, u.n, owned, base);
       built.push({ u, got: u.n, base });
       holding(u.b, u.n);
@@ -2106,28 +2426,22 @@ try {
     inFlight = { action: 'demolish', units: [], at: Date.now() }; save();
     if (built.length) { phase = 'demolishing'; await pause('step'); }
     for (const x of shuffle(built)) {
-      let done = false;
-      for (let attempt = 0; attempt < 2 && !done; attempt++) {
-        // A Demolish that timed out may still be applied: give it time to land before looking again and retrying.
-        if (attempt) await sleep(Math.max(graceMs, 4 * (core.measure.get('rtt').p90 ?? 0)));
-        await jitter();
-        const r0 = readPool(true);
-        if (!r0) throw new ConnError('game state not found');
-        // Never more than the farm holds: a first attempt that the server applied late must not make the retry eat your own buildings.
-        const amt = Math.min(x.got, (r0.pool[x.u.b] ?? 0) - (stats.baseline?.[x.u.b] ?? 0));
-        if (amt <= 0) done = true;
-        else {
-          const d = send({ type: 'DemolishBuilding', building: x.u.b, amount: amt, region: REGION });
-          done = !!(await waitConfirm((r) => (r.pool[x.u.b] ?? 0) <= (r0.pool[x.u.b] ?? 0) - amt, d, readPool));
-        }
-        if (done) {
-          holding(x.u.b, -x.got); save();
-          if (amt > 0) rttSum += core.lastRtt() ?? 0;
-          const refund = Math.floor(x.base.cost / 2) * x.got;
-          stats.refunded += refund / 100; stats.byType[x.u.b].refunded += refund / 100; hist.cum.net -= refund;
-        }
+      // Rushed units leave at once for ceil(CD/2) CD each, while the stock covers them; the rest queue, and their refund
+      // comes when each one finishes.
+      const cdNow = readPool(true)?.cd ?? 0;
+      const rushN = Math.min(x.u.rush ?? 0, x.got, Math.floor(cdNow / Math.max(1, x.u.rushEach)));
+      const q = x.got > rushN ? await demolishUnits(x.u.b, x.got - rushN, 'DemolishBuilding') : { ok: true, rtt: 0 };
+      const r = rushN ? await demolishUnits(x.u.b, rushN, 'DemolishNow') : { ok: true, rtt: 0 };
+      if (!q.ok || !r.ok) throw new Error(`demolish of ${x.got} ${x.u.name} not confirmed`);
+      rttSum += q.rtt + r.rtt;
+      holding(x.u.b, -x.got); save();
+      const refund = Math.floor(x.base.cost / 2) * x.got;
+      stats.refunded += refund / 100; stats.byType[x.u.b].refunded += refund / 100; hist.cum.net -= refund;
+      if (rushN) {
+        const spent = rushN * x.u.rushEach;
+        stats.rushCd = (stats.rushCd ?? 0) + spent;
+        hist.cum.farmCd -= spent;   // CD spent on rushing is not farm output: keep the organic CD slope clean
       }
-      if (!done) throw new Error(`demolish of ${x.got} ${x.u.name} not confirmed`);
     }
     inFlight = null;
     if (halted && halted !== 'stopped') { phase = 'waiting: ' + halted; core.ledger.add('CD', 'info', 'Auto: ' + halted); }
@@ -2138,7 +2452,7 @@ try {
       stats.cycles++; sample();
       const wall = hr() - t0;
       core.measure.get('cycle').add(wall);
-      core.measure.get('overhead').add(Math.max(0, wall - acc.wait - rttSum));
+      core.measure.get('overhead').add(Math.max(0, wall - acc.wait - rttSum - buildWait));
       const r2 = readPool();
       stats.last = `#${stats.cycles} | ${built.map((x) => x.got + ' ' + x.u.name).join(' + ')} | CD ${fmt(r2?.cd ?? 0)} (+${fmt(stats.built)}) | $${fmt((r2?.money ?? 0) / 100)} | $/CD ${perCd()}`;
       console.log('[cdFarm] ' + stats.last);
@@ -2212,7 +2526,7 @@ try {
   // ---- control -----------------------------------------------------------
 
   const fmt = (x) => Number(x).toLocaleString('en-US', { maximumFractionDigits: 2 });
-  const perCd = () => (stats.built ? (netSpend() / stats.built).toFixed(2) : '-');
+  const perCd = () => { const netCd = stats.built - (stats.rushCd ?? 0); return netCd > 0 ? (netSpend() / netCd).toFixed(2) : '-'; };
 
   async function start(opts = {}) {
     if (running) return console.warn('[cdFarm] already running');
@@ -2424,14 +2738,14 @@ try {
 
 // continues the cd-farm closure from cd-farm-3.js (same try / IIFE)
   // ---- game UI -----------------------------------------------------------
-  // Styled with the game's own CSS variables and button classes so it reads as
-  // part of the app: a "CD Farm" tab in the sidebar, a chip in the top bar, and
-  // a card that opens from either.
+  // The CD Farm panel, built from the shared parts in core-form.js (core.ui): Status (hero, rows, state), Settings (the same
+  // groups, controls and Backup as the other panels), Log, and a footer with the plan and the start button. Styled with the
+  // game's own CSS variables and button classes, so it reads as part of the app: a "CD Farm" tab in the sidebar, a chip in the
+  // top bar, and a card that opens from either.
 
   const UI_KEY = 'cdFarm.ui';
   const ui = (() => { try { return { open: false, x: null, y: null, ...JSON.parse(localStorage.getItem(UI_KEY) || '{}') }; } catch { return { open: false, x: null, y: null }; } })();
   const saveUi = () => { try { localStorage.setItem(UI_KEY, JSON.stringify(ui)); } catch {} };
-
 
   const ICON = '<svg class="nav-icon" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="6" height="6" rx="1" fill="currentColor"></rect><rect x="11" y="11" width="6" height="6" rx="1"></rect><rect x="7" y="3" width="6" height="6" rx="1" style="stroke:var(--nav-accent)"></rect></svg>';
 
@@ -2441,7 +2755,6 @@ try {
   let P = null, chrome = null, timer = null, ctlTimer = null, discardUntil = 0;
   const refs = {};
 
-  // 'run' | 'wait' | 'err' | '' for the status dot.
   function tone() {
     if (running) return /waiting|reconnect/.test(phase) ? 'wait' : 'run';
     if (resumable || /^error/.test(stopReason)) return 'err';
@@ -2449,18 +2762,9 @@ try {
   }
   const stateText = () => (running ? phase + (stats.by ? ` · ${stats.by}` : '') : resumable ? 'Interrupted — resume available' : (isAuto() && cfg.autoStart && idleNote ? 'Auto: ' + idleNote : stopReason || 'Idle'));
   const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
-
   // ---- settings form ----
-  // Amounts accept "100k", "1.5m", "$100,000". Every change is checked against
-  // the live game state, problems show next to the field they come from, and
-  // Start needs a second click after reading the plan summary.
-
-  const parseAmount = (s) => {
-    const m = String(s).trim().replace(/[$,\s_]/g, '').match(/^(\d*\.?\d+)([kmb])?$/i);
-    if (!m) return null;
-    return Math.round(Number(m[1]) * ({ k: 1e3, m: 1e6, b: 1e9 }[m[2]?.toLowerCase()] || 1));
-  };
-  const short = (x) => (x >= 1e6 ? `${+(x / 1e6).toFixed(2)}M` : x >= 1e3 ? `${+(x / 1e3).toFixed(1)}k` : String(Math.round(x)));
+  // Amounts accept "100k", "1.5m", "$100,000". Every change is checked against the live game state, problems show next
+  // to the field they come from, and Start needs a second click after reading the plan summary.
 
   const MODES = [
     { id: 'floor', label: 'Keep a floor', desc: 'Spends money above the floor. At the floor it waits for income, then keeps going.' },
@@ -2478,54 +2782,40 @@ try {
   };
   const FLOOR_CHIPS = [50000, 100000, 250000, 1000000];
   const TARGET_STEPS = [1e3, 2e3, 5e3, 1e4, 2e4, 5e4, 1e5, 2e5, 5e5, 1e6];
-
-  const parseErr = {};
+  const PACE_DESC = { thrifty: 'Cheapest CD, small batches, slow.', balanced: 'Bigger batches while the time saved is worth the cash.', fast: 'As fast as cash and free acres allow.' };
+  const LAND_OFF = 'Never buys acres. Logs what more land would save.';
+  const LAND_PLAN = 'Buys an acre only while acres limit the batch, the CD it saves is worth more than the acre, the price is under Autopilot\'s land price limit, and the cash floor holds.';
+  const AUTO_BLD = 'Picks the cheapest CD source every cycle from what is unlocked, in surplus and affordable. Never buys materials.';
+  const AMOUNTS = ['minMoney', 'autoFloor', 'targetCd', 'batch', 'reserveAcres', 'maxSpendPerMin'];
+  const FLOOR_ITEMS = FLOOR_CHIPS.map((v) => [v, '$' + K.short(v)]);
+  const targetItems = (r) => [...TARGET_STEPS.filter((v) => v > r.cd).slice(0, 5).map((v) => [v, K.short(v)]), [Infinity, 'None']];
   let confirmUntil = 0;
 
   function parseField(key, text) {
     const f = FIELDS[key];
     const s = text.trim();
     if (s === '') return f.optional ? { v: Infinity } : { err: 'Required.' };
-    const v = parseAmount(s);
+    const v = K.parseAmount(s);
     if (v == null) return { err: f.kind === 'money' ? 'Use an amount like 100k, 1.5m or 100,000.' : 'Use a number like 20k or 20,000.' };
     if (f.min != null && v < f.min) return { err: `Must be at least ${fmt(f.min)}.` };
     if (f.max != null && v > f.max) return { err: `Must be at most ${fmt(f.max)}.` };
     return { v };
   }
-  const shown = (key) => (Number.isFinite(cfg[key]) ? fmt(cfg[key]) : '');
   function setCfg(key, v) { cfg[key] = v; confirmUntil = 0; save(); render(); }
-
-  function textField(key) {
+  // An amount field: a bad entry also drops the Start confirmation, so it never starts on a value you can't see.
+  function amountOf(key, extra = []) {
     const f = FIELDS[key];
-    const { input, box } = K.inputBox({ label: f.label, prefix: f.kind === 'money' ? '$' : '', placeholder: f.empty || '' });
-    const msg = h('div', { class: 'idc-msg', hidden: true });
-    const revert = () => { delete parseErr[key]; input.value = shown(key); };
-    input.addEventListener('input', () => {
-      const p = parseField(key, input.value);
-      if (p.err) { parseErr[key] = p.err; confirmUntil = 0; render(); } else { delete parseErr[key]; setCfg(key, p.v); }
+    return K.amountField({
+      label: f.label, prefix: f.kind === 'money' ? '$' : '', placeholder: f.empty || '', extra,
+      parse: (t) => { const p = parseField(key, t); if (p.err) confirmUntil = 0; return p; },
+      format: (v) => (Number.isFinite(v) ? fmt(v) : ''), get: () => cfg[key], set: (v) => setCfg(key, v), def: DEFAULTS[key], redraw: render,
     });
-    input.addEventListener('blur', () => { revert(); render(); });
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') input.blur();
-      if (e.key === 'Escape') { revert(); input.blur(); }
-    });
-    refs.fields[key] = { input, box, msg };
-    return { box, msg };
-  }
-
-  const fieldBox = K.field;
-  const same = Object.is;
-  const setOn = (b, on) => { b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on)); };
-  const chip = (text, onclick) => h('button', { type: 'button', onclick }, text);
-  function setMsg(el, m) {
-    el.hidden = !m;
-    el.className = 'idc-msg ' + (m?.level || '');
-    el.textContent = m?.text || '';
   }
 
   // Floor the run would use if started now.
   const plannedFloor = (r) => (cfg.budget === 'income' ? Math.max(cfg.minMoney, r.money) : cfg.minMoney);
   const netPerCd = (r) => (campCost(r.ownedCamps, cfg.batch) - cfg.batch * unitRefund()) / cfg.batch;
+
 
   // [{ field, level: 'error' | 'warn', text }]. Errors block Start.
   function checkPlan(r) {
@@ -2613,174 +2903,93 @@ try {
     render();
     setTimeout(render, 4100);
   }
-  function doClearLog() {
-    const snap = core.ledger.list();
-    core.ledger.clear(); render();
-    core.toast('Log cleared', { undo: () => { if (unloaded) return; core.ledger.restore(snap); render(); } });
-  }
 
   function buildPanel() {
+    refs.badge = h('span', { class: 'idc-badge' });
+
     // ---- Status tab
-    refs.cd = h('span', { class: 'idc-big' });
-    refs.target = h('span', { class: 'idc-label' });
-    refs.bar = h('i');
-    refs.rows = h('div', { class: 'idc-rows' });
-    refs.state = h('span');
-    refs.stateDot = h('span', { class: 'idc-dot' });
-    const status = [
-      h('div', {}, h('div', { class: 'idc-label' }, 'Construction Data'), h('div', { class: 'idc-hero' }, refs.cd, refs.target), h('div', { class: 'idc-bar' }, refs.bar)),
-      refs.rows,
-      h('div', { class: 'idc-state' }, refs.stateDot, refs.state)];
+    refs.hero = K.hero('Construction Data');
+    refs.rows = K.rowList();
+    refs.state = K.stateLine();
+    const status = [refs.hero.el, refs.rows.el, refs.state.el];
 
     // ---- Settings tab
-    refs.fields = {};
-    refs.fieldEl = {};
-    refs.seg = K.seg(MODES, () => cfg.budget, (id) => setCfg('budget', id), 'Budget');
-    refs.modeDesc = h('div', { class: 'idc-desc' });
-    refs.bldSeg = K.seg([{ id: 'auto', label: 'Auto' }, ...BUILDINGS.map((b) => ({ id: b.id, label: b.name }))], () => cfg.building, (id) => setCfg('building', id), 'Building');
-    refs.bldDesc = h('div', { class: 'idc-desc' });
-    refs.paceSeg = K.seg([{ id: 'thrifty', label: 'Thrifty' }, { id: 'balanced', label: 'Balanced' }, { id: 'fast', label: 'Fast' }], () => cfg.pace, (id) => setCfg('pace', id), 'Pace');
-    refs.paceDesc = h('div', { class: 'idc-desc' });
-    refs.landSeg = K.seg([{ id: 'off', label: 'Off' }, { id: 'plan', label: 'Within the plan' }], () => (cfg.land === 'off' ? 'off' : 'plan'), (id) => setCfg('land', id), 'Buy land');
-    refs.landDesc = h('div', { class: 'idc-desc' });
-    const autoFloor = textField('autoFloor');
-    refs.autoOn = h('input', { type: 'checkbox', onchange: () => { cfg.autoStart = refs.autoOn.checked; save(); render(); } });
-    refs.autoOnLabel = K.check(refs.autoOn, 'Run by itself', 'Starts whenever Autopilot needs CD. Pressing Stop turns it off.');
-    const floor = textField('minMoney');
-    refs.floorChips = FLOOR_CHIPS.map((v) => [v, chip('$' + short(v), () => setCfg('minMoney', v))]);
-    const target = textField('targetCd');
-    refs.targetChips = h('div', { class: 'idc-quicks' });
-    refs.targetKey = '';
-    refs.full = h('input', { type: 'checkbox', onchange: () => setCfg('fullBatch', refs.full.checked) });
-    refs.fullText = h('small');
-    refs.fullLabel = h('label', { class: 'idc-check' }, refs.full, h('span', {}, 'Full batches only', refs.fullText));
+    refs.budget = K.segField('Budget', MODES, { get: () => cfg.budget, set: (id) => setCfg('budget', id), def: DEFAULTS.budget, describe: (v) => MODES.find((m) => m.id === v)?.desc || '' });
+    refs.building = K.segField('Building', [{ id: 'auto', label: 'Auto' }, ...BUILDINGS.map((b) => ({ id: b.id, label: b.name }))], { get: () => cfg.building, set: (id) => setCfg('building', id), def: DEFAULTS.building });
+    refs.pace = K.segField('Pace', [{ id: 'thrifty', label: 'Thrifty' }, { id: 'balanced', label: 'Balanced' }, { id: 'fast', label: 'Fast' }], { get: () => cfg.pace, set: (id) => setCfg('pace', id), def: DEFAULTS.pace, describe: (v) => PACE_DESC[v] || '' });
+    refs.land = K.segField('Buy land', [{ id: 'off', label: 'Off' }, { id: 'plan', label: 'Within the plan' }], { get: () => (cfg.land === 'off' ? 'off' : 'plan'), set: (id) => setCfg('land', id), def: DEFAULTS.land, describe: (v) => (v === 'off' ? LAND_OFF : LAND_PLAN) });
+    refs.floorPicks = K.quickPicks((v) => setCfg('minMoney', v));
+    refs.targetPicks = K.quickPicks((v) => setCfg('targetCd', v));
+    refs.autoFloor = amountOf('autoFloor');
+    refs.minMoney = amountOf('minMoney', [refs.floorPicks.el]);
+    refs.targetCd = amountOf('targetCd', [refs.targetPicks.el]);
+    refs.batch = amountOf('batch');
+    refs.reserveAcres = amountOf('reserveAcres');
+    refs.maxSpendPerMin = amountOf('maxSpendPerMin');
+    refs.autoOn = K.toggleField('Run by itself', 'Starts whenever Autopilot needs CD. Pressing Stop turns it off.', { get: () => cfg.autoStart, set: (v) => { cfg.autoStart = v; save(); render(); }, def: DEFAULTS.autoStart });
+    refs.auto = K.toggleField('Resume after reload', 'Continues an interrupted run when the page loads again.', { get: () => cfg.autoResume, set: (v) => { cfg.autoResume = v; save(); render(); }, def: DEFAULTS.autoResume });
+    refs.full = K.toggleField('Full batches only', '', { get: () => cfg.fullBatch, set: (v) => setCfg('fullBatch', v), def: DEFAULTS.fullBatch });
     refs.landMsg = h('div', { class: 'idc-msg', hidden: true });
-    const batch = textField('batch');
-    const spare = textField('reserveAcres');
-    const rate = textField('maxSpendPerMin');
-    refs.auto = h('input', { type: 'checkbox', onchange: () => { cfg.autoResume = refs.auto.checked; save(); render(); } });
-    refs.autoLabel = K.check(refs.auto, 'Resume after reload', 'Continues an interrupted run when the page loads again.');
-    refs.fieldEl.building = fieldBox('Building', refs.bldSeg.el, refs.bldDesc);
-    refs.fieldEl.pace = fieldBox('Pace', refs.paceSeg.el, refs.paceDesc);
-    refs.fieldEl.land = fieldBox('Buy land', refs.landSeg.el, refs.landDesc);
-    refs.fieldEl.autoFloor = fieldBox('Extra money floor', autoFloor.box, autoFloor.msg);
-    refs.fieldEl.budget = fieldBox('Budget', refs.seg.el, refs.modeDesc);
-    refs.fieldEl.minMoney = fieldBox('Money floor', floor.box, h('div', { class: 'idc-quicks' }, ...refs.floorChips.map(([, b]) => b)), floor.msg);
-    refs.fieldEl.targetCd = fieldBox('Target CD', target.box, refs.targetChips, target.msg);
-    refs.fieldEl.batch = fieldBox('Buildings per cycle', batch.box, batch.msg);
-    refs.fieldEl.reserveAcres = fieldBox('Spare acres', spare.box, spare.msg);
-    refs.fieldEl.maxSpendPerMin = fieldBox('Max spend per minute', rate.box, rate.msg);
-    const lockIcon = h('span', { 'aria-hidden': 'true' });
-    lockIcon.innerHTML = K.ICONS.lock;
-    refs.lock = h('div', { class: 'idc-lock' }, lockIcon, 'Stop the farm to change settings.');
-    refs.fs = h('fieldset', { class: 'idc-form' },
-      K.group('Building', refs.fieldEl.building),
-      refs.grpAuto = K.group('Auto', refs.autoOnLabel, refs.fieldEl.pace, refs.fieldEl.land, refs.fieldEl.autoFloor),
-      refs.grpBudget = K.group('Budget', refs.fieldEl.budget, refs.fieldEl.minMoney),
-      K.group('Goal', refs.fieldEl.targetCd),
-      refs.grpBatches = K.group('Batches', refs.fullLabel, refs.landMsg),
-      h('details', { class: 'idc-sub', open: !!ui.advOpen, ontoggle: (e) => { ui.advOpen = e.target.open; saveUi(); } }, h('summary', {}, 'Advanced'),
-        K.group(null, h('div', { class: 'idc-two' }, refs.fieldEl.batch, refs.fieldEl.reserveAcres), refs.fieldEl.maxSpendPerMin, refs.autoLabel)));
+    refs.grpAuto = K.group('Auto', refs.autoOn.el, refs.pace.el, refs.land.el, refs.autoFloor.el);
+    refs.grpBudget = K.group('Budget', refs.budget.el, refs.minMoney.el);
+    refs.grpBatches = K.group('Batches', refs.full.el, refs.landMsg);
+    const settings = K.settingsTab({
+      lockText: 'Stop the farm to change settings.',
+      groups: [K.group('Building', refs.building.el), refs.grpAuto, refs.grpBudget, K.group('Goal', refs.targetCd.el), refs.grpBatches],
+      advanced: K.disclosure('Advanced', [K.group(null, h('div', { class: 'idc-two' }, refs.batch.el, refs.reserveAcres.el), refs.maxSpendPerMin.el, refs.auto.el)],
+        { open: !!ui.advOpen, onToggle: (o) => { ui.advOpen = o; saveUi(); } }),
+      backup: { onExport: () => core.exportFile(), onImport: () => core.importFile(), onReset: () => K.resetSettings('CD Farm', { snapshot: exportCfg, reset: resetCfg, restore: importCfg }) },
+    });
+    refs.settings = settings;
 
     // ---- Log tab
-    refs.logv = K.createLogView();
-    const logTab = [
-      refs.logv.el,
-      h('div', { class: 'idc-tools' },
-        h('button', { type: 'button', onclick: () => core.ledger.copy() }, 'Copy log'),
-        h('button', { type: 'button', class: 'danger', onclick: doClearLog }, 'Clear log')),
-      h('div', { class: 'idc-desc' }, 'Alt+Shift+X stops Autopilot, CD Farm and the Lab runner from anywhere on the page.')];
+    const logt = K.logTab({});
+    refs.logv = logt.logv;
 
     // ---- Footer (always visible)
-    refs.pilot = h('div', { class: 'idc-msg warn', hidden: true });
-    refs.plan = h('div', { class: 'idc-plan' });
+    refs.pilot = K.banner(null);
     refs.main = h('button', { class: 'primary', onclick: onMain });
     refs.alt = h('button', { onclick: onAlt });
-    const foot = h('div', { class: 'idc-foot' }, refs.pilot, refs.plan, h('div', { class: 'idc-btns' }, refs.alt, refs.main));
+    const foot = K.footer({ top: [refs.pilot.el], main: refs.main, alt: refs.alt });
+    refs.plan = foot.plan;
 
     P = K.createPanel({
-      id: 'cd', title: 'CD Farm', cls: 'cdf-panel', state: ui, save: saveUi, foot,
-      tabs: [{ id: 'status', label: 'Status', content: status }, { id: 'settings', label: 'Settings', content: [refs.lock, refs.fs] }, { id: 'log', label: 'Log', content: logTab }],
+      id: 'cd', title: 'CD Farm', cls: 'cdf-panel', state: ui, save: saveUi, headExtra: [refs.badge], foot: foot.el,
+      tabs: [{ id: 'status', label: 'Status', content: status }, { id: 'settings', label: 'Settings', content: settings.content }, { id: 'log', label: 'Log', content: logt.content }],
       onClose: () => panel(false), onTab: () => render(), opener: () => chrome?.opener,
       defaultPlace: () => ({ right: 20 }),
     });
-    refs.dot = P.dot;
   }
 
   function renderForm(r) {
     const busy = running || active;
-    refs.fs.disabled = busy;
-    refs.lock.hidden = !busy;
-    refs.seg.sync();
-    refs.bldSeg.sync(); refs.paceSeg.sync(); refs.landSeg.sync();
     const auto = isAuto();
-    const show = (el, on) => { el.style.display = on ? '' : 'none'; };
-    show(refs.grpAuto, auto); show(refs.grpBudget, !auto); show(refs.grpBatches, !auto); show(refs.fieldEl.maxSpendPerMin, !auto);
-    refs.autoOn.checked = !!cfg.autoStart;
-    refs.paceDesc.textContent = { thrifty: 'Cheapest CD, small batches, slow.', balanced: 'Bigger batches while the time saved is worth the cash.', fast: 'As fast as cash and free acres allow.' }[cfg.pace] || '';
-    refs.landDesc.textContent = cfg.land === 'off' ? 'Never buys acres. Logs what more land would save.' : 'Buys an acre only while acres limit the batch, the CD it saves is worth more than the acre, the price is under Autopilot\'s land price limit, and the cash floor holds.';
-    if (auto) refs.bldDesc.textContent = 'Picks the cheapest CD source every cycle from what is unlocked, in surplus and affordable. Never buys materials.';
-    else if (r) refs.bldDesc.textContent = `${bld().name}: $${fmt(bld().base)} base, 1 CD and 1 acre each. You own ${r.ownedCamps}, so the next one costs $${fmt(campCost(r.ownedCamps, 1))} and each one you own adds $${fmt(bld().base / 20)}. Pick the one you own fewer of.`;
-    refs.modeDesc.textContent = MODES.find((m) => m.id === cfg.budget)?.desc || '';
-    for (const [key, f] of Object.entries(refs.fields)) if (document.activeElement !== f.input) f.input.value = shown(key);
-    for (const [v, b] of refs.floorChips) setOn(b, cfg.minMoney === v);
-
-    // Target chips: the next round numbers above the current CD, plus "None".
-    if (r) {
-      const steps = TARGET_STEPS.filter((v) => v > r.cd).slice(0, 5);
-      const key = steps.join();
-      if (key !== refs.targetKey) {
-        refs.targetKey = key;
-        refs.targetChips.replaceChildren(...steps.map((v) => chip(short(v), () => setCfg('targetCd', v))), chip('None', () => setCfg('targetCd', Infinity)));
-      }
-      const btns = [...refs.targetChips.children];
-      steps.forEach((v, i) => setOn(btns[i], cfg.targetCd === v));
-      setOn(btns[btns.length - 1], !Number.isFinite(cfg.targetCd));
-    }
-
-    const issues = r && !busy && !auto ? checkPlan(r) : [];
-    const msgFor = (key) => (parseErr[key] ? { level: 'error', text: parseErr[key] } : issues.find((i) => i.field === key));
-    for (const [key, f] of Object.entries(refs.fields)) {
-      const m = msgFor(key);
-      setMsg(f.msg, m);
-      f.box.classList.toggle('bad', m?.level === 'error');
-    }
-    setMsg(refs.landMsg, msgFor('land'));
-    refs.full.checked = !!cfg.fullBatch;
-    refs.fullText.textContent = cfg.fullBatch
-      ? `Always ${cfg.batch} ${bld().plural} per cycle; waits instead of building fewer.`
-      : `Builds fewer than ${cfg.batch} when money or land is short.`;
-    refs.auto.checked = !!cfg.autoResume;
+    refs.settings.sync(busy);
+    refs.grpAuto.hidden = !auto; refs.grpBudget.hidden = auto; refs.grpBatches.hidden = auto; refs.maxSpendPerMin.el.hidden = auto;
+    const bldText = auto ? AUTO_BLD : r ? `${bld().name}: $${fmt(bld().base)} base, 1 CD and 1 acre each. You own ${r.ownedCamps}, so the next one costs $${fmt(campCost(r.ownedCamps, 1))} and each one you own adds $${fmt(bld().base / 20)}. Pick the one you own fewer of.` : undefined;
 
     // Which settings differ from the defaults: a reset button on each field, a dot on the tab.
     let changed = 0;
-    const defShown = (key) => (Number.isFinite(DEFAULTS[key]) ? fmt(DEFAULTS[key]) : FIELDS[key]?.empty || 'none');
-    const mod = (key, hint) => {
-      const m = !same(cfg[key], DEFAULTS[key]);
-      if (m) changed++;
-      K.setModified(refs.fieldEl[key], m, 'Reset to the default (' + hint + ')', () => { delete parseErr[key]; setCfg(key, DEFAULTS[key]); });
-    };
-    mod('building', bldLabel(DEFAULTS.building));
-    mod('pace', 'Balanced');
-    mod('land', 'Within the plan');
-    mod('budget', MODES.find((m) => m.id === DEFAULTS.budget).label);
-    for (const key of ['minMoney', 'autoFloor', 'targetCd', 'batch', 'reserveAcres', 'maxSpendPerMin']) mod(key, defShown(key));
-    for (const [key, label] of [['fullBatch', refs.fullLabel], ['autoResume', refs.autoLabel], ['autoStart', refs.autoOnLabel]]) {
-      const m = !!cfg[key] !== !!DEFAULTS[key];
-      label.classList.toggle('mod', m); label.title = m ? 'Changed from the default' : '';
-      if (m) changed++;
-    }
+    const count = (m) => { if (m) changed++; };
+    count(refs.building.sync(bldText)); count(refs.budget.sync()); count(refs.pace.sync()); count(refs.land.sync());
+    count(refs.full.sync()); count(refs.auto.sync()); count(refs.autoOn.sync());
+    refs.floorPicks.sync(FLOOR_ITEMS, cfg.minMoney);
+    if (r) refs.targetPicks.sync(targetItems(r), cfg.targetCd);
+    const issues = r && !busy && !auto ? checkPlan(r) : [];
+    const issueFor = (key) => issues.find((i) => i.field === key);
+    for (const key of AMOUNTS) count(refs[key].sync(issueFor(key)));
+    K.setMsg(refs.landMsg, issueFor('land'));
+    refs.full.small.textContent = cfg.fullBatch
+      ? `Always ${cfg.batch} ${bld().plural} per cycle; waits instead of building fewer.`
+      : `Builds fewer than ${cfg.batch} when money or land is short.`;
     P.setTabBadge('settings', changed ? changed + ' setting' + (changed > 1 ? 's' : '') + ' changed from the defaults' : '');
 
-    const blocking = Object.keys(parseErr).length > 0 || issues.some((i) => i.level === 'error');
+    const blocking = AMOUNTS.some((k) => refs[k].error) || issues.some((i) => i.level === 'error');
     const confirming = !busy && !resumable && !blocking && Date.now() < confirmUntil;
     const pilot = window.earlyGame;
-    refs.pilot.hidden = busy || !pilot?.busy;
-    refs.pilot.textContent = 'Autopilot is running live. Starting pauses it after its current step; it goes on when the farm stops.';
-    refs.plan.hidden = busy || resumable || !r;
-    if (!refs.plan.hidden) refs.plan.textContent = blocking ? 'Fix the settings marked in red to start.' : auto ? autoPlanText() : planText(r);
-    refs.plan.classList.toggle('hot', confirming);
-    refs.plan.classList.toggle('bad', blocking);
+    refs.pilot.set(!busy && pilot?.busy ? 'Autopilot is running live. Starting pauses it after its current step; it goes on when the farm stops.' : '');
+    refs.plan.set(blocking ? 'Fix the settings marked in red to start.' : auto ? autoPlanText() : r ? planText(r) : '',
+      { hidden: busy || resumable || !r, hot: confirming, bad: blocking });
     refs.main.textContent = running ? 'Stop' : resumable ? 'Resume' : confirming ? 'Confirm start' : 'Start';
     refs.main.disabled = !running && (active || !r || (!resumable && blocking));
     refs.alt.hidden = !confirming && (running || !(resumable || stats.cycles));
@@ -2794,16 +3003,17 @@ try {
 
   function renderPanel(r, rt) {
     const t = tone();
-    refs.dot.className = refs.stateDot.className = 'idc-dot ' + t;
+    K.setTone(P.dot, t);
+    refs.badge.textContent = isAuto() ? 'Auto' : bld().name;
+    refs.badge.className = 'idc-badge' + (running ? ' live' : '');
     if (!r) {
-      refs.cd.textContent = '—'; refs.target.textContent = ''; refs.rows.replaceChildren();
-      refs.state.textContent = 'Waiting for the game to load…';
+      refs.hero.set('—', '', 0); refs.rows.set([]);
+      refs.state.set(t, 'Waiting for the game to load…');
     } else {
-      refs.cd.textContent = fmt(r.cd);
       const hasTarget = Number.isFinite(cfg.targetCd);
-      refs.target.textContent = hasTarget ? `of ${fmt(cfg.targetCd)}` : (stats.built ? `+${fmt(stats.built)} farmed` : 'no target');
-      refs.bar.style.width = hasTarget ? Math.min(100, (r.cd / cfg.targetCd) * 100) + '%' : '0%';
-      const rows = isAuto() ? autoRows() : [
+      refs.hero.set(fmt(r.cd), hasTarget ? `of ${fmt(cfg.targetCd)}` : (stats.built ? `+${fmt(stats.built)} farmed` : 'no target'),
+        hasTarget ? Math.min(100, (r.cd / cfg.targetCd) * 100) : 0);
+      refs.rows.set(isAuto() ? autoRows() : [
         ['Money', `$${fmt(r.money)}`],
         ['Floor', `$${fmt(r.moneyFloor)}`],
         ['Next batch', r.nextBatch ? `${r.nextBatch} ${bld().plural} · $${fmt(r.nextBatchCost)}` : 'none affordable'],
@@ -2812,14 +3022,11 @@ try {
         ['Net cost', stats.built ? `$${perCd()} / CD` : '—'],
         ['Rate', rt.cdh15 ?? rt.cdhAll ? `${fmtRate(rt.cdh15 ?? rt.cdhAll)} CD/h` : '—'],
         [`ETA ${fmt(rt.target)}`, etaText(rt)],
-      ];
-      refs.rows.replaceChildren(...rows.map(([k, v]) => K.row(k, v)));
-      refs.state.textContent = cap(stateText());
+      ]);
+      refs.state.set(t, cap(stateText()));
     }
     renderForm(r);
-    if (ui.tab === 'log' && !ui.min) { refs.logv.render(); refs.logv.markSeen(); }
-    const unseen = ui.tab === 'log' ? 0 : refs.logv.unseen();
-    P.setTabBadge('log', unseen ? unseen + ' new problem' + (unseen > 1 ? 's' : '') : '', true);
+    K.syncLog(P, ui, refs.logv);
   }
 
   function render() {
@@ -2857,7 +3064,6 @@ try {
     P = chrome = null;
     removeEventListener('resize', onResize);
   }
-
 // continues the cd-farm closure from cd-farm-4.js (same try / IIFE)
   // ---- load --------------------------------------------------------------
 
@@ -2890,9 +3096,16 @@ try {
     save(); render();
     return { applied, skipped };
   }
+  // Settings back to the defaults (the run's own numbers stay); refused while a run is going.
+  function resetCfg() {
+    if (running || active) throw new Error('stop the CD Farm run first');
+    if (resumable) throw new Error('discard or resume the interrupted CD Farm run first');
+    for (const k of Object.keys(DEFAULTS)) if (!RUN_ONLY.includes(k)) cfg[k] = DEFAULTS[k];
+    save(); render();
+  }
 
   window.cdFarm = {
-    read, status, start, resume, stop, reset, panel, rates, cfg, exportCfg, importCfg, pauseAuto,
+    read, status, start, resume, stop, reset, panel, rates, cfg, exportCfg, importCfg, resetCfg, pauseAuto,
     get running() { return running; },
     get active() { return active; },        // a run is still executing (maybe finishing a step after stop())
     get resumable() { return resumable; },  // an interrupted run waits for Resume / Discard
@@ -3476,8 +3689,8 @@ try {
 
 // continues the lab closure from lab-2.js (same try / IIFE)
   // ---- game UI -------------------------------------------------------------------------------------
-  // Same look as CD Farm (core.ui): a "Lab" tab in the sidebar, a chip in the top bar, and a card that
-  // opens from either. Nothing here runs without a DOM, so the offline tests are unaffected.
+  // The Lab panel, built from the shared parts in core-form.js (core.ui): Status, Settings (research, custom list,
+  // spending, automation, Backup), Log, and a footer with the run mode. Nothing here runs without a DOM, so the offline tests are unaffected.
 
   const UI_KEY = 'labRunner.ui';
   const ui = (() => { try { return { open: false, x: null, y: null, ...JSON.parse(store?.getItem(UI_KEY) || '{}') }; } catch { return { open: false, x: null, y: null }; } })();
@@ -3492,14 +3705,14 @@ try {
   let P = null, chrome = null, timer = null;
   const refs = {};
   let confirmUntil = 0;
-  const parseErr = {};
 
   const MODES = [
     { id: 'process', label: 'Process study', desc: 'Process study on products your groups make: the one studied least so far, the pricier one on a tie.' },
     { id: 'modules', label: 'Modules', desc: 'Module fabrication (5 points less likely to succeed). Products picked the same way; if none of yours qualifies, the most valuable one.' },
     { id: 'list', label: 'Custom list', desc: 'Your own list, in order, round and round. Entries that are not Lab products are skipped.' },
   ];
-  const TIER_OPTS = [{ id: 'best', label: 'Best' }, { id: 1, label: 'I' }, { id: 2, label: 'II' }, { id: 3, label: 'III' }];
+  const MODE_OPTS = MODES.map((m) => (m.id === 'modules' ? { ...m, full: 'Module fabrication' } : m));
+  const TIER_OPTS = [{ id: 'best', label: 'Best', full: 'Best affordable' }, { id: 1, label: 'I', full: 'Tier I' }, { id: 2, label: 'II', full: 'Tier II' }, { id: 3, label: 'III', full: 'Tier III' }];
   const TIER_DESC = {
     best: 'Best affordable: Tier III with 100,000 MD and a Catalyst in that region, else II (10,000 MD + 5 RD), else I (1,000 MD). The reserve stays untouched.',
     1: 'Tier I only (1,000 MD). Waits when it can\'t pay; never moves to another tier.',
@@ -3507,45 +3720,18 @@ try {
     3: 'Tier III only (100,000 MD + a Catalyst in that region). Waits when it can\'t pay; never moves to another tier.',
   };
   const RESERVE_CHIPS = [0, 1000, 5000, 20000, 100000];
-  const short = (x) => (x >= 1e6 ? `${+(x / 1e6).toFixed(2)}M` : x >= 1e3 ? `${+(x / 1e3).toFixed(1)}k` : String(Math.round(x)));
+  const RESERVE_ITEMS = RESERVE_CHIPS.map((v) => [v, K.short(v)]);
   const FIELDS = { mdReserve: { label: 'MD reserve', min: 0, max: 1e9 } };
-  const parseAmount = (s) => {
-    const m = String(s).trim().replace(/[$,\s_]/g, '').match(/^(\d*\.?\d+)([kmb])?$/i);
-    if (!m) return null;
-    return Math.round(Number(m[1]) * ({ k: 1e3, m: 1e6, b: 1e9 }[m[2]?.toLowerCase()] || 1));
-  };
   function parseField(key, text) {
     const f = FIELDS[key], s = text.trim();
     if (s === '') return { err: 'Required.' };
-    const v = parseAmount(s);
+    const v = K.parseAmount(s);
     if (v == null) return { err: 'Use a number like 5000, 5k or 50,000.' };
     if (v < f.min) return { err: `Must be at least ${fmt(f.min)}.` };
     if (v > f.max) return { err: `Must be at most ${fmt(f.max)}.` };
     return { v };
   }
-  const shown = (key) => fmt(cfg[key]);
   function setCfg(key, v) { cfg[key] = v; confirmUntil = 0; save(); render(); }
-  const setOn = (b, on) => { b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on)); };
-  const chip = (text, onclick) => h('button', { type: 'button', onclick }, text);
-  function setMsg(el, m) { el.hidden = !m; el.className = 'idc-msg ' + (m?.level || ''); el.textContent = m?.text || ''; }
-
-  function textField(key) {
-    const f = FIELDS[key];
-    const { input, box } = K.inputBox({ label: f.label, suffix: 'MD' });
-    const msg = h('div', { class: 'idc-msg', hidden: true });
-    const revert = () => { delete parseErr[key]; input.value = shown(key); };
-    input.addEventListener('input', () => {
-      const p = parseField(key, input.value);
-      if (p.err) { parseErr[key] = p.err; render(); } else { delete parseErr[key]; setCfg(key, p.v); }
-    });
-    input.addEventListener('blur', () => { revert(); render(); });
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') input.blur();
-      if (e.key === 'Escape') { revert(); input.blur(); }
-    });
-    refs.fields[key] = { input, box, msg };
-    return { box, msg };
-  }
 
   // ---- custom list editor ----
   // The rows are rebuilt only when the list (or the product catalog) changes, never while you are choosing in a select.
@@ -3626,136 +3812,92 @@ try {
   }
 
   // ---- panel ----
+  // The mode shown and started from the panel while idle: Dry run only with the experimental switch on. A run in progress shows what it really is.
+  const viewDry = () => !!cfg.dryRun;   // the mode the panel shows and starts in: exactly what cfg says. Safety paths set it on purpose (refused Live, a reload resumed as a dry run), so the render never overrides it.
   function onMain() {
     if (running) return stop();
-    if (cfg.dryRun) return start();
-    if (Date.now() < confirmUntil) { confirmUntil = 0; return start(); }
+    if (viewDry()) return start();
+    if (Date.now() < confirmUntil) { confirmUntil = 0; return start({ dryRun: false }); }
     confirmUntil = Date.now() + 6000;
     render();
     setTimeout(render, 6100);
-  }
-  function doReset() {
-    try {
-      const snap = exportCfg();
-      resetCfg();
-      core.toast('Lab settings are back to their defaults', { undo: () => { if (unloaded) return; try { importCfg(snap); } catch (e) { core.toast(e.message, 'error'); } } });
-    } catch (e) { core.toast(e.message, 'error'); }
   }
 
   function buildPanel() {
     refs.badge = h('span', { class: 'idc-badge' });
 
     // ---- Status tab
-    refs.big = h('span', { class: 'idc-big' });
-    refs.sub = h('span', { class: 'idc-label' });
-    refs.bar = h('i');
-    refs.rows = h('div', { class: 'idc-rows' });
+    refs.hero = K.hero('Lab slots busy');
+    refs.rows = K.rowList();
     refs.successNote = h('div', { class: 'idc-desc' });
-    refs.stateDot = h('span', { class: 'idc-dot' });
-    refs.state = h('span');
-    const status = [
-      h('div', {}, h('div', { class: 'idc-label' }, 'Lab slots busy'), h('div', { class: 'idc-hero' }, refs.big, refs.sub), h('div', { class: 'idc-bar' }, refs.bar)),
-      refs.rows, refs.successNote,
-      h('div', { class: 'idc-state' }, refs.stateDot, refs.state)];
+    refs.state = K.stateLine();
+    const status = [refs.hero.el, refs.rows.el, refs.successNote, refs.state.el];
 
     // ---- Settings tab
-    refs.fields = {};
-    refs.mode = K.seg(MODES, () => cfg.mode, (id) => setCfg('mode', id), 'Research focus');
-    refs.modeDesc = h('div', { class: 'idc-desc' });
-    refs.tier = K.seg(TIER_OPTS, () => cfg.tierMode, (id) => setCfg('tierMode', id), 'Tier');
-    // The shell is 340 px wide: the buttons carry short labels, the full names are the tooltip and the accessible name.
-    const fullNames = (seg, names) => seg.btns.forEach((b, i) => { b.title = names[i]; b.setAttribute('aria-label', names[i]); });
-    fullNames(refs.mode, ['Process study', 'Module fabrication', 'Custom list']);
-    fullNames(refs.tier, ['Best affordable', 'Tier I', 'Tier II', 'Tier III']);
-    refs.tierDesc = h('div', { class: 'idc-desc' });
-    const reserve = textField('mdReserve');
-    refs.reserveChips = RESERVE_CHIPS.map((v) => [v, chip(short(v), () => setCfg('mdReserve', v))]);
-    refs.autoClaim = h('input', { type: 'checkbox', onchange: () => setCfg('autoClaim', refs.autoClaim.checked) });
-    refs.autoLabel = K.check(refs.autoClaim, 'Claim finished results', 'Claims the oldest waiting result first, one per check.');
-    refs.dry = h('input', { type: 'checkbox', onchange: () => { cfg.dryRun = refs.dry.checked; confirmUntil = 0; render(); } });
-    refs.dryLabel = K.check(refs.dry, 'Dry run', 'Works out every step and logs "would send …", but sends nothing. Not remembered after a reload.');
-    refs.fieldEl = {
-      mode: K.field('Research focus', refs.mode.el, refs.modeDesc),
-      tier: K.field('Tier', refs.tier.el, refs.tierDesc),
-      mdReserve: K.field('MD reserve', reserve.box, h('div', { class: 'idc-quicks' }, ...refs.reserveChips.map(([, b]) => b)), reserve.msg),
-    };
+    refs.mode = K.segField('Research focus', MODE_OPTS, { get: () => cfg.mode, set: (id) => setCfg('mode', id), def: DEFAULTS.mode, describe: (v) => MODES.find((m) => m.id === v)?.desc || '' });
+    refs.tier = K.segField('Tier', TIER_OPTS, { get: () => cfg.tierMode, set: (id) => setCfg('tierMode', id), def: DEFAULTS.tierMode, describe: (v) => TIER_DESC[v] || '' });
+    refs.reserveChips = K.quickPicks((v) => setCfg('mdReserve', v));
+    refs.reserve = K.amountField({
+      label: FIELDS.mdReserve.label, suffix: 'MD', extra: [refs.reserveChips.el],
+      parse: (t) => parseField('mdReserve', t), format: (v) => fmt(v), get: () => cfg.mdReserve, set: (v) => setCfg('mdReserve', v), def: DEFAULTS.mdReserve, redraw: render,
+    });
+    refs.autoClaim = K.toggleField('Claim finished results', 'Claims the oldest waiting result first, one per check.', { get: () => cfg.autoClaim, set: (v) => setCfg('autoClaim', v), def: DEFAULTS.autoClaim });
     refs.list = h('div', { class: 'idc-group' });
     refs.addBtn = h('button', { type: 'button', onclick: addEntry }, 'Add entry');
     refs.listNote = h('div', { class: 'idc-desc' });
     refs.listBox = K.group('Custom list', refs.list, h('div', { class: 'idc-tools' }, refs.addBtn), refs.listNote);
-    const lockIcon = h('span', { 'aria-hidden': 'true' });
-    lockIcon.innerHTML = K.ICONS.lock;
-    refs.lock = h('div', { class: 'idc-lock' }, lockIcon, 'Stop the live run to change settings.');
-    refs.fs = h('fieldset', { class: 'idc-form' },
-      K.group('Research', refs.fieldEl.mode, refs.fieldEl.tier),
-      refs.listBox,
-      K.group('Spending', refs.fieldEl.mdReserve),
-      K.group('Automation', refs.autoLabel, refs.dryLabel));
-    refs.importBtn = h('button', { type: 'button', onclick: () => core.importFile() }, 'Import settings');
-    refs.resetBtn = K.confirmBtn('Reset settings', doReset, 'Click again to reset');
-    const backup = K.group('Backup', h('div', { class: 'idc-tools' }, h('button', { type: 'button', onclick: () => core.exportFile() }, 'Export settings'), refs.importBtn, refs.resetBtn));
+    refs.dryRunSwitch = K.toggleField('Dry run switch', 'Shows the Dry run / Live switch in the footer. Dry run works out every step and sends nothing.', { get: () => !!ui.dryRunSwitch, set: (v) => { ui.dryRunSwitch = v; saveUi(); if (!running && !active) cfg.dryRun = v; render(); }, def: false });
+    const settings = K.settingsTab({
+      lockText: 'Stop the live run to change settings.',
+      tail: [K.group('Experimental', refs.dryRunSwitch.el)],
+      groups: [K.group('Research', refs.mode.el, refs.tier.el), refs.listBox, K.group('Spending', refs.reserve.el), K.group('Automation', refs.autoClaim.el)],
+      backup: { onExport: () => core.exportFile(), onImport: () => core.importFile(), onReset: () => K.resetSettings('Lab', { snapshot: exportCfg, reset: resetCfg, restore: importCfg }) },
+    });
+    refs.settings = settings;
 
     // ---- Log tab (this module's lines only)
-    refs.logv = K.createLogView({ mod: TAG });
-    const logTab = [
-      refs.logv.el,
-      h('div', { class: 'idc-tools' }, h('button', { type: 'button', onclick: () => core.ledger.copy() }, 'Copy log')),
-      h('div', { class: 'idc-desc' }, 'Shows Lab lines only; Copy log copies every module\'s lines. Alt+Shift+X stops Autopilot, CD Farm and the Lab runner from anywhere on the page.')];
+    const logt = K.logTab({ mod: TAG, clearable: false });
+    refs.logv = logt.logv;
 
     // ---- Footer (always visible)
-    refs.plan = h('div', { class: 'idc-plan' });
+    refs.run = K.runModeSeg(() => !!cfg.dryRun, (id) => { cfg.dryRun = id; confirmUntil = 0; render(); });
     refs.alt = h('button', { onclick: () => { confirmUntil = 0; render(); } }, 'Cancel');
     refs.main = h('button', { class: 'primary', onclick: onMain });
-    const foot = h('div', { class: 'idc-foot' }, refs.plan, h('div', { class: 'idc-btns' }, refs.alt, refs.main));
+    const foot = K.footer({ top: [refs.run.el], main: refs.main, alt: refs.alt });
+    refs.plan = foot.plan;
 
     P = K.createPanel({
-      id: 'lab', title: 'Lab', cls: 'lab-panel', state: ui, save: saveUi, headExtra: [refs.badge], foot,
-      tabs: [{ id: 'status', label: 'Status', content: status }, { id: 'settings', label: 'Settings', content: [refs.lock, refs.fs, backup] }, { id: 'log', label: 'Log', content: logTab }],
+      id: 'lab', title: 'Lab', cls: 'lab-panel', state: ui, save: saveUi, headExtra: [refs.badge], foot: foot.el,
+      tabs: [{ id: 'status', label: 'Status', content: status }, { id: 'settings', label: 'Settings', content: settings.content }, { id: 'log', label: 'Log', content: logt.content }],
       onClose: () => panel(false), onTab: () => render(), opener: () => chrome?.opener,
       defaultPlace: () => ({ right: 20 }),
     });
-    refs.dot = P.dot;
   }
 
   function renderForm(r) {
     const locked = running && !cfg.dryRun;
-    refs.fs.disabled = locked;
-    refs.lock.hidden = !locked;
-    refs.dry.disabled = running || active;   // Live is chosen before Start, behind its confirm step
-    refs.importBtn.disabled = refs.resetBtn.disabled = locked;
-    refs.mode.sync(); refs.tier.sync();
-    refs.modeDesc.textContent = MODES.find((m) => m.id === cfg.mode)?.desc || '';
-    refs.tierDesc.textContent = TIER_DESC[cfg.tierMode] || '';
+    refs.settings.sync(locked);
+    // Dry run is experimental: off by default, so the panel runs Live unless the switch is on.
+    refs.run.el.hidden = !ui.dryRunSwitch;
+    refs.dryRunSwitch.input.disabled = running || active;
+    refs.run.sync();
+    refs.run.btns.forEach((b) => { b.disabled = running || active; });   // Live is chosen before Start, behind its confirm step
     refs.listBox.hidden = cfg.mode !== 'list';
-    for (const [key, f] of Object.entries(refs.fields)) {
-      if (document.activeElement !== f.input) f.input.value = shown(key);
-      setMsg(f.msg, parseErr[key] ? { level: 'error', text: parseErr[key] } : null);
-      f.box.classList.toggle('bad', !!parseErr[key]);
-    }
-    for (const [v, b] of refs.reserveChips) setOn(b, cfg.mdReserve === v);
-    refs.autoClaim.checked = !!cfg.autoClaim;
-    refs.dry.checked = !!cfg.dryRun;
+    refs.reserveChips.sync(RESERVE_ITEMS, cfg.mdReserve);
     if (cfg.mode === 'list') renderList(r);
 
     // Which settings differ from the defaults: a reset button on each field, a dot on the tab.
     let changed = 0;
-    const mod = (el, differs, hint, reset) => { if (differs) changed++; K.setModified(el, differs, 'Reset to the default (' + hint + ')', reset); };
-    mod(refs.fieldEl.mode, cfg.mode !== DEFAULTS.mode, MODES.find((m) => m.id === DEFAULTS.mode).label, () => setCfg('mode', DEFAULTS.mode));
-    mod(refs.fieldEl.tier, cfg.tierMode !== DEFAULTS.tierMode, TIER_OPTS.find((o) => o.id === DEFAULTS.tierMode).label, () => setCfg('tierMode', DEFAULTS.tierMode));
-    mod(refs.fieldEl.mdReserve, cfg.mdReserve !== DEFAULTS.mdReserve, fmt(DEFAULTS.mdReserve), () => { delete parseErr.mdReserve; setCfg('mdReserve', DEFAULTS.mdReserve); });
-    const claimMod = !!cfg.autoClaim !== !!DEFAULTS.autoClaim;
-    refs.autoLabel.classList.toggle('mod', claimMod); refs.autoLabel.title = claimMod ? 'Changed from the default' : '';
-    if (claimMod) changed++;
+    for (const m of [refs.mode.sync(), refs.tier.sync(), refs.reserve.sync(), refs.autoClaim.sync()]) if (m) changed++;
     P.setTabBadge('settings', changed ? changed + ' setting' + (changed > 1 ? 's' : '') + ' changed from the defaults' : '');
 
     // Footer
-    const confirming = !running && !cfg.dryRun && Date.now() < confirmUntil;
-    refs.plan.hidden = running;
-    refs.plan.classList.toggle('hot', confirming);
-    refs.plan.textContent = cfg.dryRun
+    const confirming = !running && !viewDry() && Date.now() < confirmUntil;
+    refs.plan.set(viewDry()
       ? 'Dry run: works out every step and writes "would send …" to the log, but sends nothing.'
-      : `Live: starts research and claims results for you, one confirmed step at a time, keeping ${fmt(cfg.mdReserve)} MD.${confirming ? ' Click Confirm start to go.' : ''}`;
-    refs.main.textContent = running ? 'Stop' : active ? 'Stopping…' : cfg.dryRun ? 'Start dry run' : confirming ? 'Confirm start' : 'Start live';
+      : `Live: starts research and claims results for you, one confirmed step at a time, keeping ${fmt(cfg.mdReserve)} MD.${confirming ? ' Click Confirm start to go.' : ''}`,
+    { hidden: running, hot: confirming });
+    refs.main.textContent = running ? 'Stop' : active ? 'Stopping…' : viewDry() ? 'Start dry run' : confirming ? 'Confirm start' : 'Start live';
     refs.main.disabled = !running && (active || !r);
     refs.alt.hidden = !confirming;
   }
@@ -3764,19 +3906,16 @@ try {
 
   function renderPanel(r, sum) {
     const t = tone();
-    refs.dot.className = refs.stateDot.className = 'idc-dot ' + t;
-    refs.badge.textContent = cfg.dryRun ? 'Dry run' : 'Live';
-    refs.badge.className = 'idc-badge' + (cfg.dryRun ? '' : ' live');
+    K.setTone(P.dot, t);
+    refs.badge.textContent = viewDry() ? 'Dry run' : 'Live';
+    refs.badge.className = 'idc-badge' + (viewDry() ? '' : ' live');
     if (!sum) {
-      refs.big.textContent = '—'; refs.sub.textContent = ''; refs.bar.style.width = '0%';
-      refs.rows.replaceChildren(); refs.successNote.textContent = '';
-      refs.state.textContent = 'Waiting for the game to load…';
+      refs.hero.set('—', '', 0); refs.rows.set([]); refs.successNote.textContent = '';
+      refs.state.set(t, 'Waiting for the game to load…');
     } else {
       const info = successInfo(r, sum), d = sum.d;
-      refs.big.textContent = sum.total ? `${sum.busy} of ${sum.total}` : '—';
-      refs.sub.textContent = sum.total ? (sum.total === 1 ? 'Lab' : 'Labs') : 'no Lab built yet';
-      refs.bar.style.width = (sum.total ? (sum.busy / sum.total) * 100 : 0) + '%';
-      const rows = [
+      refs.hero.set(sum.total ? `${sum.busy} of ${sum.total}` : '—', sum.total ? (sum.total === 1 ? 'Lab' : 'Labs') : 'no Lab built yet', sum.total ? (sum.busy / sum.total) * 100 : 0);
+      refs.rows.set([
         ...(sum.total ? sum.rows.map((x) => [x.name, x.text]) : [['Labs', 'none built yet']]),
         ['Results waiting', d.pending + (cfg.autoClaim ? '' : ' (auto-claim off)')],
         ['MD', `${fmt(d.md)} · keeps ${fmt(cfg.mdReserve)}`],
@@ -3784,15 +3923,12 @@ try {
         ['Catalyst', sum.total ? sum.rows.map((x) => `${x.name} ${fmt(x.catalyst)}`).join(' · ') : '—'],
         ['Success', info.text],
         ['This run', `${sess.started} started · ${sess.claimed} claimed`],
-      ];
-      refs.rows.replaceChildren(...rows.map(([k, v]) => K.row(k, v)));
+      ]);
       refs.successNote.textContent = info.note;
-      refs.state.textContent = stateText(sum);
+      refs.state.set(t, stateText(sum));
     }
     renderForm(r);
-    if (ui.tab === 'log' && !ui.min) { refs.logv.render(); refs.logv.markSeen(); }
-    const unseen = ui.tab === 'log' ? 0 : refs.logv.unseen();
-    P.setTabBadge('log', unseen ? unseen + ' new problem' + (unseen > 1 ? 's' : '') : '', true);
+    K.syncLog(P, ui, refs.logv);
   }
 
   function render() {
@@ -3800,7 +3936,7 @@ try {
     const r = read();
     const sum = r ? summary(r) : null;
     const t = tone();
-    chrome?.setPill(cfg.dryRun ? 'Dry run' : 'Live', t, !running);
+    chrome?.setPill(viewDry() ? 'Dry run' : 'Live', t, !running);
     chrome?.setChip(sum?.total ? `Lab ${sum.busy}/${sum.total}` : 'Lab', t, `Lab · ${stateText(sum)}`);
     const open = !!P?.el.isConnected;
     chrome?.setOpen(open);
@@ -3821,6 +3957,7 @@ try {
       navInsert: (nav, el) => nav.insertBefore(el, nav.querySelector('.cdf-tab')?.nextSibling ?? null),   // below CD Farm's tab
       chipInsert: (tools, el) => tools.insertBefore(el, tools.querySelector('.tip-anchor') || null),
     });
+    if (!ui.dryRunSwitch && !running && !active) cfg.dryRun = false;   // Dry run is experimental: off by default, so the panel starts Live unless the switch is on.
     chrome.mount();
     timer = setInterval(render, 1000);
     if (ui.open) panel(true); else render();
@@ -3832,7 +3969,6 @@ try {
     P = chrome = null;
     removeEventListener('resize', onResize);
   }
-
 // continues the lab closure from lab-3.js (same try / IIFE)
   // ---- load ----------------------------------------------------------------------------------------
 
@@ -4827,7 +4963,7 @@ try {
     landPaybackFraction: 1 / 3,   // Stage C-D: payback <= T_wall x this
     cashReserve: 0,               // cents kept on top of the other modules' money floors
     ifReserve: 44,                // upper cap on the Iron Frames kept back for the prototypes and first builds (ifNeed counts what is still needed)
-    bufferAcres: 16,              // acres kept free for the CD farm (my-plan.js cdBufferAcres)
+    bufferAcres: 2,               // acres kept free for the CD farm: one building being built + one waiting for demolition (my-plan.js cdBufferAcres)
     cyclesPerHour: 600,           // the CD rate the land rule assumes until a measured one exists
     handoff: true,                // at Plan done: engine items to Autopilot's neverSell, its CD booster off
     handoffStopAutopilot: true,   // ... then stop Autopilot once (Core plan resumes bill-paused groups); a user restart is left alone
@@ -6879,7 +7015,7 @@ try {
 // ============================================================================
 // Feeds and tunes CD Farm's Auto mode per stage (wiki/guides/core-game-plan.md section 11); it never cycles buildings itself.
 //   CD need (out.cdNeed): A = next unlock (Assembly Plant 20,000), B = Retail Store 5,000 banked, C = none (pause Auto once),
-//   D = none until the retail checkpoint passes, then Oil Rig 5,000, then Refinery 750,000 (11.4: 755,000 farmed in Stage D).
+//   D = none until the retail checkpoint passes, then Oil Rig 5,000, then Refinery 500,000 (11.4: 505,000 farmed in Stage D).
 //   Auto tuning through cdFarm.importCfg, only between runs and only for keys that differ, read back after:
 //   land 'off' (Core plan owns land), pace, batch (core-math bestBatch at the measured income), reserveAcres, maxTypes 1 in D,
 //   autoStart: armed when Auto is off and nothing says the user wants it off. The user's Stop (or unticking it) is sticky until
@@ -6894,7 +7030,7 @@ try {
   if (!W.corePlan?.addDirector) throw new Error('Core plan did not load');
   const M = W.idleCore?.coreMath;
   if (!M) throw new Error('core-math did not load');
-  const NAME = 'ladder', WALL_CD = 755000;
+  const NAME = 'ladder', WALL_CD = 505000;   // Oil Rig 5,000 + Refinery 500,000 (2026-11-24 catalog)
   const fmt = (n) => Math.round(n).toLocaleString('en-US');
   const cfgOf = () => W.corePlan.cfg;
   // A Live session = Core plan stepping live without a long gap; a reload starts a new one (new LOAD token).
@@ -9314,26 +9450,18 @@ try {
 
 // continues the autopilot closure from autopilot-4.js (same try / IIFE)
   // ---- game UI ----------------------------------------------------------------------
-  // Same look as CD Farm (the game's CSS variables and button classes): an "Autopilot" tab in the
-  // sidebar, a chip in the top bar, and a draggable card that opens bottom-left (CD Farm's card
-  // opens bottom-right). Nothing here runs without a DOM, so the offline simulator is unaffected.
+  // The Autopilot panel, built from the shared parts in core-form.js (core.ui): Status (hero, rows, state, banners,
+  // checklist), Settings (the same groups, controls and Backup as the other panels), Log, and a footer with the run mode.
+  // Nothing here runs without a DOM, so the offline simulator is unaffected.
 
   const UI_KEY = 'earlyGame.ui';
   const ui = (() => { try { return { open: true, x: null, y: null, ...JSON.parse(store?.getItem(UI_KEY) || '{}') }; } catch { return { open: true, x: null, y: null }; } })();
   const saveUi = () => { try { store?.setItem(UI_KEY, JSON.stringify(ui)); } catch {} };
 
-
   const ICON = '<svg class="nav-icon" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 16h4v-4h4V8h4V4"></path><circle cx="15" cy="4" r="1.6" fill="currentColor" style="stroke:var(--nav-accent)"></circle></svg>';
 
   const mk = core.h;
   const K = core.ui;
-  const uiNum = (x) => Number(x).toLocaleString('en-US', { maximumFractionDigits: 2 });
-  const parseAmount = (str) => {
-    const m = String(str).trim().replace(/[$,\s_]/g, '').match(/^(\d*\.?\d+)([kmb])?$/i);
-    if (!m) return null;
-    return Math.round(Number(m[1]) * ({ k: 1e3, m: 1e6, b: 1e9 }[m[2]?.toLowerCase()] || 1));
-  };
-
   let P = null, chrome = null, uiTimer = null, unloaded = false;
   const refs = {};
   let confirmUntil = 0;
@@ -9383,16 +9511,9 @@ try {
     ['saveForCritical', 'Save for a ready plan building before buying camps/farms'],
     ['resumePaused', 'Resume groups paused by an unpaid bill'],
   ];
-  const MODES = [
-    { id: true, label: 'Dry run' },
-    { id: false, label: 'Live' },
-  ];
-
   function setCfg(key, v) { cfg[key] = v; confirmUntil = 0; save(); render(); }
-  const shownOf = (key, v) => (Number.isFinite(v) ? uiNum(FIELDS[key]?.kind === 'pct' ? v * 100 : v) : '');
-  const shown = (key) => shownOf(key, cfg[key]);
-  const same = (a, b) => (Array.isArray(a) ? JSON.stringify(a) === JSON.stringify(b) : Object.is(a, b));
-  const parseErr = {};
+  const shownOf = (key, v) => (Number.isFinite(v) ? K.fmt(FIELDS[key]?.kind === 'pct' ? v * 100 : v) : '');
+
   function parseField(key, text) {
     const f = FIELDS[key];
     const str = text.trim();
@@ -9402,132 +9523,94 @@ try {
     if (decimal) {
       v = /^[$]?\d*\.?\d+[%×x]?$/i.test(str.replace(/[,\s_]/g, '')) ? Number(str.replace(/[$,%×x\s_]/gi, '')) : null;
       if (v != null && f.kind === 'pct') v /= 100;
-    } else v = parseAmount(str);
+    } else v = K.parseAmount(str);
     if (v == null) return { err: decimal ? 'Use a number like 1 or 0.5.' : f.kind === 'money' ? 'Use an amount like 500, 20k or 1.5m.' : 'Use a whole number.' };
-    const disp = (x) => uiNum(f.kind === 'pct' ? x * 100 : x);
+    const disp = (x) => K.fmt(f.kind === 'pct' ? x * 100 : x);
     if (f.min != null && v < f.min) return { err: `At least ${disp(f.min)}.` };
     if (f.max != null && v > f.max) return { err: `At most ${disp(f.max)}.` };
     return { v };
   }
-  function textField(key) {
-    const f = FIELDS[key];
-    const { input, box } = K.inputBox({ label: f.label, prefix: f.kind === 'money' || f.kind === 'usd' ? '$' : '', suffix: f.unit, placeholder: f.empty || '' });
-    const msg = mk('div', { class: 'idc-msg error', hidden: true });
-    const revert = () => { delete parseErr[key]; input.value = shown(key); };
-    input.addEventListener('input', () => {
-      const p = parseField(key, input.value);
-      if (p.err) { parseErr[key] = p.err; render(); } else { delete parseErr[key]; setCfg(key, p.v); }
-    });
-    input.addEventListener('blur', () => { revert(); render(); });
-    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') input.blur(); if (e.key === 'Escape') { revert(); input.blur(); } });
-    const el = K.field(f.label, box, msg);
-    refs.fields[key] = { input, box, msg, el };
-    return el;
-  }
-  const row = K.row;
+
   const signed = (c) => (c < 0 ? '−' : '+') + usd(Math.abs(c));
 
-  function doReset() {
-    try {
-      const snap = exportCfg();
-      resetCfg();
-      core.toast('Autopilot settings are back to their defaults', { undo: () => { if (unloaded) return; try { importCfg(snap); } catch (e) { core.toast(e.message, 'error'); } } });
-    } catch (e) { core.toast(e.message, 'error'); }
-  }
-  function doClearLog() {
-    const snap = core.ledger.list();
-    core.ledger.clear(); render();
-    core.toast('Log cleared', { undo: () => { if (unloaded) return; core.ledger.restore(snap); render(); } });
+  function amountOf(key) {
+    const f = FIELDS[key];
+    return K.amountField({
+      label: f.label, prefix: f.kind === 'money' || f.kind === 'usd' ? '$' : '', suffix: f.unit, placeholder: f.empty || '',
+      parse: (t) => parseField(key, t), format: (v) => shownOf(key, v),
+      get: () => cfg[key], set: (v) => setCfg(key, v), def: DEFAULTS[key], redraw: render,
+    });
   }
 
   function buildPanel() {
     refs.badge = mk('span', { class: 'idc-badge' });
+    refs.fields = {};
+    const amount = (...keys) => keys.map((k) => (refs.fields[k] = amountOf(k)).el);
+    refs.toggles = {};
+    for (const [key, label] of [...CHECKS, ...ADV_CHECKS]) refs.toggles[key] = K.toggleField(label, '', { get: () => cfg[key], set: (v) => setCfg(key, v), def: DEFAULTS[key] });
+    const tog = (key) => refs.toggles[key].el;
 
     // ---- Status tab
-    refs.phase = mk('span', { class: 'idc-big' });
-    refs.phaseOf = mk('span', { class: 'idc-label' });
-    refs.bar = mk('i');
-    refs.rows = mk('div', { class: 'idc-rows' });
-    refs.stateDot = mk('span', { class: 'idc-dot' });
-    refs.state = mk('span');
-    refs.noteText = mk('span');
-    refs.noteBtn = mk('button', { type: 'button', onclick: () => W.cdFarm?.panel?.(true) }, 'Open CD Farm');
-    refs.note = mk('div', { class: 'idc-note', hidden: true }, refs.noteText, refs.noteBtn);
+    refs.hero = K.hero('Early-game plan');
+    refs.rows = K.rowList();
+    refs.state = K.stateLine();
+    refs.cdNote = K.banner(() => W.cdFarm?.panel?.(true), 'Open CD Farm');
+    refs.live = K.banner(() => { liveCountdownUntil = 0; render(); }, 'Cancel: resume as a dry run');
+    refs.stall = K.banner(() => { stalled = ''; core.setBadge('AP', ''); prog.at = nowMs(); prog.acts = 0; render(); }, 'Snooze');
+    refs.check = K.rowList();
     refs.log = mk('div', { class: 'idc-recent', 'aria-live': 'polite' });
-    const banner = (label, onclick) => { const text = mk('span'); const btn = mk('button', { type: 'button', onclick }, label); return { text, btn, el: mk('div', { class: 'idc-note', hidden: true }, text, btn) }; };
-    refs.live = banner('Cancel: resume as a dry run', () => { liveCountdownUntil = 0; render(); });
-    refs.stall = banner('Snooze', () => { stalled = ''; core.setBadge('AP', ''); prog.at = nowMs(); prog.acts = 0; render(); });
-    refs.check = mk('div', { class: 'idc-rows' });
-    const checklistSec = mk('details', { class: 'idc-sec', open: !!ui.checkOpen }, mk('summary', {}, 'Checklist'), refs.check);
-    checklistSec.addEventListener('toggle', () => { ui.checkOpen = checklistSec.open; saveUi(); });
-    const status = [
-      mk('div', {}, mk('div', { class: 'idc-label' }, 'Early-game plan'), mk('div', { class: 'idc-hero' }, refs.phase, refs.phaseOf), mk('div', { class: 'idc-bar' }, refs.bar)),
-      refs.rows,
-      mk('div', { class: 'idc-state' }, refs.stateDot, refs.state),
-      refs.note, refs.live.el, refs.stall.el, refs.log,
-      checklistSec];
+    const checkSec = K.disclosure('Checklist', [refs.check.el], { open: !!ui.checkOpen, onToggle: (o) => { ui.checkOpen = o; saveUi(); } });
+    const status = [refs.hero.el, refs.rows.el, refs.state.el, refs.cdNote.el, refs.live.el, refs.stall.el, refs.log, checkSec];
 
     // ---- Settings tab
-    refs.fields = {};
-    refs.checks = [...CHECKS, ...ADV_CHECKS].map(([key, label]) => {
-      const input = mk('input', { type: 'checkbox', onchange: () => setCfg(key, input.checked) });
-      return [key, input, K.check(input, label)];
-    });
-    const checkEl = (key) => refs.checks.find(([k]) => k === key)[2];
-    refs.hours = mk('input', { type: 'text', inputMode: 'decimal', autocomplete: 'off', value: '8', 'aria-label': 'Hours offline' });
+    refs.hours = K.inputBox({ label: 'Hours offline', suffix: 'h' });
+    refs.hours.input.value = '8';
     refs.billNow = mk('div', { class: 'idc-desc' });
-    const offBtn = mk('button', { type: 'button', onclick: () => { const hrs = Number(refs.hours.value); if (hrs > 0) { offline(hrs); render(); } } }, 'Keep bills');
-    const lockIcon = mk('span', { 'aria-hidden': 'true' });
-    lockIcon.innerHTML = K.ICONS.lock;
-    refs.lock = mk('div', { class: 'idc-lock' }, lockIcon, 'Stop the live run to change settings.');
-    refs.fs = mk('fieldset', { class: 'idc-form' },
-      K.group('Build targets', mk('div', { class: 'idc-two' }, ...['workshops', 'sawmills', 'ironMines', 'coalMines', 'goldMines', 'ironFrameWorkshops'].map(textField))),
-      K.group('Land price limits', mk('div', { class: 'idc-two' }, ...['maxAcrePriceEarly', 'maxAcrePrice'].map(textField)),
-        mk('div', { class: 'idc-desc' }, 'The most per acre Autopilot will pay for land, early on and later.')),
-      K.group('CD booster', mk('div', { class: 'idc-two' }, ...['boosterBatch', 'boosterMinCash', 'boosterKeepCash'].map(textField)), checkEl('cdBooster')),
-      K.group('Automation', ...['sellAll', 'floorUpgrades', 'buyKits', 'postBuyOrders', 'dispatchOffice', 'autoResume'].map(checkEl)),
-      K.group('Power bills', K.field('Going offline: keep power bills for',
-        mk('div', { class: 'idc-inline' }, mk('div', { class: 'idc-inp' }, refs.hours, mk('span', {}, 'h')), offBtn), refs.billNow)),
-      mk('details', { class: 'idc-sub', open: !!ui.advOpen, ontoggle: (e) => { ui.advOpen = e.target.open; saveUi(); } },
-        mk('summary', {}, 'Advanced'),
-        K.group(null, mk('div', { class: 'idc-two' }, ...ADV_FIELDS.map(textField)), ...ADV_CHECKS.map(([key]) => checkEl(key)))));
-    refs.importBtn = mk('button', { type: 'button', onclick: () => core.importFile() }, 'Import settings');
-    refs.resetBtn = K.confirmBtn('Reset settings', doReset, 'Click again to reset');
-    const backup = K.group('Backup', mk('div', { class: 'idc-tools' }, mk('button', { type: 'button', onclick: () => core.exportFile() }, 'Export settings'), refs.importBtn, refs.resetBtn));
-    const settings = [refs.lock, refs.fs, backup];
+    const offBtn = mk('button', { type: 'button', onclick: () => { const hrs = Number(refs.hours.input.value); if (hrs > 0) { offline(hrs); render(); } } }, 'Keep bills');
+    refs.dryRunSwitch = K.toggleField('Dry run switch', 'Shows the Dry run / Live switch in the footer. Dry run works out every step and sends nothing.', { get: () => !!ui.dryRunSwitch, set: (v) => { ui.dryRunSwitch = v; saveUi(); if (!running && !active) cfg.dryRun = v; render(); }, def: false });
+    refs.settings = K.settingsTab({
+      lockText: 'Stop the live run to change settings.',
+      tail: [K.group('Experimental', refs.dryRunSwitch.el)],
+      groups: [
+        K.group('Build targets', mk('div', { class: 'idc-two' }, ...amount('workshops', 'sawmills', 'ironMines', 'coalMines', 'goldMines', 'ironFrameWorkshops'))),
+        K.group('Land price limits', mk('div', { class: 'idc-two' }, ...amount('maxAcrePriceEarly', 'maxAcrePrice')),
+          mk('div', { class: 'idc-desc' }, 'The most per acre Autopilot will pay for land, early on and later.')),
+        K.group('CD booster', mk('div', { class: 'idc-two' }, ...amount('boosterBatch', 'boosterMinCash', 'boosterKeepCash')), tog('cdBooster')),
+        K.group('Automation', ...['sellAll', 'floorUpgrades', 'buyKits', 'postBuyOrders', 'dispatchOffice', 'autoResume'].map(tog)),
+        K.group('Power bills', K.field('Going offline: keep power bills for', mk('div', { class: 'idc-inline' }, refs.hours.box, offBtn), refs.billNow)),
+      ],
+      advanced: K.disclosure('Advanced', [K.group(null, mk('div', { class: 'idc-two' }, ...amount(...ADV_FIELDS)), ...ADV_CHECKS.map(([key]) => tog(key)))],
+        { open: !!ui.advOpen, onToggle: (o) => { ui.advOpen = o; saveUi(); } }),
+      backup: { onExport: () => core.exportFile(), onImport: () => core.importFile(), onReset: () => K.resetSettings('Autopilot', { snapshot: exportCfg, reset: resetCfg, restore: importCfg }) },
+    });
 
     // ---- Log tab
-    refs.logv = K.createLogView();
     refs.alertBtn = mk('button', { type: 'button', title: 'Notify me when Autopilot stops, stalls or changes phase while this tab is in the background', onclick: async () => { await core.askNotify(); render(); } }, 'Enable alerts');
-    const logTab = [
-      refs.logv.el,
-      mk('div', { class: 'idc-tools' },
-        mk('button', { type: 'button', onclick: () => core.ledger.copy() }, 'Copy log'),
-        mk('button', { type: 'button', class: 'danger', onclick: doClearLog }, 'Clear log'),
-        refs.alertBtn),
-      mk('div', { class: 'idc-desc' }, 'Alt+Shift+X stops Autopilot, CD Farm and the Lab runner from anywhere on the page.')];
+    const logt = K.logTab({ extra: [refs.alertBtn] });
+    refs.logv = logt.logv;
 
     // ---- Footer (always visible)
-    refs.mode = K.seg(MODES, () => !!cfg.dryRun, (id) => { cfg.dryRun = id; confirmUntil = 0; render(); }, 'Run mode');
-    refs.plan = mk('div', { class: 'idc-plan' });
+    refs.mode = K.runModeSeg(() => !!cfg.dryRun, (id) => { cfg.dryRun = id; confirmUntil = 0; render(); });
     refs.alt = mk('button', { onclick: () => { confirmUntil = 0; render(); } }, 'Cancel');
     refs.main = mk('button', { class: 'primary', onclick: onMain });
-    const foot = mk('div', { class: 'idc-foot' }, refs.mode.el, refs.plan, mk('div', { class: 'idc-btns' }, refs.alt, refs.main));
+    const foot = K.footer({ top: [refs.mode.el], main: refs.main, alt: refs.alt });
+    refs.plan = foot.plan;
 
     P = K.createPanel({
-      id: 'ap', title: 'Autopilot', cls: 'egp-panel', state: ui, save: saveUi, headExtra: [refs.badge], foot,
-      tabs: [{ id: 'status', label: 'Status', content: status }, { id: 'settings', label: 'Settings', content: settings }, { id: 'log', label: 'Log', content: logTab }],
+      id: 'ap', title: 'Autopilot', cls: 'egp-panel', state: ui, save: saveUi, headExtra: [refs.badge], foot: foot.el,
+      tabs: [{ id: 'status', label: 'Status', content: status }, { id: 'settings', label: 'Settings', content: refs.settings.content }, { id: 'log', label: 'Log', content: logt.content }],
       onClose: () => panel(false), onTab: () => render(), opener: () => chrome?.opener,
       // Default: bottom-left of the page content, just right of the game's sidebar.
       defaultPlace: () => { const side = document.querySelector('.primary-navigation')?.getBoundingClientRect(); return { left: side && side.right < innerWidth / 2 ? Math.round(side.right + 16) : 20 }; },
     });
-    refs.dot = P.dot;
   }
 
+  // The mode shown and started from the panel while idle: Dry run only with the experimental switch on. A run in progress shows what it really is.
+  const viewDry = () => !!cfg.dryRun;   // the mode the panel shows and starts in: exactly what cfg says. Safety paths set it on purpose (refused Live, a reload resumed as a dry run), so the render never overrides it.
   function onMain() {
     if (running) return stop();
-    if (cfg.dryRun) return start();
-    if (Date.now() < confirmUntil) { confirmUntil = 0; return start(); }
+    if (viewDry()) return start();
+    if (Date.now() < confirmUntil) { confirmUntil = 0; return start({ dryRun: false }); }
     confirmUntil = Date.now() + 6000;
     render();
     setTimeout(render, 6100);
@@ -9551,84 +9634,65 @@ try {
 
   function renderPanel(s) {
     const t = tone();
-    refs.dot.className = refs.stateDot.className = 'idc-dot ' + t;
-    refs.badge.textContent = cfg.dryRun ? 'Dry run' : 'Live';
-    refs.badge.className = 'idc-badge' + (cfg.dryRun ? '' : ' live');
+    K.setTone(P.dot, t);
+    refs.badge.textContent = viewDry() ? 'Dry run' : 'Live';
+    refs.badge.className = 'idc-badge' + (viewDry() ? '' : ' live');
     if (!s) {
-      refs.phase.textContent = '—'; refs.phaseOf.textContent = ''; refs.rows.replaceChildren(); refs.check.replaceChildren();
-      refs.state.textContent = 'Waiting for the game to load…';
+      refs.hero.set('—', '', 0); refs.rows.set([]); refs.check.set([]);
+      refs.state.set(t, 'Waiting for the game to load…');
     } else {
       const ph = phaseOf(s);
-      refs.phase.textContent = ph === 'done' ? 'Plan done' : `Phase ${ph}`;
-      refs.phaseOf.textContent = ph === 'done' ? '' : 'of 5';
       const list = checklist(s);
       const marks = list.filter(([, v]) => /^(✓|·|researching|queued)/.test(v));
-      refs.bar.style.width = (marks.length ? (marks.filter(([, v]) => v.startsWith('✓')).length / marks.length) * 100 : 0) + '%';
-      refs.rows.replaceChildren(
-        row('Money', `${usd(s.money)} · floor ${usd(moneyFloor(s))}`),
-        row('CD', uiNum(s.cd)),
-        row('Acres', `${s.acresUsed} / ${s.acresOwned} · next ${usd(acrePrice(s.landBought))}`),
-        row('Power', `${s.powerHave} MW (need ${s.powerNeed})`),
-        row('Courier', s.courierFree ? 'free' : `busy, ${courierEta(s)}`),
-        row('Actions', `${actions} sent this session`),
-        ...(cashRate() ? [row('Cash change', `${signed(cashRate().perHour)}/h (last ${cashRate().mins} min)`)] : []),
-        ...(rateScale < 1 ? [row('Pace', `${Math.round(rateScale * 100)}% after an action the server did not apply`)] : []));
+      refs.hero.set(ph === 'done' ? 'Plan done' : `Phase ${ph}`, ph === 'done' ? '' : 'of 5', marks.length ? (marks.filter(([, v]) => v.startsWith('✓')).length / marks.length) * 100 : 0);
+      refs.rows.set([
+        ['Money', `${usd(s.money)} · floor ${usd(moneyFloor(s))}`],
+        ['CD', K.fmt(s.cd)],
+        ['Acres', `${s.acresUsed} / ${s.acresOwned} · next ${usd(acrePrice(s.landBought))}`],
+        ['Power', `${s.powerHave} MW (need ${s.powerNeed})`],
+        ['Courier', s.courierFree ? 'free' : `busy, ${courierEta(s)}`],
+        ['Actions', `${actions} sent this session`],
+        ...(cashRate() ? [['Cash change', `${signed(cashRate().perHour)}/h (last ${cashRate().mins} min)`]] : []),
+        ...(rateScale < 1 ? [['Pace', `${Math.round(rateScale * 100)}% after an action the server did not apply`]] : []),
+      ]);
       const skip = new Set(['Phase', 'Money', 'CD', 'Acres', 'Power', 'Courier']);
-      refs.check.replaceChildren(...list.filter(([k]) => !skip.has(k)).map(([k, v]) => row(k, String(v))));
+      refs.check.set(list.filter(([k]) => !skip.has(k)).map(([k, v]) => [k, String(v)]));
       const held = running && heldReason();
       let next;
       try { const d = decide(s); next = d.wait ? 'Waiting: ' + d.wait : 'Next: ' + d.reason; } catch (e) { next = 'error: ' + e.message; }
-      refs.state.textContent = held ? `Paused: ${held}`
+      refs.state.set(t, held ? `Paused: ${held}`
         : running ? (cfg.dryRun ? 'Dry run. ' : '') + next
-        : (stopReason ? `Stopped: ${stopReason}. ` : 'Stopped. ') + next;
+        : (stopReason ? `Stopped: ${stopReason}. ` : 'Stopped. ') + next);
     }
     const n = cdFarmNote();
-    refs.note.hidden = !n;
-    if (n) { refs.noteText.textContent = n.text; refs.noteBtn.hidden = !n.btn || !W.cdFarm?.panel; }
+    refs.cdNote.set(n?.text ?? '', !!n?.btn && !!W.cdFarm?.panel);
     refs.log.replaceChildren(...log.map((l) => mk('div', {}, l)));
-    refs.live.el.hidden = !liveCountdownUntil;
-    if (liveCountdownUntil) refs.live.text.textContent = `Resuming Live after the reload in ${Math.max(0, Math.ceil((liveCountdownUntil - Date.now()) / 1000))} s. Cancel to resume as a dry run instead.`;
-    refs.stall.el.hidden = !stalled;
-    if (stalled) refs.stall.text.textContent = `Looks stalled: ${stalled}. Autopilot keeps running; check the log below.`;
-    if (ui.tab === 'log' && !ui.min) { refs.logv.render(); refs.logv.markSeen(); }
-    const unseen = ui.tab === 'log' ? 0 : refs.logv.unseen();
-    P.setTabBadge('log', unseen ? unseen + ' new problem' + (unseen > 1 ? 's' : '') : '', true);
+    refs.live.set(liveCountdownUntil ? `Resuming Live after the reload in ${Math.max(0, Math.ceil((liveCountdownUntil - Date.now()) / 1000))} s. Cancel to resume as a dry run instead.` : '');
+    refs.stall.set(stalled ? `Looks stalled: ${stalled}. Autopilot keeps running; check the log below.` : '');
+    K.syncLog(P, ui, refs.logv);
     refs.alertBtn.hidden = core.notifyPerm() !== 'default';
 
     // Settings
-    const locked = running && !cfg.dryRun;
-    refs.importBtn.disabled = refs.resetBtn.disabled = locked;
-    refs.fs.disabled = locked;
-    refs.lock.hidden = !locked;
+    refs.settings.sync(running && !cfg.dryRun);
     let changed = 0;
-    for (const [key, f] of Object.entries(refs.fields)) {
-      if (document.activeElement !== f.input) f.input.value = shown(key);
-      f.msg.hidden = !parseErr[key]; f.msg.textContent = parseErr[key] || '';
-      f.box.classList.toggle('bad', !!parseErr[key]);
-      const mod = !same(cfg[key], DEFAULTS[key]);
-      if (mod) changed++;
-      K.setModified(f.el, mod, 'Reset to the default (' + (shownOf(key, DEFAULTS[key]) || FIELDS[key].empty || 'none') + ')', () => { delete parseErr[key]; setCfg(key, DEFAULTS[key]); });
-    }
-    for (const [key, input, label] of refs.checks) {
-      input.checked = !!cfg[key];
-      const mod = !!cfg[key] !== !!DEFAULTS[key];
-      label.classList.toggle('mod', mod); label.title = mod ? 'Changed from the default' : '';
-      if (mod) changed++;
-    }
+    for (const f of Object.values(refs.fields)) if (f.sync()) changed++;
+    for (const k of Object.keys(refs.toggles)) if (refs.toggles[k].sync()) changed++;
     P.setTabBadge('settings', changed ? changed + ' setting' + (changed > 1 ? 's' : '') + ' changed from the defaults' : '');
-        refs.billNow.textContent = `Now ${cfg.billHours} h${s ? ` = ${usd(moneyFloor(s))} kept` : ''}. Back to 1 h on reload.`;
+    refs.billNow.textContent = `Now ${cfg.billHours} h${s ? ` = ${usd(moneyFloor(s))} kept` : ''}. Back to 1 h on reload.`;
 
     // Footer
+    // Dry run is experimental: off by default, so the panel runs Live unless the switch is on.
+    refs.mode.el.hidden = !ui.dryRunSwitch;
+    refs.dryRunSwitch.input.disabled = running || active;
     refs.mode.sync();
     refs.mode.btns.forEach((b) => { b.disabled = running || active; });
     const other = lockOwner() && lockOwner() !== TAB && !running;
-    const confirming = !running && !cfg.dryRun && Date.now() < confirmUntil;
-    refs.plan.hidden = running;
-    refs.plan.classList.toggle('hot', confirming);
-    refs.plan.textContent = cfg.dryRun
+    const confirming = !running && !viewDry() && Date.now() < confirmUntil;
+    refs.plan.set(viewDry()
       ? 'Dry run: works out every step and writes it to the log, but sends nothing.'
-      : `Live: sends actions to the game, one confirmed step at a time, and never spends below the power-bill floor${s ? ` (${usd(moneyFloor(s))})` : ''}.${confirming ? ' Click Confirm start to go.' : ''}`;
-    refs.main.textContent = running ? 'Stop' : other ? 'Running in another tab' : active ? 'Stopping…' : cfg.dryRun ? 'Start dry run' : confirming ? 'Confirm start' : 'Start live';
+      : `Live: sends actions to the game, one confirmed step at a time, and never spends below the power-bill floor${s ? ` (${usd(moneyFloor(s))})` : ''}.${confirming ? ' Click Confirm start to go.' : ''}`,
+    { hidden: running, hot: confirming });
+    refs.main.textContent = running ? 'Stop' : other ? 'Running in another tab' : active ? 'Stopping…' : viewDry() ? 'Start dry run' : confirming ? 'Confirm start' : 'Start live';
     refs.main.disabled = !running && (other || active || !s);
     refs.alt.hidden = !confirming;
   }
@@ -9640,7 +9704,7 @@ try {
     const s = read();
     const t = tone();
     const ph = s ? phaseOf(s) : null;
-    chrome?.setPill(heldReason() ? 'Held' : cfg.dryRun ? 'Dry run' : ph === 'done' ? 'Done' : `P${ph ?? '?'}`, t, !running);
+    chrome?.setPill(heldReason() ? 'Held' : viewDry() ? 'Dry run' : ph === 'done' ? 'Done' : `P${ph ?? '?'}`, t, !running);
     chrome?.setChip(ph == null ? 'Autopilot' : ph === 'done' ? 'Plan done' : `Phase ${ph}`, t,
       `Autopilot · ${running ? (heldReason() ? 'paused' : cfg.dryRun ? 'dry run' : 'live') : 'stopped'}`);
     const open = !!P?.el.isConnected;
@@ -9662,6 +9726,7 @@ try {
       navInsert: (nav, el) => nav.insertBefore(el, nav.querySelector('.cdf-tab')),   // above CD Farm's tab
       chipInsert: (tools, el) => tools.insertBefore(el, tools.querySelector('.cdf-chip') || tools.querySelector('.tip-anchor') || null),
     });
+    if (!ui.dryRunSwitch && !running && !active) cfg.dryRun = false;   // Dry run is experimental: off by default, so the panel starts Live unless the switch is on.
     chrome.mount();
     uiTimer = setInterval(render, 1000);
     if (ui.open) panel(true); else render();
@@ -9673,7 +9738,6 @@ try {
     P = chrome = null;
     removeEventListener('resize', onResize);
   }
-
 // continues the autopilot closure from autopilot-5.js (same try / IIFE)
   // ---- load ---------------------------------------------------------------------------
 

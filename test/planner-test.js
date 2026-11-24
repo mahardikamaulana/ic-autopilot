@@ -10,7 +10,7 @@ const slice = (files, name) => {
   const s = [].concat(files).map((file) => fs.readFileSync(path.join(__dirname, '..', 'src', file), 'utf8')).join('\n');
   return s.slice(s.indexOf('// @@MODULE ' + name), s.indexOf('// @@END ' + name));
 };
-(0, eval)(slice(['core-1.js', 'core-2.js', 'core-3.js'], 'core') + '\n' + slice('planner.js', 'planner'));
+(0, eval)(slice(['core-1.js', 'core-2.js', 'core-form.js', 'core-3.js'], 'core') + '\n' + slice('planner.js', 'planner'));
 const P = globalThis.idleCore.planner;
 
 let failed = 0;
@@ -65,10 +65,10 @@ t('plan: I = 0 stops at minUnits; huge I fills a cap', () => {
   assert.deepStrictEqual(unitsOf(r), { [CAMP]: 2, [FARM]: 2 });
   const one = P.plan(deepFreeze(base({ minUnits: 4, maxTypes: 1 })));
   assert.deepStrictEqual(unitsOf(one), { [CAMP]: 4 });
-  const acres = P.plan(deepFreeze(base({ I: 1e12, usableAcres: 12 })));
+  const acres = P.plan(deepFreeze(base({ I: 1e12, usableAcres: 12, T: 1000 })));   // a long cycle, so the demolish queue never binds
   assert.strictEqual(total(acres), 12);
   assert.strictEqual(acres.binding, 'acres');
-  const batch = P.plan(deepFreeze(base({ I: 1e12, usableAcres: 500, maxBatch: 30 })));
+  const batch = P.plan(deepFreeze(base({ I: 1e12, usableAcres: 500, maxBatch: 30, T: 1000 })));
   assert.strictEqual(total(batch), 30);
   assert.strictEqual(batch.binding, 'batch');
 });
@@ -179,7 +179,7 @@ t('signature is order independent and tracks Retail and running recipes', () => 
 
 t('plan: a new type that is not worth its extra step does not end the plan; the next unit of an existing type is tried', () => {
   // Mine is cheapest per CD, then Farm (new type, 20.5/CD) beats Mine from its 5th unit on. A step costing 1e6 s makes Farm never worth it.
-  const r = P.plan(deepFreeze(base({ unlocked: [MINE], owned: { [CAMP]: 100 }, stock: { [WF]: 1000 }, I: 1e9, R: 500, T: 60, TperType: 1e6, maxBatch: 10 })));
+  const r = P.plan(deepFreeze(base({ unlocked: [MINE], owned: { [CAMP]: 100 }, stock: { [WF]: 1000 }, I: 1e9, R: 500, T: 200, TperType: 1e6, maxBatch: 10 })));
   assert.deepStrictEqual(unitsOf(r), { [MINE]: 10 }, JSON.stringify(unitsOf(r)));
 });
 
@@ -212,19 +212,53 @@ const ladder = (over = {}) => base({
 });
 const perCdDollars = (r) => r.perCdCents / 100;
 
-t('Auto planner: Stage D ladder picks Farm at the wiki batch costs ($/CD)', () => {
-  for (const [batch, want] of [[8, 27.7], [16, 35.9]]) {
-    const r = P.plan(deepFreeze(ladder({ maxBatch: batch })));
-    assert.deepStrictEqual(unitsOf(r), { [FARM]: batch }, 'batch ' + batch);
-    assert.ok(Math.abs(perCdDollars(r) - want) <= 0.05, 'batch ' + batch + ' costs ' + perCdDollars(r));
+t('Auto planner: Thrifty (I = 0) runs the Farm ladder one at a time at $20.50 per CD', () => {
+  // The wiki batch table (27.7 at 8, 35.9 at 16) assumes instant cycles. A Farm takes 10 s to demolish, so a batch of 8
+  // holds the queue for 80 s for the same CD per second as one Farm: at I = 0 the planner keeps one, the cheapest cash per CD.
+  for (const batch of [1, 8, 16]) {
+    const r = P.plan(deepFreeze(ladder({ maxBatch: batch, I: 0 })));
+    assert.deepStrictEqual(unitsOf(r), { [FARM]: 1 }, 'maxBatch ' + batch);
+    assert.ok(Math.abs(perCdDollars(r) - 20.5) <= 0.05, 'costs ' + perCdDollars(r));
   }
+});
+
+t('Auto planner: Fast (time is worth a lot) picks a frame building over the queue-bound Farm', () => {
+  // Ten Mines are owned, so a Mine costs $31 per CD against the Farm's $20.50, but a Mine makes 8 CD per 14 s of queue and a Farm 1 per 10 s.
+  const r = P.plan(deepFreeze(ladder({ maxBatch: 8 })));
+  assert.ok(Object.keys(unitsOf(r)).some((b) => Number(b) !== FARM && Number(b) !== CAMP), JSON.stringify(unitsOf(r)));   // Mine or Quarry: 8 CD per 14 s of queue
+});
+
+t('queue: a demolish backlog that outlasts the cycle waits instead of queueing more', () => {
+  const r = P.plan(deepFreeze(ladder({ queue: { build: 0, demolish: 30 }, T: 6 })));   // 30 s left: longer than a Farm or Quarry cycle
+  assert.strictEqual(total(r), 0, JSON.stringify(unitsOf(r)));
+  assert.ok(r.wait && /demolish queue/.test(r.wait.reason), JSON.stringify(r.wait));
+});
+
+t('rush: with the queue deep, a Mine is demolished at once for ceil(CD/2) CD, and that CD is netted', () => {
+  const r = P.plan(deepFreeze(base({ unlocked: [MINE], stock: { [WF]: 1000 }, queue: { build: 0, demolish: 30 }, T: 6, cdHave: 100, I: 1e12, R: 100, maxBatch: 3 })));
+  const m = r.units.find((u) => u.b === MINE);
+  assert.ok(m && m.rush >= 1, JSON.stringify(r.units));
+  assert.strictEqual(r.rushCd, m.rush * 4, 'a Mine rush costs 4 CD');
+  assert.strictEqual(r.cdTotal, r.cdGross - r.rushCd, 'net CD');
+});
+
+t('rush: no rush when the stock cannot cover it, so the plan waits for the queue', () => {
+  const r = P.plan(deepFreeze(base({ unlocked: [MINE], stock: { [WF]: 1000 }, queue: { build: 0, demolish: 30 }, T: 6, cdHave: 3, I: 1e12 })));
+  assert.strictEqual(total(r), 0, JSON.stringify(unitsOf(r)));
+  assert.ok(r.wait && /demolish queue/.test(r.wait.reason));
+});
+
+t('rush: at Thrifty (I = 0) with frames in surplus, a deep queue waits and never rushes, however much CD is in stock', () => {
+  const r = P.plan(deepFreeze(base({ unlocked: [MINE], stock: { [WF]: 1000 }, queue: { build: 0, demolish: 30 }, T: 6, cdHave: 1000, I: 0, R: 100, maxBatch: 3 })));
+  assert.strictEqual(r.rushCd, 0, JSON.stringify(r.units));
+  assert.ok(!r.units.some((u) => u.rush > 0), JSON.stringify(r.units));
 });
 
 t('Auto planner: with Wooden Frames valued (a Rivet run eats them) the plan stays on Farm, one type', () => {
   const iv = P.itemValues({ catalog: C, bids: {}, runningInputs: [WF] });
   assert.ok(iv[WF] > 0);
-  const r = P.plan(deepFreeze(ladder({ itemValue: { [WF]: iv[WF] }, maxTypes: 2 })));
-  assert.deepStrictEqual(unitsOf(r), { [FARM]: 16 });
+  const r = P.plan(deepFreeze(ladder({ itemValue: { [WF]: iv[WF] }, maxTypes: 2, I: 0 })));
+  assert.deepStrictEqual(unitsOf(r), { [FARM]: 1 });
 });
 
 t('Auto planner: Wooden Frames worth nothing (nothing consumes them) pull in Quarry/Mine unless the item is reserved', () => {
@@ -233,7 +267,7 @@ t('Auto planner: Wooden Frames worth nothing (nothing consumes them) pull in Qua
   assert.ok(Object.keys(unitsOf(loose)).some((b) => Number(b) !== FARM), 'frames are free: ' + JSON.stringify(unitsOf(loose)));
   assert.ok(perCdDollars(loose) < 35.9, 'cheaper per CD only because the frames cost nothing');
   const guarded = P.plan(deepFreeze(ladder({ itemValue: { [WF]: 0 }, maxTypes: 2, reserve: { [WF]: Infinity } })));
-  assert.deepStrictEqual(unitsOf(guarded), { [FARM]: 16 }, 'reserved frames are not spent');
+  assert.deepStrictEqual(unitsOf(guarded), { [FARM]: 1 }, 'reserved frames are not spent');
   assert.ok(guarded.notes.some((n) => /skipped: item:/.test(n)), guarded.notes.join(' | '));
 });
 

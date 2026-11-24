@@ -8,7 +8,7 @@ const assert = require('assert');
 const ROOT = path.join(__dirname, '..');
 const PLAN = path.join(ROOT, '..', 'scripts', 'core-plan');
 const state = JSON.parse(fs.readFileSync(path.join(PLAN, 'state-example.json'), 'utf8'));
-const catalog = JSON.parse(fs.readFileSync(path.join(PLAN, 'catalog-2026-11-22.json'), 'utf8'));
+const catalog = JSON.parse(fs.readFileSync(path.join(PLAN, 'catalog-2026-11-24.json'), 'utf8'));
 
 const slice = (file, name) => {
   const s = fs.readFileSync(path.join(ROOT, 'src', file), 'utf8');
@@ -75,10 +75,10 @@ function matchSpec(spec, r) {
 const spec = runSpec();
 
 t('spec sanity: the parsed my-plan.js numbers are the wiki example', () => {
-  assert.strictEqual(spec.lastAcre, 293);
-  assert.strictEqual(spec.batch, 16);
-  near(spec.tWall, 78.6, 0.05, 'T_wall');
-  assert.deepStrictEqual([spec.camps, spec.sawmills, spec.workshops], [112, 101, 20]);
+  assert.strictEqual(spec.lastAcre, 360);
+  assert.strictEqual(spec.batch, 1);
+  near(spec.tWall, 1402.8, 0.05, 'T_wall');
+  assert.deepStrictEqual([spec.camps, spec.sawmills, spec.workshops], [149, 134, 26]);
 });
 
 t('landRule matches my-plan.js on state-example + catalog (raw client arrays)', () => {
@@ -89,16 +89,16 @@ t('landRule matches my-plan.js with a different state (fewer acres, more buildin
   const alt = { ...state, acres: 150, acrePrice: 1000, camps: 120, sawmills: 40, workshops: 9, fixedAcres: 30 };
   const f = path.join(__dirname, '.core-math-alt-state.json');
   fs.writeFileSync(f, JSON.stringify(alt));
-  try { matchSpec(runSpec([f, path.join(PLAN, 'catalog-2026-11-22.json')]), CM.landRule(alt, catalog)); }
+  try { matchSpec(runSpec([f, path.join(PLAN, 'catalog-2026-11-24.json')]), CM.landRule(alt, catalog)); }
   finally { fs.unlinkSync(f); }
 });
 
-t('bestBatch reproduces the wiki CD ladder table', () => {
-  for (const [income, k, perCd] of [[150000, 8, 27.7], [350000, 16, 35.9], [600000, 23, 43.0]]) {
+t('bestBatch: the 360 CD/h demolish cap makes batch 1 the cheapest at every income', () => {
+  for (const income of [150000, 350000, 600000]) {
     const b = CM.bestBatch('farm', 0, income, 600);
-    assert.strictEqual(b.k, k, 'batch at ' + income);
-    near(b.perCd, perCd, 0.05, '$/CD at ' + income);
-    near(b.cdH, 600 * k, 0, 'CD/h at ' + income);
+    assert.strictEqual(b.k, 1, 'batch at ' + income);
+    near(b.perCd, 20.5, 0.05, '$/CD at ' + income);
+    near(b.cdH, 360, 0, 'CD/h at ' + income);
   }
   near(CM.batchCost('farm', 70, 8) / 8, 171.2, 0.05, 'farm owned 70 batch 8');
   near(CM.batchCost('dock', 0, 8) / 8, 121.3, 0.05, 'dock batch 8');
@@ -121,16 +121,14 @@ t('engineModel: wiki constants, works on unkeyed arrays and id-keyed objects', (
   assert.throws(() => CM.engineModel({ items: [], recipes: [] }), /Fell Wood/);
 });
 
-t('opts.cyclesPerHour overrides state.cyclesPerHour: 300 cycles/h raises T_wall (bigger batch partly compensates)', () => {
+t('opts.cyclesPerHour overrides state.cyclesPerHour: a slower CD rate is made up by a bigger batch, so T_wall stays at the cap', () => {
   const base = CM.landRule(state, catalog);
   const slow = CM.landRule(state, catalog, { cyclesPerHour: 300 });
   const same = CM.landRule({ ...state, cyclesPerHour: 300 }, catalog);
   near(slow.tWall, same.tWall, 1e-9, 'opts vs state');
-  const ratio = slow.tWall / base.tWall;
-  // Half the cycles/h lets the ladder afford a bigger batch (income / cycles), so CD/h falls by less than half: 9,600 -> 7,800.
-  assert.ok(ratio > 1.1 && ratio < 2.1, 'T_wall ratio ' + ratio);
-  assert.strictEqual(slow.batch, 26);
-  near(slow.cdPerHour, 7800, 0.5, 'CD/h at 300 cycles/h');
+  near(slow.tWall, base.tWall, 1e-9, 'T_wall at the cap');
+  assert.strictEqual(slow.batch, 2);
+  near(slow.cdPerHour, 360, 0.5, 'CD/h at 300 cycles/h');
   assert.ok(slow.lastAcre >= base.lastAcre, 'a longer T_wall widens the payback limit, so the last acre never moves down');
   assert.strictEqual(CM.landRule(state, catalog, {}).tWall, base.tWall);
 });
@@ -138,7 +136,7 @@ t('opts.cyclesPerHour overrides state.cyclesPerHour: 300 cycles/h raises T_wall 
 t('opts.cdPerHour (a measured CD rate) sets T_wall instead of the modelled batch; tWallFrom says which', () => {
   const base = CM.landRule(state, catalog);
   assert.strictEqual(base.tWallFrom, 'model');
-  const r = CM.landRule(state, catalog, { cdPerHour: 755000 / 10 });
+  const r = CM.landRule(state, catalog, { cdPerHour: 505000 / 10 });
   assert.strictEqual(r.tWallFrom, 'measured');
   near(r.tWall, 10, 1e-9, 'T_wall');
   near(r.limitHours, 10 / 3, 1e-9, 'payback limit');
@@ -156,10 +154,10 @@ t('edge: already past the last acre -> acresToBuy 0, no land cost, nothing to bu
   assert.strictEqual(rich.buildingCost, 0);
 });
 
-t('edge: missing optional state fields use the spec defaults (600 cycles/h, buffer 16, fixed 0)', () => {
+t('edge: missing optional state fields use the spec defaults (600 cycles/h, buffer 2, fixed 0)', () => {
   const { cyclesPerHour, cdBufferAcres, fixedAcres, ...lean } = state;
   const r = CM.landRule(lean, catalog);
-  assert.strictEqual(r.bufferAcres, 16);
+  assert.strictEqual(r.bufferAcres, 2);
   assert.strictEqual(r.fixedAcres, 8);
   assert.ok(Number.isFinite(r.tWall) && r.tWall > 0);
 });

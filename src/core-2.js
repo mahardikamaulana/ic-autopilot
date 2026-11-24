@@ -59,14 +59,14 @@ body:has(.shell)>.idc-panel{--idc-bottom:calc(var(--chrome-h,120px) + 8px)}
 .idc-group{display:grid;gap:10px;min-width:0}
 .idc-group+.idc-group{padding-top:14px;border-top:1px solid var(--border,rgba(255,255,255,.09))}
 .idc-gh{margin:0;font-size:10.5px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--idc-muted)}
-.idc-sub>summary,.idc-sec>summary{cursor:pointer;color:var(--ink-2,#b6b6ba);font-size:12.5px;list-style:none;display:flex;justify-content:space-between}
-.idc-sub>summary::-webkit-details-marker,.idc-sec>summary::-webkit-details-marker{display:none}
-.idc-sub>summary::after,.idc-sec>summary::after{content:"›";display:inline-block;transition:transform .15s}
-.idc-sub[open]>summary::after,.idc-sec[open]>summary::after{transform:rotate(90deg)}
-.idc-sub[open]>summary,.idc-sec[open]>summary{margin-bottom:12px}
-.idc-sub>.idc-group{gap:12px}
+.idc-sec>summary{cursor:pointer;color:var(--ink-2,#b6b6ba);font-size:12.5px;list-style:none;display:flex;justify-content:space-between}
+.idc-sec>summary::-webkit-details-marker{display:none}
+.idc-sec>summary::after{content:"›";display:inline-block;transition:transform .15s}
+.idc-sec[open]>summary::after{transform:rotate(90deg)}
+.idc-sec[open]>summary{margin-bottom:12px}
+.idc-sec>.idc-group{gap:12px}
 fieldset.idc-form{border:0;margin:0;padding:0;min-width:0;display:grid;gap:14px}
-fieldset.idc-form:disabled .idc-field,fieldset.idc-form:disabled .idc-check,fieldset.idc-form:disabled .idc-sub{opacity:.6}
+fieldset.idc-form:disabled .idc-field,fieldset.idc-form:disabled .idc-check,fieldset.idc-form:disabled .idc-sec{opacity:.6}
 .idc-lock{display:flex;gap:8px;align-items:center;padding:8px 10px;border-radius:8px;background:var(--surface-2,#1d1d20);font-size:12px;color:var(--ink-2,#b6b6ba)}
 .idc-field{display:grid;grid-template-columns:minmax(0,1fr);gap:6px;min-width:0}
 .idc-fl{display:flex;align-items:center;justify-content:space-between;gap:6px;min-height:18px}
@@ -195,10 +195,9 @@ body:has(>.idc-docked:not(.idc-ghost)) .idc-toasts{right:calc(var(--idc-dock,360
     const box = h('div', { class: 'idc-inp' }, ...(prefix ? [h('span', {}, prefix)] : []), input, ...(suffix ? [h('span', {}, suffix)] : []));
     return { input, box };
   }
-  function check(input, text, hint) { return h('label', { class: 'idc-check' }, input, h('span', {}, text, ...(hint ? [h('small', {}, hint)] : []))); }
   // Segmented radio group with roving tabindex and arrow keys.
   function seg(opts, cur, onPick, label = '') {
-    const btns = opts.map((o) => h('button', { type: 'button', role: 'radio', onclick: () => onPick(o.id) }, o.label));
+    const btns = opts.map((o) => h('button', { type: 'button', role: 'radio', onclick: () => onPick(o.id), ...(o.full ? { title: o.full, 'aria-label': o.full } : {}) }, o.label));
     const el = h('div', { class: 'idc-seg', role: 'radiogroup', 'aria-label': label }, ...btns);
     el.addEventListener('keydown', (e) => {
       const d = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];

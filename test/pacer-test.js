@@ -13,7 +13,7 @@ const slice = (files, name) => {
 };
 globalThis.idleCore?._unload?.();
 globalThis.idleCore = undefined;
-(0, eval)(slice(['core-1.js', 'core-2.js', 'core-3.js'], 'core') + '\n' + slice('pacer.js', 'pacer'));
+(0, eval)(slice(['core-1.js', 'core-2.js', 'core-form.js', 'core-3.js'], 'core') + '\n' + slice('pacer.js', 'pacer'));
 const core = globalThis.idleCore;
 const { measure } = core;
 

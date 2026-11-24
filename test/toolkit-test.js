@@ -174,7 +174,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     fresh();
     (0, eval)(coreSrc);
     const core = globalThis.idleCore;
-    for (const k of ['row', 'group', 'field', 'setModified', 'inputBox', 'check', 'seg', 'confirmBtn', 'createPanel', 'createChrome', 'createLogView', 'ensureStyle']) assert.strictEqual(typeof core.ui[k], 'function', 'ui.' + k);
+    for (const k of ['group', 'field', 'inputBox', 'createPanel', 'createChrome', 'createLogView', 'ensureStyle', 'hero', 'rowList', 'stateLine', 'banner', 'disclosure', 'amountField', 'toggleField', 'segField', 'quickPicks', 'runModeSeg', 'settingsTab', 'footer', 'logTab', 'syncLog', 'resetSettings']) assert.strictEqual(typeof core.ui[k], 'function', 'ui.' + k);
     core.toast('plain'); core.toast('kind', 'error'); core.toast('undo', { kind: 'success', undo() {} });
     core.ledger.clear(); core.ledger.add('AP', 'action', 'a'); core.ledger.add('CD', 'fail', 'b');
     const snap = core.ledger.list();

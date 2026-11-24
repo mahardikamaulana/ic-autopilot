@@ -3,7 +3,7 @@
 // ============================================================================
 // Feeds and tunes CD Farm's Auto mode per stage (wiki/guides/core-game-plan.md section 11); it never cycles buildings itself.
 //   CD need (out.cdNeed): A = next unlock (Assembly Plant 20,000), B = Retail Store 5,000 banked, C = none (pause Auto once),
-//   D = none until the retail checkpoint passes, then Oil Rig 5,000, then Refinery 750,000 (11.4: 755,000 farmed in Stage D).
+//   D = none until the retail checkpoint passes, then Oil Rig 5,000, then Refinery 500,000 (11.4: 505,000 farmed in Stage D).
 //   Auto tuning through cdFarm.importCfg, only between runs and only for keys that differ, read back after:
 //   land 'off' (Core plan owns land), pace, batch (core-math bestBatch at the measured income), reserveAcres, maxTypes 1 in D,
 //   autoStart: armed when Auto is off and nothing says the user wants it off. The user's Stop (or unticking it) is sticky until
@@ -18,7 +18,7 @@ try {
   if (!W.corePlan?.addDirector) throw new Error('Core plan did not load');
   const M = W.idleCore?.coreMath;
   if (!M) throw new Error('core-math did not load');
-  const NAME = 'ladder', WALL_CD = 755000;
+  const NAME = 'ladder', WALL_CD = 505000;   // Oil Rig 5,000 + Refinery 500,000 (2026-11-24 catalog)
   const fmt = (n) => Math.round(n).toLocaleString('en-US');
   const cfgOf = () => W.corePlan.cfg;
   // A Live session = Core plan stepping live without a long gap; a reload starts a new one (new LOAD token).
