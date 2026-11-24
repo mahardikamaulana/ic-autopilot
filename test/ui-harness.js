@@ -134,7 +134,7 @@ async function autoSetup(page) {
   await page.evaluate(() => {
     const st = window.__st, ws = window.__ws, cat = window.__fiber.memoizedProps.catalog, B = Object.fromEntries(cat.buildings.map((b) => [b.id, b]));
     const sent = [];
-    let tick = st.ssi.last_user_mutation_tick;
+    let tick = st.ssi.last_user_mutation_tick, lagged = null;
     const owned = (b) => (st.building_pool[0][b] ?? 0) + Object.values(st.groups).filter((g) => g.building === b).reduce((a, g) => a + g.count, 0);
     const price = (b, i) => Math.floor(B[b].cost * (20 + owned(b) + i) / 20);
     const orig = ws.send;
@@ -155,6 +155,7 @@ async function autoSetup(page) {
           setTimeout(() => { pool[o.building] = (pool[o.building] ?? 0) + o.amount; st.items[24] += o.amount * window.idleCore.planner.cdOf(cat, o.building); }, mode.buildEnd - now);
           if (mode.cashMidBuild) setTimeout(() => { st.items[0] += mode.cashMidBuild; }, mode.buildMs / 2);   // a queued demolish's refund (or income) landing mid-build
         } else if (mode.lateBuyMs) { const ms = mode.lateBuyMs; mode.lateBuyMs = 0; setTimeout(applyBuy, ms); return; }   // delivered after the client gave up
+        else if (mode.chargeLagMs) lagged = applyBuy;   // the game applies the Buy to its state (cash, pool, its mutation tick) after the Diff reaches the socket
         else applyBuy();
       } else if (o.type === 'DemolishBuilding') {
         if (mode.ignoreDemolishOnce) { mode.ignoreDemolishOnce = false; return; }
@@ -164,7 +165,13 @@ async function autoSetup(page) {
       } else if (o.type === 'BuyLand') {
         for (let i = 0; i < o.amount; i++) { let p = 5000; for (let j = 0; j < st.land_bought[0]; j++) p = Math.floor(p * 41 / 40); st.items[0] -= p; st.land_bought[0]++; }
       }
-      setTimeout(() => { tick += 4; st.ssi.last_user_mutation_tick = tick; ws.emit({ kind: 'Diff', diff: { ssi: { last_user_mutation_tick: tick } } }); }, mode.ackMs);
+      const late = lagged; lagged = null;
+      setTimeout(() => {
+        tick += 4; const t = tick, apply = () => { st.ssi.last_user_mutation_tick = Math.max(st.ssi.last_user_mutation_tick, t); late?.(); };
+        if (!late) apply();
+        ws.emit({ kind: 'Diff', diff: { ssi: { last_user_mutation_tick: t } } });
+        if (late) setTimeout(apply, mode.chargeLagMs);
+      }, mode.ackMs);
     };
     window.__fake = { sent, mode, restore: () => { ws.send = orig; } };
     window.cdFarm._setPacer(window.idleCore.pacer({ medianMs: { before: 3, step: 3, cycle: 3, poll: 10, reconnect: 10 }, minMs: 1, maxMs: 30, cmdsPerMin: 1e6, thinkP: 0 }));
@@ -173,7 +180,7 @@ async function autoSetup(page) {
   const reset = (extra = '') => page.evaluate((x) => {
     const st = window.__st, cf = window.cdFarm;
     window.__fake.sent.length = 0;
-    Object.assign(window.__fake.mode, { ackMs: 10, ignoreBuy: false, ignoreDemolishOnce: false, lateDemolishMs: 0, lateBuyMs: 0, buildMs: 0, buildEnd: 0, priceMult: 1, cashMidBuild: 0 });
+    Object.assign(window.__fake.mode, { ackMs: 10, ignoreBuy: false, ignoreDemolishOnce: false, lateDemolishMs: 0, lateBuyMs: 0, buildMs: 0, buildEnd: 0, priceMult: 1, cashMidBuild: 0, chargeLagMs: 0 });
     cf._hist.slopes = { money: 0, cd: 0 }; cf._waitMax(1200); cf._graceMs(2000);
     for (const k of Object.keys(cf._quarantine)) delete cf._quarantine[k];
     st.groups = {}; st.building_pool[0] = {}; st.items[0] = 5000000; st.items[24] = 1200; st.land_bought[0] = 0; st.stock[0] = {}; st.unlocked_buildings = [];
@@ -211,6 +218,13 @@ async function autoGroup1(page, { reset, logLines }) {
   await page.evaluate(() => window.cdFarm.start({ by: 'test' }));
   const log1c = await logLines();
   ok(!log1c.some((t) => /catalog says|did not match the catalog/.test(t)) && log1c.some((t) => /no CD needed/.test(t)), 'Auto: cash that lands during a timed build is not a price mismatch', JSON.stringify(log1c.slice(-4)));
+
+  // 1d. the game applies the Buy to its state a while after the ack Diff reaches the socket: a read in between still shows the
+  // old cash, and must not be taken as a $0 charge (the 'paid $0, catalog says ...' stop)
+  await reset('cf.cfg.targetCd = 1212; window.__fake.mode.chargeLagMs = 80;');
+  await page.evaluate(() => window.cdFarm.start({ by: 'test' }));
+  const log1d = await logLines();
+  ok(!log1d.some((t) => /catalog says|did not match the catalog/.test(t)) && log1d.some((t) => /no CD needed/.test(t)), 'Auto: a state that applies the Buy after its ack is not a $0 charge', JSON.stringify(log1d.slice(-4)));
 
   // 2. a Mine unlocked with Wooden Frames in surplus and no running recipe using them: the Mine is the cheaper CD
   await reset('st.unlocked_buildings = [1]; st.stock[0] = { 41: 100 }; cf.cfg.targetCd = 1208;');

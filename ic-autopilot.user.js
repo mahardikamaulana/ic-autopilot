@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IC Autopilot
 // @namespace    idlecorp-toolkit
-// @version      2.8.10
+// @version      2.8.11
 // @author       XPARAD0X
 // @description  Early-game Autopilot, CD Farm (Construction Data by building and demolishing buildings; Auto picks the cheapest source itself), Lab runner (keeps the Manufacturing Labs researching), Auto ship (an "Auto ship" button on every distributor bid) and Auto utilities (an "Auto" switch that keeps the power and water subscriptions at what the groups need) for IdleCorp, each with a panel, menu or switch in the game UI.
 // @homepageURL  https://github.com/mahardikamaulana/ic-autopilot
@@ -2400,9 +2400,17 @@ try {
       inFlight.units.push({ b: u.b, n: u.n }); save();   // from here on a reload or error counts these as possibly built
       const d = send({ type: 'BuyBuilding', building: u.b, amount: u.n, region: REGION });
       const bw0 = hr();
-      // The game charges on the Buy, but refunds of queued demolishes and income keep landing until the build is done: read the charge at the ack.
-      let rAck = null;
-      const rdAck = (f) => { const r = readPool(f); if (r && !rAck && core.sock.muts > d) rAck = r; return r; };
+      // The game charges on the Buy, but refunds of queued demolishes and income keep landing until the build is done: read the
+      // charge from the first state that has applied a player command since the send (the state's own mutation tick: the game can
+      // apply a Diff after the socket listener counts it). The largest single drop in cash is kept too (refunds and income only add).
+      let rAck = null, step = 0, last = rb.money;
+      const rdAck = (f) => {
+        const r = readPool(f);
+        if (!r) return r;
+        if (!rAck && r.mutTick > rb.mutTick) rAck = r;
+        step = Math.max(step, last - r.money); last = r.money;
+        return r;
+      };
       const r1 = await waitConfirm((r) => (r.pool[u.b] ?? 0) >= (rb.pool[u.b] ?? 0) + u.n, d, rdAck, cfg.timeoutMs + Math.ceil((u.n * u.build + rb.queue.build) * 1500));
       buildWait += hr() - bw0;   // the build itself is waited for, not overhead: the round trip above does not include it
       if (!r1) {
@@ -2419,9 +2427,14 @@ try {
       built.push({ u, got: u.n, base });
       holding(u.b, u.n);
       inFlight.units = inFlight.units.filter((x) => x.b !== u.b); save();
-      // F2: what the game charged and gave must match the catalog.
-      const paid = rb.money - (rAck ?? r1).money, allow = Math.max(500, gross * 0.05, Math.max(0, hist.slopes.money ?? 0) * ((rtt ?? 500) + 2000) / 3.6e6);
-      const bad = Math.abs(paid - gross) > allow ? `paid $${fmt(paid / 100)}, catalog says $${fmt(gross / 100)}` : r1.cd - rb.cd === 0 ? 'no Construction Data came with the build' : '';
+      // F2: what the game charged and gave must match the catalog: the drop at the ack, or, when the charge landed later than the
+      // ack, the largest single drop. No drop at all means the charge was not seen yet, not a wrong price.
+      const rEnd = rdAck(true);
+      const atAck = rAck ? rb.money - rAck.money : 0, allow = Math.max(500, gross * 0.05, Math.max(0, hist.slopes.money ?? 0) * ((rtt ?? 500) + 2000) / 3.6e6);
+      const paid = Math.abs(atAck - gross) <= allow ? atAck : step, charged = atAck > 0 || step > 0;
+      if (!charged) console.warn(`[cdFarm] ${u.name}: the charge did not show in the cash; price check skipped`);
+      const cdGot = Math.max(r1.cd, rEnd?.cd ?? 0) - rb.cd;
+      const bad = charged && Math.abs(paid - gross) > allow ? `paid $${fmt(paid / 100)}, catalog says $${fmt(gross / 100)}` : cdGot <= 0 ? 'no Construction Data came with the build' : '';
       if (!bad) mismatch[u.b] = 0;
       else if ((mismatch[u.b] = (mismatch[u.b] ?? 0) + 1) >= 2) { mismatch[u.b] = 0; strike(u.b, u.name, bad); }
       else core.ledger.add('CD', 'info', `Auto: ${u.name}: ${bad}; checking once more`);
