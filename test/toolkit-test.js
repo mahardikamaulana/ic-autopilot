@@ -1184,7 +1184,6 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       assert.deepStrictEqual([m().load, m().need, m().have], [6, 6, 12], 'Workshop x4 (1 MW each) + Smelter x1 (2 MW)');
       assert.deepStrictEqual(ut._want(m()), { want: 6, over: 0 });
       assert.strictEqual(ut._want(m(), 2).want, 8, 'spare is added on top');
-      assert.strictEqual(ut._want(m(), 2, 10).want, 10, 'a floor wins over a lower need');
       assert.strictEqual(ut._want({ ...m(), need: -30 }, 3).want, 0, 'nothing needed: no spare, no subscription');
       assert.deepStrictEqual(ut._want({ ...m(), util: 'power', need: 250.2 }), { want: 200, over: 251 }, 'capped at 200 MW and flagged');
       assert.strictEqual(ut._want({ util: 'water', need: 120.01 }).want, 121, 'rounded up to a whole unit');
@@ -1396,20 +1395,9 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     } finally { unloadUt(); }
   });
 
-  await t('Auto utilities: never lowers power under what Autopilot would subscribe, and export / import keeps only valid settings', () => {
+  await t('Auto utilities: export / import keeps only valid settings', () => {
     const { ut, core } = loadUt();
     try {
-      const st = baseState(), cat = board.catalog;
-      st.groups = { 1: run(SMELTER, 3, recOf(SMELTER).id, 0), 2: run(SMELTER, 2, recOf(SMELTER).id, 0, { paused: true }) };
-      assert.strictEqual(ut._floor('power', 0, st, cat), 0, 'Autopilot not running: no floor');
-      globalThis.earlyGame = { running: true, busy: false, held: '' };
-      assert.strictEqual(ut._floor('power', 0, st, cat), 0, 'Autopilot in a dry run sends nothing: no floor');
-      globalThis.earlyGame = { running: true, busy: true, held: 'lab' };
-      assert.strictEqual(ut._floor('power', 0, st, cat), 0, 'held: no floor');
-      globalThis.earlyGame = { running: true, busy: true, held: '' };
-      assert.strictEqual(ut._floor('power', 0, st, cat), 6, 'its unpaused groups at full draw: Smelter x3 = 6 MW');
-      assert.strictEqual(ut._floor('water', 0, st, cat), 0, 'it never subscribes water');
-      assert.strictEqual(ut._floor('power', 2, st, cat), 0, 'it only works Heartland');
       ut.set('power', true); ut.conf.power.spare = 2; ut.conf.holdMin = 15;
       const json = core.exportConfig();
       assert.deepStrictEqual(JSON.parse(json).autoUtil.cfg.power, { on: true, spare: 2 });

@@ -18,8 +18,8 @@
 //     before a bill, so the level never drops and has to be bought again inside one period. It never lowers the first hold minutes.
 //   - cash must cover the raise now AND the next bill, which is for the higher level (every subscription is billed together): a raise
 //     the cash cannot cover is cut to what it can, and nothing is sent when it cannot cover one unit.
-//   - while Autopilot sends live actions (not a dry run, not held), power never goes below what Autopilot itself would subscribe
-//     (all its unpaused groups at full draw), so the two do not undo each other.
+//   - power has one owner: while Auto power is on, Autopilot stands down on power, so idle groups (unpaused, no work) are not paid for
+//     and the two never undo each other.
 //   - every change is confirmed by the subscription value in the game state; 3 unconfirmed sends in a row switch that utility off
 //     (a closed game socket is waited out, it is not a failed send).
 // The switches are saved in this browser. Alt+Shift+X switches them off with everything else.
@@ -134,19 +134,11 @@ try {
     return { util, region, have, load, sold, gen, discharge, imported, waiting, need: load + sold + waiting - gen - discharge - imported };
   }
 
-  // The level that covers a measurement: ceil(need) plus the spare (only when something needs it), not below floor, over the cap flagged.
-  function wantOf(m, spare = 0, floor = 0) {
+  // The level that covers a measurement: ceil(need) plus the spare (only when something needs it), over the cap flagged.
+  function wantOf(m, spare = 0) {
     const u = UTILS[m.util];
-    const raw = Math.max(m.need > 0 ? Math.ceil(m.need - 1e-9) + spare : 0, floor);
+    const raw = m.need > 0 ? Math.ceil(m.need - 1e-9) + spare : 0;
     return { want: Math.min(u.max, raw), over: raw > u.max ? raw : 0 };
-  }
-
-  // Autopilot subscribes power for every unpaused group at full draw (never lowering): while it sends live actions, that is the least to keep.
-  function autopilotFloor(util, region, st, catalog) {
-    if (util !== 'power' || region !== 0 || !W.earlyGame?.busy || W.earlyGame.held) return 0;
-    const ix = idx(catalog);
-    return Object.values(st.groups ?? {}).filter((g) => (g.region ?? 0) === 0 && !g.paused)
-      .reduce((a, g) => a + (ix.b.get(g.building)?.draws?.power ?? 0) * g.count, 0);
   }
 
   // What the game bills at the next bill, all subscriptions together (cents).
@@ -232,7 +224,7 @@ try {
     let c = ctl.get(key);
     if (!c) ctl.set(key, c = { samples: [], first: now, fails: 0, retryAt: 0 });
     const m = measure(util, region, r.st, r.catalog, r.tick, r.contracts);
-    const { want, over } = wantOf(m, conf[util].spare, autopilotFloor(util, region, r.st, r.catalog));
+    const { want, over } = wantOf(m, conf[util].spare);
     const holdMs = conf.holdMin * 60000;
     c.samples.push({ t: now, want });
     while (c.samples.length > 1 && c.samples[0].t < now - holdMs) c.samples.shift();
@@ -358,7 +350,7 @@ try {
     get running() { return anyOn(); },
     exportCfg: () => ({ cfg: persistable() }),
     importCfg(o) { const r = apply(o?.cfg ?? o); save(); ensureLoop(); renderAll(); return r; },
-    _measure: measure, _want: wantOf, _decide: decide, _step: step, _floor: autopilotFloor, _info: info,
+    _measure: measure, _want: wantOf, _decide: decide, _step: step, _info: info,
     _unload() { unloaded = true; clearInterval(loopTimer); loopTimer = 0; if (mounted) unmountUi(); },
   };
 

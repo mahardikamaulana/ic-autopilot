@@ -527,6 +527,35 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
     assert.ok(!c.duties().some((x) => /floor upgrades/.test(x.duty) || x.owner === 'Autopilot'));
   });
 
+  await t('resume (D7): with Auto power on, a group the user pauses is the user\'s even though the subscription is below the unpaused draw', () => {
+    const { cp: c } = F.load(['cp-cadence']);
+    const cat = F.board.catalog, dl = F.cottonBidDeals(), st = F.stageA();
+    st.subscriptions = { 0: { power: 0 } };                      // Auto power follows the running load: no bill is short
+    st.items[F.MONEY] = 5e6;
+    const mem = F.ctxOf().mem, mods = { autoUtil: { conf: { power: { on: true } } } };
+    const dec = () => c._decide(c._view(st, cat, dl), F.ctxOf({ mem, mods }));
+    dec();                                                       // the Smelters are seen running
+    st.groups[1].paused = true;                                  // the user pauses one
+    dec();
+    assert.ok(mem('resume').get().user.includes(1), 'the user\'s pause');
+    assert.ok(!(mem('resume').get().bill ?? []).includes(1));
+  });
+
+  await t('resume (D7): with Auto power on, a bill-paused group resumes on cash alone (the subscription is below its full draw)', () => {
+    const { cp: c } = F.load(['cp-cadence']);
+    const cat = F.board.catalog, dl = F.cottonBidDeals(), st = F.stageA();
+    st.subscriptions = { 0: { power: 0 } };
+    const mem = F.ctxOf().mem, mods = { autoUtil: { conf: { power: { on: true } } } };
+    const dec = () => c._decide(c._view(st, cat, dl), F.ctxOf({ mem, mods }));
+    dec();                                                       // the Smelters are seen running
+    st.items[F.MONEY] = 100; st.groups[1].paused = true;         // paused with cash under 2 bills: the bill did it
+    dec();
+    assert.deepStrictEqual(mem('resume').get().bill, [1]);
+    st.items[F.MONEY] = 5e6;
+    const d = dec();
+    assert.deepStrictEqual(d.actions.find((a) => a.director === 'resume').steps[0].msg, { type: 'SetPaused', group: 1, paused: false });
+  });
+
   await t('resume (D7): Autopilot\'s keptPaused groups (localStorage earlyGame.v2) and the endgame gate\'s groups stay paused; a bad key reads as empty', () => {
     const { cp: c } = F.load(['cp-cadence']);
     const cat = F.board.catalog, dl = F.cottonBidDeals(), st = F.stageA();

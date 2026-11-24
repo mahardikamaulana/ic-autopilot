@@ -177,7 +177,8 @@
     }
 
     // 2. Power.
-    if (s.powerNeed > s.powerHave) {
+    // Auto utilities owns power while it is on: it subscribes the running load; this step would raise it back to the unpaused draw.
+    if (s.powerNeed > s.powerHave && !s.autoPower) {
       const level = Math.min(MAX_POWER, s.powerNeed);
       if (level > s.powerHave) {
         yield act('power', `power: groups draw ${s.powerNeed} MW, subscribed ${s.powerHave}`,

@@ -112,6 +112,7 @@
     seeTick(st.ssi?.last_user_mutation_tick);
     const s = fullSnapshot(st, catalog, deals, orders, nowTick(), engine);
     s.ws = ws; s.wsOpen = ws?.readyState === 1;
+    s.autoPower = W.autoUtil?.conf?.power?.on === true;   // Auto utilities owns power while on (it subscribes the running load)
     return s;
   }
 

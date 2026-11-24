@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IC Autopilot
 // @namespace    idlecorp-toolkit
-// @version      2.8.9
+// @version      2.8.10
 // @author       XPARAD0X
 // @description  Early-game Autopilot, CD Farm (Construction Data by building and demolishing buildings; Auto picks the cheapest source itself), Lab runner (keeps the Manufacturing Labs researching), Auto ship (an "Auto ship" button on every distributor bid) and Auto utilities (an "Auto" switch that keeps the power and water subscriptions at what the groups need) for IdleCorp, each with a panel, menu or switch in the game UI.
 // @homepageURL  https://github.com/mahardikamaulana/ic-autopilot
@@ -4564,8 +4564,8 @@ try {
 //     before a bill, so the level never drops and has to be bought again inside one period. It never lowers the first hold minutes.
 //   - cash must cover the raise now AND the next bill, which is for the higher level (every subscription is billed together): a raise
 //     the cash cannot cover is cut to what it can, and nothing is sent when it cannot cover one unit.
-//   - while Autopilot sends live actions (not a dry run, not held), power never goes below what Autopilot itself would subscribe
-//     (all its unpaused groups at full draw), so the two do not undo each other.
+//   - power has one owner: while Auto power is on, Autopilot stands down on power, so idle groups (unpaused, no work) are not paid for
+//     and the two never undo each other.
 //   - every change is confirmed by the subscription value in the game state; 3 unconfirmed sends in a row switch that utility off
 //     (a closed game socket is waited out, it is not a failed send).
 // The switches are saved in this browser. Alt+Shift+X switches them off with everything else.
@@ -4680,19 +4680,11 @@ try {
     return { util, region, have, load, sold, gen, discharge, imported, waiting, need: load + sold + waiting - gen - discharge - imported };
   }
 
-  // The level that covers a measurement: ceil(need) plus the spare (only when something needs it), not below floor, over the cap flagged.
-  function wantOf(m, spare = 0, floor = 0) {
+  // The level that covers a measurement: ceil(need) plus the spare (only when something needs it), over the cap flagged.
+  function wantOf(m, spare = 0) {
     const u = UTILS[m.util];
-    const raw = Math.max(m.need > 0 ? Math.ceil(m.need - 1e-9) + spare : 0, floor);
+    const raw = m.need > 0 ? Math.ceil(m.need - 1e-9) + spare : 0;
     return { want: Math.min(u.max, raw), over: raw > u.max ? raw : 0 };
-  }
-
-  // Autopilot subscribes power for every unpaused group at full draw (never lowering): while it sends live actions, that is the least to keep.
-  function autopilotFloor(util, region, st, catalog) {
-    if (util !== 'power' || region !== 0 || !W.earlyGame?.busy || W.earlyGame.held) return 0;
-    const ix = idx(catalog);
-    return Object.values(st.groups ?? {}).filter((g) => (g.region ?? 0) === 0 && !g.paused)
-      .reduce((a, g) => a + (ix.b.get(g.building)?.draws?.power ?? 0) * g.count, 0);
   }
 
   // What the game bills at the next bill, all subscriptions together (cents).
@@ -4778,7 +4770,7 @@ try {
     let c = ctl.get(key);
     if (!c) ctl.set(key, c = { samples: [], first: now, fails: 0, retryAt: 0 });
     const m = measure(util, region, r.st, r.catalog, r.tick, r.contracts);
-    const { want, over } = wantOf(m, conf[util].spare, autopilotFloor(util, region, r.st, r.catalog));
+    const { want, over } = wantOf(m, conf[util].spare);
     const holdMs = conf.holdMin * 60000;
     c.samples.push({ t: now, want });
     while (c.samples.length > 1 && c.samples[0].t < now - holdMs) c.samples.shift();
@@ -4904,7 +4896,7 @@ try {
     get running() { return anyOn(); },
     exportCfg: () => ({ cfg: persistable() }),
     importCfg(o) { const r = apply(o?.cfg ?? o); save(); ensureLoop(); renderAll(); return r; },
-    _measure: measure, _want: wantOf, _decide: decide, _step: step, _floor: autopilotFloor, _info: info,
+    _measure: measure, _want: wantOf, _decide: decide, _step: step, _info: info,
     _unload() { unloaded = true; clearInterval(loopTimer); loopTimer = 0; if (mounted) unmountUi(); },
   };
 
@@ -5051,6 +5043,7 @@ try {
     const engineAcres = ['Lumber Camp', 'Farm', 'Sawmill', 'Workshop'].reduce((a, n) => a + owned(n) * (N.b[n] == null ? 0 : bld(N.b[n]).acres), 0);
     const cottonBid = deals.some((d) => d.side === 'Sell' && d.item === N.i.Cotton && (d.region ?? REGION) === REGION);
     return {
+      catalog: raw,
       N, C, st, groups, pool, bld, idB, idI, idR, owned, has, unlocked, running, cottonGroup, cottonBid,
       money: items[MONEY] ?? 0, cd: items[CD] ?? 0,
       landBought, acresUsed, acresOwned, freeAcres: Math.max(0, acresOwned - acresUsed), fixedAcres: Math.max(0, acresUsed - engineAcres),
@@ -7474,7 +7467,7 @@ try {
       const f = activeFills(v, ctx).sort((a, z) => z.left - a.left)[0];
       c.push(chk('autoship', !!f && f.left >= cfg.slotRearmMinutes * 120, !f ? 'no auto-ship running' : itemName(v, f.bid.item) + ' auto-ship, ' + Math.floor(f.left / 120) + ' min left'));
     }
-    const sub = v.st.subscriptions?.[REGION]?.power ?? 0, load = powerLoad(v), au = ctx.mods?.autoUtil;
+    const au = ctx.mods?.autoUtil, sub = v.st.subscriptions?.[REGION]?.power ?? 0, load = au?._measure ? au._measure('power', REGION, v.st, v.catalog, 0, []).load : powerLoad(v);
     if (load > 0) c.push(chk('power', !!au?.conf?.power?.on && sub >= load, (au?.conf?.power?.on ? 'Auto power on' : 'Auto power off') + ', ' + sub + ' MW subscribed for ' + load + ' MW load'));
     const floor = sub * 12000;
     c.push(chk('cash', v.money >= floor, 'money ' + usd(v.money) + (v.money >= floor ? ' >= ' : ' < ') + 'bill floor ' + usd(floor) + ' (2 h of bills)'));
@@ -7598,7 +7591,8 @@ try {
   const powerHave = (v) => v.st.subscriptions?.[REGION]?.power ?? 0;
   function resumeObserve(v, m, ctx = {}) {
     const before = v.groups.reduce((a, g) => a + (lastPaused.get(g.id) === false ? drawOf(v, g) * g.count : 0), 0), have = powerHave(v);
-    const billShort = have < before || v.money < Math.max(have, before) * 1000 * 2;
+    // With Auto power on, the subscription follows the running load, so being under the unpaused draw is not a short bill.
+    const billShort = (ctx.mods?.autoUtil?.conf?.power?.on !== true && have < before) || v.money < Math.max(have, before) * 1000 * 2;
     const sent = ctx.pauseSent ?? {}, grace = (cfg.resumeGraceMin ?? 2) * 60000;
     const o = m.get(), bill = new Set(o.bill ?? []), user = new Set(o.user ?? []);
     let changed = false;
@@ -7627,10 +7621,11 @@ try {
     if (!list.length) return null;
     const eg = ctx.mods?.earlyGame;
     if (eg?.running && eg.cfg?.resumePaused !== false) return { wait: 'Autopilot resumes the ' + list.length + ' bill-paused group(s) while it runs' };   // one driver per job
-    const have = powerHave(v), load = powerLoad(v), waits = [];
+    const have = powerHave(v), load = powerLoad(v), waits = [], autoOn = ctx.mods?.autoUtil?.conf?.power?.on === true;
     for (const g of list) {
       const mw = drawOf(v, g) * g.count, name = '"' + (g.name ?? v.bld(g.building).name) + '"';
-      if (have < load + mw) { waits.push(name + ' is paused (unpaid bill?): power subscription ' + have + ' MW < ' + (load + mw) + ' MW with it'); continue; }
+      // With Auto power on the subscription follows running load and Auto raises it once the group runs: only cash gates the resume.
+      if (!autoOn && have < load + mw) { waits.push(name + ' is paused (unpaid bill?): power subscription ' + have + ' MW < ' + (load + mw) + ' MW with it'); continue; }
       const need = Math.max(10000, (Math.max(have, load) + mw) * 1000 * 6) + mw * 1000;
       if (v.money < need) { waits.push(name + ' is paused (unpaid bill?): waiting for cash ' + usd(v.money) + ' / ' + usd(need) + ' to resume'); continue; }
       return { action: { id: 'resume:' + g.id, text: 'resume ' + name + ' (paused by an unpaid bill, bills affordable again)',
@@ -8185,7 +8180,8 @@ try {
   const lastPaused = new Map();
   function observe(s) {
     const needAll = s.groups.reduce((a, g) => a + s.drawOf(g.building) * g.count, 0);
-    const billShort = s.powerHave < needAll || s.money < Math.max(s.powerHave, needAll) * 1000 * 2;
+    // With Auto power on, the subscription follows the running load, so being under the unpaused draw is not a short bill.
+    const billShort = (!s.autoPower && s.powerHave < needAll) || s.money < Math.max(s.powerHave, needAll) * 1000 * 2;
     let changed = false;
     for (const g of s.groups) {
       const prev = lastPaused.get(g.id);
@@ -8357,6 +8353,7 @@ try {
     seeTick(st.ssi?.last_user_mutation_tick);
     const s = fullSnapshot(st, catalog, deals, orders, nowTick(), engine);
     s.ws = ws; s.wsOpen = ws?.readyState === 1;
+    s.autoPower = W.autoUtil?.conf?.power?.on === true;   // Auto utilities owns power while on (it subscribes the running load)
     return s;
   }
 
@@ -8830,7 +8827,8 @@ try {
     }
 
     // 2. Power.
-    if (s.powerNeed > s.powerHave) {
+    // Auto utilities owns power while it is on: it subscribes the running load; this step would raise it back to the unpaused draw.
+    if (s.powerNeed > s.powerHave && !s.autoPower) {
       const level = Math.min(MAX_POWER, s.powerNeed);
       if (level > s.powerHave) {
         yield act('power', `power: groups draw ${s.powerNeed} MW, subscribed ${s.powerHave}`,

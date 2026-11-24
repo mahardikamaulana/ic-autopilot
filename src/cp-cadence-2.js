@@ -25,7 +25,7 @@
       const f = activeFills(v, ctx).sort((a, z) => z.left - a.left)[0];
       c.push(chk('autoship', !!f && f.left >= cfg.slotRearmMinutes * 120, !f ? 'no auto-ship running' : itemName(v, f.bid.item) + ' auto-ship, ' + Math.floor(f.left / 120) + ' min left'));
     }
-    const sub = v.st.subscriptions?.[REGION]?.power ?? 0, load = powerLoad(v), au = ctx.mods?.autoUtil;
+    const au = ctx.mods?.autoUtil, sub = v.st.subscriptions?.[REGION]?.power ?? 0, load = au?._measure ? au._measure('power', REGION, v.st, v.catalog, 0, []).load : powerLoad(v);
     if (load > 0) c.push(chk('power', !!au?.conf?.power?.on && sub >= load, (au?.conf?.power?.on ? 'Auto power on' : 'Auto power off') + ', ' + sub + ' MW subscribed for ' + load + ' MW load'));
     const floor = sub * 12000;
     c.push(chk('cash', v.money >= floor, 'money ' + usd(v.money) + (v.money >= floor ? ' >= ' : ' < ') + 'bill floor ' + usd(floor) + ' (2 h of bills)'));
@@ -149,7 +149,8 @@
   const powerHave = (v) => v.st.subscriptions?.[REGION]?.power ?? 0;
   function resumeObserve(v, m, ctx = {}) {
     const before = v.groups.reduce((a, g) => a + (lastPaused.get(g.id) === false ? drawOf(v, g) * g.count : 0), 0), have = powerHave(v);
-    const billShort = have < before || v.money < Math.max(have, before) * 1000 * 2;
+    // With Auto power on, the subscription follows the running load, so being under the unpaused draw is not a short bill.
+    const billShort = (ctx.mods?.autoUtil?.conf?.power?.on !== true && have < before) || v.money < Math.max(have, before) * 1000 * 2;
     const sent = ctx.pauseSent ?? {}, grace = (cfg.resumeGraceMin ?? 2) * 60000;
     const o = m.get(), bill = new Set(o.bill ?? []), user = new Set(o.user ?? []);
     let changed = false;
@@ -178,10 +179,11 @@
     if (!list.length) return null;
     const eg = ctx.mods?.earlyGame;
     if (eg?.running && eg.cfg?.resumePaused !== false) return { wait: 'Autopilot resumes the ' + list.length + ' bill-paused group(s) while it runs' };   // one driver per job
-    const have = powerHave(v), load = powerLoad(v), waits = [];
+    const have = powerHave(v), load = powerLoad(v), waits = [], autoOn = ctx.mods?.autoUtil?.conf?.power?.on === true;
     for (const g of list) {
       const mw = drawOf(v, g) * g.count, name = '"' + (g.name ?? v.bld(g.building).name) + '"';
-      if (have < load + mw) { waits.push(name + ' is paused (unpaid bill?): power subscription ' + have + ' MW < ' + (load + mw) + ' MW with it'); continue; }
+      // With Auto power on the subscription follows running load and Auto raises it once the group runs: only cash gates the resume.
+      if (!autoOn && have < load + mw) { waits.push(name + ' is paused (unpaid bill?): power subscription ' + have + ' MW < ' + (load + mw) + ' MW with it'); continue; }
       const need = Math.max(10000, (Math.max(have, load) + mw) * 1000 * 6) + mw * 1000;
       if (v.money < need) { waits.push(name + ' is paused (unpaid bill?): waiting for cash ' + usd(v.money) + ' / ' + usd(need) + ' to resume'); continue; }
       return { action: { id: 'resume:' + g.id, text: 'resume ' + name + ' (paused by an unpaid bill, bills affordable again)',
