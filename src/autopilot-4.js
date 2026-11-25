@@ -179,6 +179,7 @@
         sentTimes = sentTimes.filter((t) => Date.now() - t < 60000);
         if (sentTimes.length >= Math.max(2, Math.floor(cfg.maxActionsPerMin * rateScale))) { note('rate limit: waiting'); await sleep(5000); continue; }
         const a = decide(s);
+        if (s.bookWanted) core.orderBook?.need(REGION);   // buys need other players' orders; released a minute after the last need
         watchStall(s, !a.wait && !INCOME_ACTION.test(a.key ?? ''));
         if (a.wait) {
           note('wait — ' + a.wait);

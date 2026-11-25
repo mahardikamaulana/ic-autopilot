@@ -58,7 +58,8 @@
   // order at that price for parts you don't make (home-made parts just build up).
   function* floorPartBuys(s, item, need, why) {
     if (!(cfg.floorBuyUsd > 0) || need <= 0) return;
-    if (!s.ordersKnown) { yield { wait: `${why}: player order board not loaded (open the Market page once)` }; return; }
+    s.bookWanted = true;   // the loop subscribes to the player order book (core.orderBook.need)
+    if (!s.ordersKnown) { yield { wait: `${why}: player order book not loaded yet` }; return; }
     const it = s.catalog.items[item] ?? {};
     const amount = Math.max(1, Math.min(Math.ceil(need), Math.floor(COURIER_CU / (it.cargo_weight || 1))));
     const cap = cfg.floorBuyUsd * 100;
@@ -79,7 +80,9 @@
   function* buyActions(s, item, need, why) {
     const it = s.catalog.items[item] ?? {};
     const amount = Math.max(1, Math.min(Math.ceil(need), Math.floor(COURIER_CU / (it.cargo_weight || 1))));
-    if (!s.dealsKnown || !s.ordersKnown) { yield { wait: `${why}: market board not loaded (open the Market page once)` }; return; }
+    s.bookWanted = true;
+    if (!s.dealsKnown) { yield { wait: `${why}: market board not loaded (open the Market page once)` }; return; }
+    if (!s.ordersKnown) { yield { wait: `${why}: player order book not loaded yet` }; return; }
     const offers = sellersOf(s, item, amount);
     if (!offers.length) {
       yield* postBuyOrder(s, item, amount, cfg.buyOrderUsd, `no seller for ${iname(s, item)}`);

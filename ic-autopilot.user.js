@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IC Autopilot
 // @namespace    idlecorp-toolkit
-// @version      2.8.13
+// @version      2.8.14
 // @author       XPARAD0X
 // @description  Early-game Autopilot, CD Farm (Construction Data by building and demolishing buildings; Auto picks the cheapest source itself), Lab runner (keeps the Manufacturing Labs researching), Auto ship (an "Auto ship" button on every distributor bid) and Auto utilities (an "Auto" switch that keeps the power and water subscriptions at what the groups need) for IdleCorp, each with a panel, menu or switch in the game UI.
 // @homepageURL  https://github.com/mahardikamaulana/ic-autopilot
@@ -111,14 +111,66 @@ try {
       if (m.kind === 'WorldEvents') sock.worldEvents = { raw: e.data, at: Date.now() };   // plan D5: kept for a readout only, nothing acts on it
       const u = m.diff?.ssi?.last_user_mutation_tick;
       if (typeof u === 'number' && u > sock.mutTick) { sock.mutTick = u; sock.muts++; if (sock.sendAt && !sock.ackAt) sock.ackAt = hrNow(); for (const w of [...wakers]) w(); }
+      if (m.kind === 'Orders') { Object.assign(sock.book, { at: Date.now(), pending: Math.max(0, sock.book.pending - 1), truncated: !!m.truncated, rows: (m.orders ?? []).map((o) => [o.poster, o.region]) }); for (const w of [...wakers]) w(); }
     } catch {}
+  }
+  // ---- player order book ---------------------------------------------------------------
+  // The server sends other players' orders only while this socket has an "Orders" board filter: the game
+  // sets one while its Goods tab is open and null when it closes (the reply then holds only your own orders).
+  // sock.book: the last Orders filter sent on this socket (by the game or by us, seen through a send hook),
+  // whether we sent it, and the snapshot that answered it (rows = [poster, region]). Replies don't say which filter
+  // they answer, but each filter gets exactly one (seen live), so pending counts filters not answered yet.
+  // filter is undefined (unknown) until a send is seen: the game re-sends its filters in onopen, before we attach.
+  const newBook = () => ({ filter: undefined, filterAt: 0, ours: false, pending: 0, at: 0, truncated: false, rows: null });
+  sock.book = newBook();
+  let baseSend = null, sendingOurs = false;
+  function hookSend(d) {
+    if (typeof d === 'string' && d.includes('"SetBoardFilter"')) {
+      try { const m = JSON.parse(d); if (m.board === 'Orders') Object.assign(sock.book, { filter: m.filter ?? null, filterAt: Date.now(), ours: sendingOurs, pending: sock.book.pending + 1 }); } catch {}
+    }
+    return baseSend.call(this, d);
   }
   function attach(ws) {
     if (ws === sock.ws) return;
     sock.ws?.removeEventListener('message', onMessage);
-    sock.ws = ws;
+    if (sock.ws?.send === hookSend) sock.ws.send = baseSend;
+    sock.ws = ws; sock.book = newBook();
     ws?.addEventListener('message', onMessage);
+    if (ws && typeof ws.send === 'function') { baseSend = ws.send; ws.send = hookSend; }
   }
+  const BOOK_IDLE_MS = 60000;   // well above Autopilot's longest idle sleep (maxIdleMs), so it can't drop between cycles
+  let bookTimer = 0;
+  const onGoodsTab = () => /^\/market\/goods/.test(W.location?.pathname ?? '');
+  const orderBook = {
+    // true: the current filter shows every item in `region` and the server has answered it (a Goods tab narrowed to
+    // some items or on another region does not count). 'unknown': the Goods tab is open but its filter was sent
+    // before we attached (reload, reconnect). A reply missing for 30 s no longer blocks.
+    live(region) {
+      const b = sock.book, f = b.filter;
+      if (f === undefined) return onGoodsTab() ? 'unknown' : false;
+      return !!f && b.at >= b.filterAt && (!b.pending || Date.now() - b.filterAt > 30000) && !b.truncated && !f.items?.length && !f.sides?.length && !f.nums?.length && !f.quirks?.length
+        && (!f.regions?.length || f.regions.includes(region));
+    },
+    rows: () => sock.book.rows,
+    // Autopilot wants prices: subscribe like the Goods tab with no filters, unless any filter is set (the game's
+    // stays untouched) or the Goods tab is open (it owns the board, also right after a reconnect).
+    need(region) {
+      const ws = sock.ws;
+      if (!ws || ws.readyState !== 1 || unloaded) return;
+      if (!sock.book.filter && !onGoodsTab()) {
+        sendingOurs = true;
+        try { ws.send(JSON.stringify({ type: 'SetBoardFilter', board: 'Orders', filter: { items: [], sides: [], regions: [region], utilities: [], quirks: [], nums: [] } })); }
+        finally { sendingOurs = false; }
+      }
+      clearTimeout(bookTimer); bookTimer = setTimeout(orderBook.release, BOOK_IDLE_MS);
+    },
+    // Drop our filter once nothing needs it (only ours, and only while it is still the current one).
+    release() {
+      clearTimeout(bookTimer);
+      const ws = sock.ws;
+      if (sock.book.ours && sock.book.filter && ws?.readyState === 1 && !onGoodsTab()) ws.send(JSON.stringify({ type: 'SetBoardFilter', board: 'Orders', filter: null }));
+    },
+  };
   // Server tick now: last tick seen plus elapsed time (2 ticks/s), so checks work between messages.
   const nowTick = () => (sock.tick ? sock.tick + Math.floor((Date.now() - sock.tickAt) / 500) : 0);
   // Call right before ws.send: only a later mutation confirms this command. Returns the Diff count to wait past.
@@ -1032,13 +1084,16 @@ const ui = {
 
   W.idleCore = {
     version: 1,
-    walk, sleep, sleepWake, waitConfirm, tune, markSend, lastRtt, nowTick, seeTick, sock,
+    walk, sleep, sleepWake, waitConfirm, tune, markSend, lastRtt, nowTick, seeTick, sock, orderBook,
     h, makeDraggable, toast, ledger: ledgerApi, ui,
     setBadge, notify, askNotify, notifyPerm, stopAll, reserves, floorDesigns,
     exportConfig, importConfig, exportFile, importFile, missingFields,
     _unload() {
+      orderBook.release();
       unloaded = true;
-      sock.ws?.removeEventListener('message', onMessage); sock.ws = null;
+      sock.ws?.removeEventListener('message', onMessage);
+      if (sock.ws?.send === hookSend) sock.ws.send = baseSend;
+      sock.ws = null;
       if (HAS_DOM) removeEventListener('keydown', onKey, true);
       clearInterval(titleTimer);
       flushLedger();
@@ -8377,6 +8432,17 @@ try {
     seeTick(st.ssi?.last_user_mutation_tick);
     const s = fullSnapshot(st, catalog, deals, orders, nowTick(), engine);
     s.ws = ws; s.wsOpen = ws?.readyState === 1;
+    // Other players' orders are on the board only while a board filter covers them (Goods tab open, or core.orderBook
+    // subscribed); without one the list holds only your own, so it is not loaded. A live snapshot that had other
+    // players' orders must also show them in the game's state; an empty one counts (the walk finds no empty array).
+    // Goods tab open with a filter sent before we attached: loaded once other players' orders show.
+    const live = core?.orderBook && s.wsOpen ? core.orderBook.live(REGION) : null;
+    if (live === 'unknown') s.ordersKnown &&= s.orders.length > 0;
+    else if (live !== null) {
+      const rows = live ? core.orderBook.rows() ?? [] : null;
+      const others = rows?.some(([p, r]) => r === REGION && p !== st.ssi?.corp_id);
+      s.ordersKnown = !!rows && (s.ordersKnown || !rows.length) && (!others || s.orders.length > 0);
+    }
     s.autoPower = W.autoUtil?.conf?.power?.on === true;   // Auto utilities owns power while on (it subscribes the running load)
     return s;
   }
@@ -8735,7 +8801,8 @@ try {
   // order at that price for parts you don't make (home-made parts just build up).
   function* floorPartBuys(s, item, need, why) {
     if (!(cfg.floorBuyUsd > 0) || need <= 0) return;
-    if (!s.ordersKnown) { yield { wait: `${why}: player order board not loaded (open the Market page once)` }; return; }
+    s.bookWanted = true;   // the loop subscribes to the player order book (core.orderBook.need)
+    if (!s.ordersKnown) { yield { wait: `${why}: player order book not loaded yet` }; return; }
     const it = s.catalog.items[item] ?? {};
     const amount = Math.max(1, Math.min(Math.ceil(need), Math.floor(COURIER_CU / (it.cargo_weight || 1))));
     const cap = cfg.floorBuyUsd * 100;
@@ -8756,7 +8823,9 @@ try {
   function* buyActions(s, item, need, why) {
     const it = s.catalog.items[item] ?? {};
     const amount = Math.max(1, Math.min(Math.ceil(need), Math.floor(COURIER_CU / (it.cargo_weight || 1))));
-    if (!s.dealsKnown || !s.ordersKnown) { yield { wait: `${why}: market board not loaded (open the Market page once)` }; return; }
+    s.bookWanted = true;
+    if (!s.dealsKnown) { yield { wait: `${why}: market board not loaded (open the Market page once)` }; return; }
+    if (!s.ordersKnown) { yield { wait: `${why}: player order book not loaded yet` }; return; }
     const offers = sellersOf(s, item, amount);
     if (!offers.length) {
       yield* postBuyOrder(s, item, amount, cfg.buyOrderUsd, `no seller for ${iname(s, item)}`);
@@ -9271,6 +9340,7 @@ try {
         sentTimes = sentTimes.filter((t) => Date.now() - t < 60000);
         if (sentTimes.length >= Math.max(2, Math.floor(cfg.maxActionsPerMin * rateScale))) { note('rate limit: waiting'); await sleep(5000); continue; }
         const a = decide(s);
+        if (s.bookWanted) core.orderBook?.need(REGION);   // buys need other players' orders; released a minute after the last need
         watchStall(s, !a.wait && !INCOME_ACTION.test(a.key ?? ''));
         if (a.wait) {
           note('wait — ' + a.wait);

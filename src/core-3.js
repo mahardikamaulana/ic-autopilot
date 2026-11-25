@@ -47,13 +47,16 @@
 
   W.idleCore = {
     version: 1,
-    walk, sleep, sleepWake, waitConfirm, tune, markSend, lastRtt, nowTick, seeTick, sock,
+    walk, sleep, sleepWake, waitConfirm, tune, markSend, lastRtt, nowTick, seeTick, sock, orderBook,
     h, makeDraggable, toast, ledger: ledgerApi, ui,
     setBadge, notify, askNotify, notifyPerm, stopAll, reserves, floorDesigns,
     exportConfig, importConfig, exportFile, importFile, missingFields,
     _unload() {
+      orderBook.release();
       unloaded = true;
-      sock.ws?.removeEventListener('message', onMessage); sock.ws = null;
+      sock.ws?.removeEventListener('message', onMessage);
+      if (sock.ws?.send === hookSend) sock.ws.send = baseSend;
+      sock.ws = null;
       if (HAS_DOM) removeEventListener('keydown', onKey, true);
       clearInterval(titleTimer);
       flushLedger();

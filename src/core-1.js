@@ -75,14 +75,66 @@ try {
       if (m.kind === 'WorldEvents') sock.worldEvents = { raw: e.data, at: Date.now() };   // plan D5: kept for a readout only, nothing acts on it
       const u = m.diff?.ssi?.last_user_mutation_tick;
       if (typeof u === 'number' && u > sock.mutTick) { sock.mutTick = u; sock.muts++; if (sock.sendAt && !sock.ackAt) sock.ackAt = hrNow(); for (const w of [...wakers]) w(); }
+      if (m.kind === 'Orders') { Object.assign(sock.book, { at: Date.now(), pending: Math.max(0, sock.book.pending - 1), truncated: !!m.truncated, rows: (m.orders ?? []).map((o) => [o.poster, o.region]) }); for (const w of [...wakers]) w(); }
     } catch {}
+  }
+  // ---- player order book ---------------------------------------------------------------
+  // The server sends other players' orders only while this socket has an "Orders" board filter: the game
+  // sets one while its Goods tab is open and null when it closes (the reply then holds only your own orders).
+  // sock.book: the last Orders filter sent on this socket (by the game or by us, seen through a send hook),
+  // whether we sent it, and the snapshot that answered it (rows = [poster, region]). Replies don't say which filter
+  // they answer, but each filter gets exactly one (seen live), so pending counts filters not answered yet.
+  // filter is undefined (unknown) until a send is seen: the game re-sends its filters in onopen, before we attach.
+  const newBook = () => ({ filter: undefined, filterAt: 0, ours: false, pending: 0, at: 0, truncated: false, rows: null });
+  sock.book = newBook();
+  let baseSend = null, sendingOurs = false;
+  function hookSend(d) {
+    if (typeof d === 'string' && d.includes('"SetBoardFilter"')) {
+      try { const m = JSON.parse(d); if (m.board === 'Orders') Object.assign(sock.book, { filter: m.filter ?? null, filterAt: Date.now(), ours: sendingOurs, pending: sock.book.pending + 1 }); } catch {}
+    }
+    return baseSend.call(this, d);
   }
   function attach(ws) {
     if (ws === sock.ws) return;
     sock.ws?.removeEventListener('message', onMessage);
-    sock.ws = ws;
+    if (sock.ws?.send === hookSend) sock.ws.send = baseSend;
+    sock.ws = ws; sock.book = newBook();
     ws?.addEventListener('message', onMessage);
+    if (ws && typeof ws.send === 'function') { baseSend = ws.send; ws.send = hookSend; }
   }
+  const BOOK_IDLE_MS = 60000;   // well above Autopilot's longest idle sleep (maxIdleMs), so it can't drop between cycles
+  let bookTimer = 0;
+  const onGoodsTab = () => /^\/market\/goods/.test(W.location?.pathname ?? '');
+  const orderBook = {
+    // true: the current filter shows every item in `region` and the server has answered it (a Goods tab narrowed to
+    // some items or on another region does not count). 'unknown': the Goods tab is open but its filter was sent
+    // before we attached (reload, reconnect). A reply missing for 30 s no longer blocks.
+    live(region) {
+      const b = sock.book, f = b.filter;
+      if (f === undefined) return onGoodsTab() ? 'unknown' : false;
+      return !!f && b.at >= b.filterAt && (!b.pending || Date.now() - b.filterAt > 30000) && !b.truncated && !f.items?.length && !f.sides?.length && !f.nums?.length && !f.quirks?.length
+        && (!f.regions?.length || f.regions.includes(region));
+    },
+    rows: () => sock.book.rows,
+    // Autopilot wants prices: subscribe like the Goods tab with no filters, unless any filter is set (the game's
+    // stays untouched) or the Goods tab is open (it owns the board, also right after a reconnect).
+    need(region) {
+      const ws = sock.ws;
+      if (!ws || ws.readyState !== 1 || unloaded) return;
+      if (!sock.book.filter && !onGoodsTab()) {
+        sendingOurs = true;
+        try { ws.send(JSON.stringify({ type: 'SetBoardFilter', board: 'Orders', filter: { items: [], sides: [], regions: [region], utilities: [], quirks: [], nums: [] } })); }
+        finally { sendingOurs = false; }
+      }
+      clearTimeout(bookTimer); bookTimer = setTimeout(orderBook.release, BOOK_IDLE_MS);
+    },
+    // Drop our filter once nothing needs it (only ours, and only while it is still the current one).
+    release() {
+      clearTimeout(bookTimer);
+      const ws = sock.ws;
+      if (sock.book.ours && sock.book.filter && ws?.readyState === 1 && !onGoodsTab()) ws.send(JSON.stringify({ type: 'SetBoardFilter', board: 'Orders', filter: null }));
+    },
+  };
   // Server tick now: last tick seen plus elapsed time (2 ticks/s), so checks work between messages.
   const nowTick = () => (sock.tick ? sock.tick + Math.floor((Date.now() - sock.tickAt) / 500) : 0);
   // Call right before ws.send: only a later mutation confirms this command. Returns the Diff count to wait past.
