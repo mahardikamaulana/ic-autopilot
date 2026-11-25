@@ -23,7 +23,7 @@ try {
   function walk(fresh = false) {
     const now = Date.now();
     if (!fresh && walkOut && now - walkAt < WALK_TTL) return walkOut;
-    const out = { ws: null, st: null, catalog: null, deals: null, orders: null, engine: null, contracts: null };
+    const out = { ws: null, st: null, catalog: null, deals: null, orders: null, engine: null, contracts: null, boardFilters: null, board: null };
     if (!HAS_DOM) return out;
     const root = document.getElementById('root');
     const key = root && Object.keys(root).find((k) => k.startsWith('__reactContainer'));
@@ -33,10 +33,11 @@ try {
       const f = stack.pop();
       if (!f || seen.has(f)) continue;
       seen.add(f);
-      let h = f.memoizedState, n = 0;
+      let h = f.memoizedState, n = 0, hasWs = false, map = null;
       while (h && n < 50) {
         const v = h.memoizedState;
-        if (v && v.current instanceof WebSocket) out.ws = v.current;
+        if (v && v.current instanceof WebSocket) { out.ws = v.current; hasWs = true; }
+        if (v && v.current instanceof Map) map = v.current;
         if (v && typeof v === 'object' && v.groups && v.stock && v.ssi) out.st = v;
         if (Array.isArray(v) && v[0] && v[0].side) {
           if (v[0].price !== undefined && v[0].poster === undefined) out.deals = v;
@@ -44,7 +45,9 @@ try {
         }
         h = h.next; n++;
       }
+      if (hasWs && map) out.boardFilters = map;   // the game's board filters (re-sent on every reconnect), a ref next to the socket's
       const p = f.memoizedProps;
+      if (p && p.value?.setBoardFilter && p.value.deliveries && !out.board) out.board = p.value;   // { truncated, deliveries } per board
       if (p && p.catalog?.techs && !out.catalog) out.catalog = p.catalog;
       if (p && p.engine && typeof p.engine.evaluateLayout === 'function' && !out.engine) out.engine = p.engine;
       if (p && Array.isArray(p.contracts) && !out.contracts) out.contracts = p.contracts;
@@ -52,7 +55,7 @@ try {
       if (f.sibling) stack.push(f.sibling);
     }
     walkOut = out; walkAt = now;
-    if (out.ws?.readyState === 1) attach(out.ws);
+    if (out.ws?.readyState === 1) attach(out.ws, out);
     return out;
   }
 
@@ -75,17 +78,20 @@ try {
       if (m.kind === 'WorldEvents') sock.worldEvents = { raw: e.data, at: Date.now() };   // plan D5: kept for a readout only, nothing acts on it
       const u = m.diff?.ssi?.last_user_mutation_tick;
       if (typeof u === 'number' && u > sock.mutTick) { sock.mutTick = u; sock.muts++; if (sock.sendAt && !sock.ackAt) sock.ackAt = hrNow(); for (const w of [...wakers]) w(); }
-      if (m.kind === 'Orders') { Object.assign(sock.book, { at: Date.now(), pending: Math.max(0, sock.book.pending - 1), truncated: !!m.truncated, rows: (m.orders ?? []).map((o) => [o.poster, o.region]) }); for (const w of [...wakers]) w(); }
+      if (m.kind === 'Orders') Object.assign(sock.book, { at: Date.now(), pending: Math.max(0, sock.book.pending - 1), truncated: !!m.truncated });
     } catch {}
   }
   // ---- player order book ---------------------------------------------------------------
   // The server sends other players' orders only while this socket has an "Orders" board filter: the game
   // sets one while its Goods tab is open and null when it closes (the reply then holds only your own orders).
   // sock.book: the last Orders filter sent on this socket (by the game or by us, seen through a send hook),
-  // whether we sent it, and the snapshot that answered it (rows = [poster, region]). Replies don't say which filter
-  // they answer, but each filter gets exactly one (seen live), so pending counts filters not answered yet.
-  // filter is undefined (unknown) until a send is seen: the game re-sends its filters in onopen, before we attach.
-  const newBook = () => ({ filter: undefined, filterAt: 0, ours: false, pending: 0, at: 0, truncated: false, rows: null });
+  // whether we sent it, and when the reply came. Replies don't say which filter they answer, but each filter gets
+  // exactly one (seen live), so pending counts filters not answered yet. The game re-sends its filters in onopen,
+  // before we attach, so a new socket starts from the game's own store: its filter, answered if it counted a reply.
+  const newBook = (g) => {
+    const f = g?.boardFilters?.get('Orders') ?? null;
+    return { filter: f, filterAt: 1, ours: false, pending: 0, at: f && g.board?.deliveries?.Orders > 0 ? 1 : 0, truncated: !!g?.board?.truncated?.Orders };
+  };
   sock.book = newBook();
   let baseSend = null, sendingOurs = false;
   function hookSend(d) {
@@ -94,28 +100,27 @@ try {
     }
     return baseSend.call(this, d);
   }
-  function attach(ws) {
+  function attach(ws, g) {
     if (ws === sock.ws) return;
     sock.ws?.removeEventListener('message', onMessage);
     if (sock.ws?.send === hookSend) sock.ws.send = baseSend;
-    sock.ws = ws; sock.book = newBook();
+    sock.ws = ws; sock.book = newBook(g);
     ws?.addEventListener('message', onMessage);
     if (ws && typeof ws.send === 'function') { baseSend = ws.send; ws.send = hookSend; }
   }
   const BOOK_IDLE_MS = 60000;   // well above Autopilot's longest idle sleep (maxIdleMs), so it can't drop between cycles
+  const BOOK_SETTLE_MS = 200;
   let bookTimer = 0;
   const onGoodsTab = () => /^\/market\/goods/.test(W.location?.pathname ?? '');
   const orderBook = {
-    // true: the current filter shows every item in `region` and the server has answered it (a Goods tab narrowed to
-    // some items or on another region does not count). 'unknown': the Goods tab is open but its filter was sent
-    // before we attached (reload, reconnect). A reply missing for 30 s no longer blocks.
+    // Loaded: the current filter shows every item in `region` (a Goods tab narrowed to some items or on another
+    // region does not count) and its untruncated reply came at least BOOK_SETTLE_MS ago (the game puts it into its
+    // React state on the next render). It may hold only your own orders, or none. A reply missing for 30 s no longer blocks.
     live(region) {
       const b = sock.book, f = b.filter;
-      if (f === undefined) return onGoodsTab() ? 'unknown' : false;
-      return !!f && b.at >= b.filterAt && (!b.pending || Date.now() - b.filterAt > 30000) && !b.truncated && !f.items?.length && !f.sides?.length && !f.nums?.length && !f.quirks?.length
+      return !!f && b.at >= b.filterAt && Date.now() - b.at >= BOOK_SETTLE_MS && (!b.pending || Date.now() - b.filterAt > 30000) && !b.truncated && !f.items?.length && !f.sides?.length && !f.nums?.length && !f.quirks?.length
         && (!f.regions?.length || f.regions.includes(region));
     },
-    rows: () => sock.book.rows,
     // Autopilot wants prices: subscribe like the Goods tab with no filters, unless any filter is set (the game's
     // stays untouched) or the Goods tab is open (it owns the board, also right after a reconnect).
     need(region) {

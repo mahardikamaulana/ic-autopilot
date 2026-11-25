@@ -210,36 +210,54 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     }
   });
 
-  await t('order book: off the Goods tab Autopilot waits (posts nothing) until its own full-board subscription is answered with other players\' orders; it releases only its own filter', async () => {
+  await t('order book: off the Goods tab Autopilot waits (posts nothing) until a full-region board filter is answered, even by a book of only your own order; it releases only its own filter', async () => {
     fresh();
     class FakeWS { constructor() { this.readyState = 1; this.sent = []; this.ls = []; } addEventListener(_t, f) { this.ls.push(f); } removeEventListener() {} send(m) { this.sent.push(JSON.parse(m)); } emit(m) { for (const f of this.ls) f({ data: JSON.stringify(m) }); } }
     globalThis.WebSocket = FakeWS;
-    const ws = new FakeWS();
-    const st = baseState(); st.items[0] = 0;   // no cash: a buy stops at the money check, which comes after the book check
-    st.groups = { 0: { id: 0, name: 'Planks', building: 4, recipe: recipeFor('Planks'), count: 1, equipped: 0, region: 0 } };   // owes a floor kit
+    const ALL = { items: [], sides: [], regions: [0], utilities: [], quirks: [], nums: [] };
     const own = { id: 1, item: 6, amount: 5, unit_price: 100, side: 'Sell', poster: 1, region: 0 };
     const other = { id: 2, item: 1, amount: 500, unit_price: 50, side: 'Sell', poster: 7, region: 0 };
-    const ordersHook = { memoizedState: [own], next: null };   // the game's orders state: only yours while no board filter is set
-    const fiber = { memoizedState: { memoizedState: { current: ws }, next: { memoizedState: st, next: { memoizedState: board.deals.filter((d) => d.region === 0), next: ordersHook } } }, memoizedProps: { catalog: JSON.parse(JSON.stringify(board.catalog)) }, child: null, sibling: null };
     const el = () => ({ append() {}, remove() {}, addEventListener() {}, setAttribute() {}, style: {}, classList: { toggle() {} } });
-    globalThis.document = { body: el(), head: el(), title: 'game', getElementById: (id) => (id === 'root' ? { __reactContainer$x: fiber } : null), createElement: el, querySelector: () => null, hidden: true };
-    (0, eval)(coreSrc + '\n' + apSrc);
-    const ap = globalThis.earlyGame, core = globalThis.idleCore;
-    ap.cfg.floorUpgrades = false;
-    const filters = () => ws.sent.filter((m) => m.type === 'SetBoardFilter');
-    const ALL = { items: [], sides: [], regions: [0], utilities: [], quirks: [], nums: [] };
-    const known = () => ap.read(true).ordersKnown;
+    // A game page: the socket ref and the game's board-filter store (a Map ref) in one component, the board context's
+    // { truncated, deliveries } as a provider value, and the orders state (only yours while no board filter is set).
+    function page(gameFilters = new Map(), board = { truncated: {}, deliveries: {} }) {
+      const ws = new FakeWS();
+      const st = baseState(); st.items[0] = 0;   // no cash: a buy stops at the money check, which comes after the book check
+      st.groups = { 0: { id: 0, name: 'Planks', building: 4, recipe: recipeFor('Planks'), count: 1, equipped: 0, region: 0 } };   // owes a floor kit
+      const ordersHook = { memoizedState: [own], next: null };
+      const hooks = { memoizedState: { current: ws }, next: { memoizedState: { current: gameFilters }, next: { memoizedState: st, next: { memoizedState: board.deals ?? globalThis.__deals, next: ordersHook } } } };
+      const fiber = { memoizedState: hooks, memoizedProps: { catalog: JSON.parse(JSON.stringify(globalThis.__catalog)), value: { setBoardFilter() {}, ...board } }, child: null, sibling: null };
+      globalThis.document = { body: el(), head: el(), title: 'game', getElementById: (id) => (id === 'root' ? { __reactContainer$x: fiber } : null), createElement: el, querySelector: () => null, hidden: true };
+      return { ws, ordersHook };
+    }
+    globalThis.__deals = board.deals.filter((d) => d.region === 0); globalThis.__catalog = board.catalog;
+    const load = () => { fresh(); (0, eval)(coreSrc + '\n' + apSrc); const ap = globalThis.earlyGame; ap.cfg.floorUpgrades = false; return { ap, core: globalThis.idleCore }; };
+    const unload = () => { globalThis.earlyGame?._unload(); globalThis.idleCore?._unload(); globalThis.idleCore = undefined; globalThis.earlyGame = undefined; };
     try {
-      // Goods tab already open when we attach (its filter went out in onopen, unseen): loaded only once other players' orders show.
+      // 1. Goods tab already open when we attach (its filter went out in onopen, unseen): the game's store decides.
       globalThis.location = { pathname: '/market/goods' };
-      assert.strictEqual(known(), false, 'Goods tab, own orders only');
-      ordersHook.memoizedState = [own, other];
-      assert.strictEqual(known(), true, 'Goods tab, other players shown');
-      core.orderBook.need(0);
-      assert.strictEqual(ws.sent.length, 0, 'never subscribes over the Goods tab');
-      ordersHook.memoizedState = [own];
+      for (const [why, filters, board0, want] of [
+        ['full-region filter, reply counted', new Map([['Orders', ALL]]), { truncated: {}, deliveries: { Orders: 1 } }, true],
+        ['full-region filter, no reply yet', new Map([['Orders', ALL]]), { truncated: {}, deliveries: {} }, false],
+        ['filter narrowed to one item', new Map([['Orders', { ...ALL, items: [1] }]]), { truncated: {}, deliveries: { Orders: 1 } }, false],
+        ['filter on another region', new Map([['Orders', { ...ALL, regions: [1] }]]), { truncated: {}, deliveries: { Orders: 1 } }, false],
+        ['truncated reply', new Map([['Orders', ALL]]), { truncated: { Orders: true }, deliveries: { Orders: 1 } }, false],
+        ['no filter', new Map(), { truncated: {}, deliveries: { Orders: 3 } }, false],
+      ]) {
+        const { ws } = page(filters, board0);
+        const { ap, core } = load();
+        assert.strictEqual(ap.read(true).ordersKnown, want, why + ' (only your own order on the board)');
+        core.orderBook.need(0);
+        assert.strictEqual(ws.sent.length, 0, why + ': never subscribes over the Goods tab');
+        unload();
+      }
+
+      // 2. Off the Goods tab, no filter: only your own order, not loaded. The buy path waits, sends nothing, asks for the book.
       globalThis.location = { pathname: '/market/exchange' };
-      // Only your own orders and no filter: not loaded. The buy path waits, sends nothing, and asks for the book.
+      const { ws, ordersHook } = page();
+      const { ap, core } = load();
+      const filters = () => ws.sent.filter((m) => m.type === 'SetBoardFilter');
+      const known = () => ap.read(true).ordersKnown;
       let s = ap.read(true);
       assert.strictEqual(s.ordersKnown, false);
       let d = ap.decide(s);
@@ -252,38 +270,44 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       assert.ok(await waitFor(() => filters().length > 0, 3000), 'loop never subscribed');
       ap.stop(); await settled(ap);
       assert.ok(ws.sent.every((m) => m.type === 'SetBoardFilter'), JSON.stringify(ws.sent));
-      // need(): one subscription, the Goods tab's no-filter filter for the region.
       core.orderBook.need(0);
-      assert.deepStrictEqual(filters(), [{ type: 'SetBoardFilter', board: 'Orders', filter: ALL }]);
-      assert.strictEqual(known(), false, 'no answer yet');
-      // The answer has another player's order the game state doesn't show yet: still not loaded.
-      ws.emit({ kind: 'Orders', tick: 5, orders: [own, other], truncated: false });
-      assert.strictEqual(known(), false, 'snapshot not in the game state yet');
-      ordersHook.memoizedState = [own, other];
+      assert.deepStrictEqual(filters(), [{ type: 'SetBoardFilter', board: 'Orders', filter: ALL }], 'one subscription, the Goods tab\'s no-filter filter');
+      await sleep(250);
+      assert.strictEqual(known(), false, 'no reply yet');
+      // 3. The reply holds only your own order (1 order): loaded, once the game has had a moment to render it.
+      ws.emit({ kind: 'Orders', tick: 5, orders: [own], truncated: false });
+      assert.strictEqual(known(), false, 'settling');
+      assert.ok(await waitFor(known, 1000), 'a 1-order book of your own is loaded');
       s = ap.read(true); d = ap.decide(s);
-      assert.strictEqual(s.ordersKnown, true);
       assert.ok(!d.waits?.some((w) => /not loaded/.test(w)), d.wait);
+      // Other players' orders arriving later change nothing about loaded-ness.
+      ws.emit({ kind: 'Orders', tick: 6, orders: [own, other], truncated: false }); ordersHook.memoizedState = [own, other];
+      assert.ok(await waitFor(known, 1000));
       ws.emit({ kind: 'Orders', tick: 6, orders: [own, other], truncated: true });
+      await sleep(250);
       assert.strictEqual(known(), false, 'a truncated book is not loaded');
       // Goods tab closes (null) and we subscribe again before its reply: that late own-only reply is not our answer.
-      ws.send(JSON.stringify({ type: 'SetBoardFilter', board: 'Orders', filter: null }));
+      ws.send(JSON.stringify({ type: 'SetBoardFilter', board: 'Orders', filter: null }));   // through the hook, as the game sends it
       core.orderBook.need(0);
-      ws.emit({ kind: 'Orders', tick: 6, orders: [own], truncated: false });
+      ws.emit({ kind: 'Orders', tick: 7, orders: [own], truncated: false });
+      await sleep(250);
       assert.strictEqual(known(), false, 'reply to the null filter');
-      ws.emit({ kind: 'Orders', tick: 6, orders: [own, other], truncated: false });
-      assert.strictEqual(known(), true, 'reply to ours');
+      ws.emit({ kind: 'Orders', tick: 7, orders: [own], truncated: false });
+      assert.ok(await waitFor(known, 1000), 'reply to ours (own order only)');
       // Release: our filter goes back to null, and the board is not loaded again.
       core.orderBook.release();
       assert.deepStrictEqual(filters().at(-1).filter, null);
-      ws.emit({ kind: 'Orders', tick: 7, orders: [own], truncated: false }); ordersHook.memoizedState = [own];
-      assert.strictEqual(known(), false);
+      ws.emit({ kind: 'Orders', tick: 8, orders: [own], truncated: false });
+      await sleep(250);
+      assert.strictEqual(known(), false, 'null filter');
       // An empty answer counts as loaded (the walk finds no orders array then).
       core.orderBook.need(0);
-      ws.emit({ kind: 'Orders', tick: 8, orders: [], truncated: false }); ordersHook.memoizedState = [];
-      assert.strictEqual(known(), true, 'empty book');
+      ws.emit({ kind: 'Orders', tick: 9, orders: [], truncated: false }); ordersHook.memoizedState = [];
+      assert.ok(await waitFor(known, 1000), 'empty book');
       // The game sets its own, narrower filter (Goods tab on one item): not loaded, and need()/release() never touch it.
-      ws.send(JSON.stringify({ type: 'SetBoardFilter', board: 'Orders', filter: { ...ALL, items: [1] } }));   // through the hook, as the game sends it
-      ws.emit({ kind: 'Orders', tick: 9, orders: [other], truncated: false }); ordersHook.memoizedState = [other];
+      ws.send(JSON.stringify({ type: 'SetBoardFilter', board: 'Orders', filter: { ...ALL, items: [1] } }));
+      ws.emit({ kind: 'Orders', tick: 10, orders: [other], truncated: false }); ordersHook.memoizedState = [other];
+      await sleep(250);
       assert.strictEqual(known(), false, 'narrowed filter');
       const n = filters().length;
       core.orderBook.need(0); core.orderBook.release();
@@ -297,13 +321,12 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       core.orderBook.need(0);
       assert.deepStrictEqual(filters().at(-1).filter, ALL);
       // Unload drops our filter and restores the socket's own send.
-      const proto = FakeWS.prototype.send;
       core._unload(); globalThis.idleCore = undefined;
       assert.deepStrictEqual(filters().at(-1).filter, null);
-      assert.strictEqual(ws.send, proto);
+      assert.strictEqual(ws.send, FakeWS.prototype.send);
     } finally {
-      ap._unload(); globalThis.idleCore?._unload(); globalThis.idleCore = undefined; globalThis.earlyGame = undefined;
-      delete globalThis.document; delete globalThis.WebSocket; delete globalThis.location;
+      unload();
+      delete globalThis.document; delete globalThis.WebSocket; delete globalThis.location; delete globalThis.__deals; delete globalThis.__catalog;
     }
   });
 

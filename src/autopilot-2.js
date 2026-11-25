@@ -119,17 +119,10 @@
     seeTick(st.ssi?.last_user_mutation_tick);
     const s = fullSnapshot(st, catalog, deals, orders, nowTick(), engine);
     s.ws = ws; s.wsOpen = ws?.readyState === 1;
-    // Other players' orders are on the board only while a board filter covers them (Goods tab open, or core.orderBook
-    // subscribed); without one the list holds only your own, so it is not loaded. A live snapshot that had other
-    // players' orders must also show them in the game's state; an empty one counts (the walk finds no empty array).
-    // Goods tab open with a filter sent before we attached: loaded once other players' orders show.
-    const live = core?.orderBook && s.wsOpen ? core.orderBook.live(REGION) : null;
-    if (live === 'unknown') s.ordersKnown &&= s.orders.length > 0;
-    else if (live !== null) {
-      const rows = live ? core.orderBook.rows() ?? [] : null;
-      const others = rows?.some(([p, r]) => r === REGION && p !== st.ssi?.corp_id);
-      s.ordersKnown = !!rows && (s.ordersKnown || !rows.length) && (!others || s.orders.length > 0);
-    }
+    // Other players' orders are on the board only while a full-region board filter is set and answered (Goods tab open,
+    // or core.orderBook subscribed); without one the list holds only your own, so it is not loaded. A loaded book may
+    // hold only your own orders, or none (the walk finds no empty array: s.orders is [] then).
+    if (core?.orderBook && s.wsOpen) s.ordersKnown = core.orderBook.live(REGION);
     s.autoPower = W.autoUtil?.conf?.power?.on === true;   // Auto utilities owns power while on (it subscribes the running load)
     return s;
   }
