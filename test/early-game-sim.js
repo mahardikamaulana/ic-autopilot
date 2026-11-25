@@ -61,14 +61,16 @@ function run(scenario, HOURS, quiet) {
     shipments: [], next_shipment_id: 0, courier_ready_at: 0,
     subscriptions: { 0: { power: 0 } }, standing_fills: {}, land_bought: { 0: 0 },
     layouts: {}, designs: {},   // a fresh corp: default plans everywhere, no saved designs
+    exchange: { 0: {} }, auto_deliver: [],   // player buys land at the Exchange (patch 2026-11-25) until withdrawn
   };
+  const toExchange = (item, n) => { const e = st.exchange[0]; e[item] = { units: (e[item]?.units ?? 0) + n }; };
   const floorSwitches = [];
   const sold = {};   // item name → units sold by the script (auto-ship not included)
   // The sim has no game scorer: a layout's rate is the library rate the script expects (meta.rate),
   // recorded when the action is applied. Default plans are x1 (checked live).
   let pendingRate = 1;
   const layoutRate = () => pendingRate;
-  let courierRejects = 0;
+  let courierRejects = 0, withdrawn = 0;
   let postedOrders = 0, shockAt = -1e9, minPowered = Infinity, userGroup = null, userKeptUntilResume = null;
   let tick = 1, soldWood = false, minMoney = Infinity, pausedByBill = 0, dropped = 0, offlineUntil = 0;
   const stock = st.stock[0];
@@ -156,7 +158,8 @@ function run(scenario, HOURS, quiet) {
         return true;
       }
       case 'FillDeal': case 'FillOrder': {
-        if (tick < st.courier_ready_at) { courierRejects++; return false; } // silently ignored, like the server
+        if (m.type === 'FillOrder' && m.courier) return err('FillOrder: courier:true (the client sends false since the Exchange)');
+        if (m.type === 'FillDeal' && tick < st.courier_ready_at) { courierRejects++; return false; } // silently ignored, like the server
         const d = m.type === 'FillDeal' ? deals.find((x) => x.id === m.deal) : orders.find((x) => x.id === m.order);
         if (!d) return false; // deal gone (filled by someone else): silently ignored, like the server
         const unit = m.type === 'FillDeal' ? d.price / d.amount : d.unit_price * 1.02;
@@ -175,7 +178,8 @@ function run(scenario, HOURS, quiet) {
           const cost = Math.ceil(unit * m.amount);
           if (st.items[0] < cost) return err(`${m.type}: money`);
           st.items[0] -= cost;
-          ship(d.item, m.amount, 0, true);
+          if (m.type === 'FillOrder') toExchange(d.item, m.amount);   // lands at the Exchange, no shipment
+          else ship(d.item, m.amount, 0, true);
         }
         return true;
       }
@@ -185,6 +189,17 @@ function run(scenario, HOURS, quiet) {
         st.items[0] -= cost; // escrow
         orders.push({ id: nextDeal++, poster: 999, side: 'Buy', item: m.item, amount: m.amount, unit_price: m.unit_price, region: 0, postedAt: tick });
         postedOrders++;
+        return true;
+      }
+      case 'TransferStock': {
+        // Only withdraws are modelled (Exchange → same region inventory, one courier run).
+        if (m.from !== 0 || m.to !== 0 || !m.from_exchange || m.to_exchange) return err('TransferStock: only same-region withdraws expected');
+        if (tick < st.courier_ready_at) { courierRejects++; return false; }
+        const e = st.exchange[0][m.item];
+        if (!e || e.units < m.amount) return err('TransferStock: not at the Exchange');
+        if (C.items[m.item].cargo_weight * m.amount > 10000) return err('TransferStock: over courier CU');
+        e.units -= m.amount; withdrawn += m.amount;
+        ship(m.item, m.amount, 0, true);
         return true;
       }
       case 'EditLayout': {
@@ -230,7 +245,7 @@ function run(scenario, HOURS, quiet) {
     // Assumption: another player fills our buy orders 45 min after posting.
     for (let i = orders.length - 1; i >= 0; i--) {
       const o = orders[i];
-      if (o.poster === 999 && tick - o.postedAt >= 5400) { add(o.item, o.amount); orders.splice(i, 1); }
+      if (o.poster === 999 && tick - o.postedAt >= 5400) { toExchange(o.item, o.amount); orders.splice(i, 1); }
     }
     if (st.research) {
       st.research.remaining -= DT;
@@ -379,7 +394,7 @@ function run(scenario, HOURS, quiet) {
   }
 
   const s = core.snapshot(st, C, deals, orders, tick);
-  const result = { stallAlerts, scenario, hours: HOURS, courierRejects, woodSold: sold.Wood ?? 0, floorSwitches, postedOrders, demolishes, actions, errors, milestones, phase: core.phaseOf(s), minMoney, minPowered, userKept: userGroup == null ? '—' : (userKeptUntilResume ?? st.groups[userGroup].paused) ? 'yes' : 'NO', pausedByBill, dropped, stillPaused: Object.values(st.groups).filter((g) => g.paused).length, farmRuns, farmBuilt };
+  const result = { stallAlerts, scenario, hours: HOURS, courierRejects, woodSold: sold.Wood ?? 0, floorSwitches, postedOrders, withdrawn, demolishes, actions, errors, milestones, phase: core.phaseOf(s), minMoney, minPowered, userKept: userGroup == null ? '—' : (userKeptUntilResume ?? st.groups[userGroup].paused) ? 'yes' : 'NO', pausedByBill, dropped, stillPaused: Object.values(st.groups).filter((g) => g.paused).length, farmRuns, farmBuilt };
   if (!quiet) {
     if (scenario === 'cdfarm') console.log(`CD Farm stand-in: ${farmRuns} runs started by Autopilot, ${farmBuilt} camps built + demolished`);
     console.log(`\n=== ${scenario}, ${HOURS} h: ${actions} actions, ${errors.length} script errors, phase ${result.phase}` +
@@ -406,7 +421,7 @@ const hours = Number(process.argv[3] || (scenario === 'live' ? 16 : 30));
 if (scenario === 'all') {
   const results = ['rich', 'live', 'chaos', 'nobooster', 'cdfarm'].map((sc) => run(sc, hours, true));
   const rows = results.map((r) => ({
-    scenario: r.scenario, phase: r.phase, 'courier misses': r.courierRejects, 'wood sold': r.woodSold, floors: r.floorSwitches.length, 'buy orders': r.postedOrders, demolishes: r.demolishes, errors: r.errors.length, actions: r.actions,
+    scenario: r.scenario, phase: r.phase, 'courier misses': r.courierRejects, 'wood sold': r.woodSold, floors: r.floorSwitches.length, 'buy orders': r.postedOrders, withdrawn: r.withdrawn, demolishes: r.demolishes, errors: r.errors.length, actions: r.actions,
     'lowest $ powered': r.minPowered === Infinity ? '—' : (r.minPowered / 100).toFixed(0), 'bill pauses': r.pausedByBill, 'paused at end': r.stillPaused, 'your pause kept': r.userKept,
     'Smelter running': r.milestones.get('P4 Smelter running') ?? '—', 'Lab unlocked': r.milestones.get('P5 Manufacturing Lab unlocked') ?? '—',
     ...(r.scenario === 'cdfarm' ? { 'CD Farm runs': r.farmRuns } : {}),

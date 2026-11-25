@@ -43,12 +43,19 @@
     const powerNeed = groups.filter((g) => !g.paused).reduce((a, g) => a + drawOf(g.building) * g.count, 0);
     const powerHave = st.subscriptions?.[REGION]?.power ?? 0;
     const inbound = {};
-    for (const s of st.shipments ?? []) if (s.amount > 0 && !s.returning && s.inbound !== false) inbound[s.item] = (inbound[s.item] ?? 0) + s.amount;
+    // A shipment to the Exchange (to_exchange, patch 2026-11-25) leaves stock; it is not inbound.
+    for (const s of st.shipments ?? []) if (s.amount > 0 && !s.returning && s.inbound !== false && !s.to_exchange) inbound[s.item] = (inbound[s.item] ?? 0) + s.amount;
+    // Goods bought from players land at this region's Exchange (st.exchange[region][item].units) and can't be used there
+    // until withdrawn, or shipped home by the game when auto_deliver lists the region (the client shows deliveries_due
+    // as "N to deliver" on those same units, so they are not added again).
+    const exch = st.exchange?.[REGION] ?? {};
+    const atExchange = (item) => exch[item]?.units ?? 0;
+    const autoDeliver = (st.auto_deliver ?? []).includes(REGION);
     // Floor kit per building: the active layout's bill of materials for that recipe, else the default kit.
     const kitFor = (b, r) => st.layouts?.[r]?.bom ?? bld(b).default_kit ?? [];
     const items = st.items ?? {};
     return {
-      st, catalog, bld, recipe, groups, pool, stock, items, inbound, kitFor, landBought, acresUsed,
+      st, catalog, bld, recipe, groups, pool, stock, items, inbound, atExchange, autoDeliver, kitFor, landBought, acresUsed,
       owned, equipped, running, runningEquipped, drawOf, powerNeed, powerHave, tickNow,
     };
   }
@@ -365,7 +372,10 @@
       const label = `floorplan ${f.task}: x${f.cur.rate} → x${f.best.rate} (${f.best.name}${f.best.scored ? ', scored live' : ''}) on ${f.buildings} building(s)`;
       const block = floorBlock(s, f);
       if (block) {
-        for (const [i, n] of block.short) yield* floorPartBuys(s, +i, n - s.has(+i) - (s.inbound[+i] ?? 0), `parts for ${f.task} floorplan`);
+        for (const [i, n] of block.short) {
+          yield* withdrawActions(s, +i, n, `parts for ${f.task} floorplan`);
+          yield* floorPartBuys(s, +i, n - s.has(+i) - (s.inbound[+i] ?? 0) - s.atExchange(+i), `parts for ${f.task} floorplan`);
+        }
         yield { wait: `${label}: ${block.why}` };
         continue;
       }

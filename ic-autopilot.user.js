@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IC Autopilot
 // @namespace    idlecorp-toolkit
-// @version      2.8.12
+// @version      2.8.13
 // @author       XPARAD0X
 // @description  Early-game Autopilot, CD Farm (Construction Data by building and demolishing buildings; Auto picks the cheapest source itself), Lab runner (keeps the Manufacturing Labs researching), Auto ship (an "Auto ship" button on every distributor bid) and Auto utilities (an "Auto" switch that keeps the power and water subscriptions at what the groups need) for IdleCorp, each with a panel, menu or switch in the game UI.
 // @homepageURL  https://github.com/mahardikamaulana/ic-autopilot
@@ -8301,12 +8301,19 @@ try {
     const powerNeed = groups.filter((g) => !g.paused).reduce((a, g) => a + drawOf(g.building) * g.count, 0);
     const powerHave = st.subscriptions?.[REGION]?.power ?? 0;
     const inbound = {};
-    for (const s of st.shipments ?? []) if (s.amount > 0 && !s.returning && s.inbound !== false) inbound[s.item] = (inbound[s.item] ?? 0) + s.amount;
+    // A shipment to the Exchange (to_exchange, patch 2026-11-25) leaves stock; it is not inbound.
+    for (const s of st.shipments ?? []) if (s.amount > 0 && !s.returning && s.inbound !== false && !s.to_exchange) inbound[s.item] = (inbound[s.item] ?? 0) + s.amount;
+    // Goods bought from players land at this region's Exchange (st.exchange[region][item].units) and can't be used there
+    // until withdrawn, or shipped home by the game when auto_deliver lists the region (the client shows deliveries_due
+    // as "N to deliver" on those same units, so they are not added again).
+    const exch = st.exchange?.[REGION] ?? {};
+    const atExchange = (item) => exch[item]?.units ?? 0;
+    const autoDeliver = (st.auto_deliver ?? []).includes(REGION);
     // Floor kit per building: the active layout's bill of materials for that recipe, else the default kit.
     const kitFor = (b, r) => st.layouts?.[r]?.bom ?? bld(b).default_kit ?? [];
     const items = st.items ?? {};
     return {
-      st, catalog, bld, recipe, groups, pool, stock, items, inbound, kitFor, landBought, acresUsed,
+      st, catalog, bld, recipe, groups, pool, stock, items, inbound, atExchange, autoDeliver, kitFor, landBought, acresUsed,
       owned, equipped, running, runningEquipped, drawOf, powerNeed, powerHave, tickNow,
     };
   }
@@ -8623,7 +8630,10 @@ try {
       const label = `floorplan ${f.task}: x${f.cur.rate} → x${f.best.rate} (${f.best.name}${f.best.scored ? ', scored live' : ''}) on ${f.buildings} building(s)`;
       const block = floorBlock(s, f);
       if (block) {
-        for (const [i, n] of block.short) yield* floorPartBuys(s, +i, n - s.has(+i) - (s.inbound[+i] ?? 0), `parts for ${f.task} floorplan`);
+        for (const [i, n] of block.short) {
+          yield* withdrawActions(s, +i, n, `parts for ${f.task} floorplan`);
+          yield* floorPartBuys(s, +i, n - s.has(+i) - (s.inbound[+i] ?? 0) - s.atExchange(+i), `parts for ${f.task} floorplan`);
+        }
         yield { wait: `${label}: ${block.why}` };
         continue;
       }
@@ -8699,8 +8709,9 @@ try {
     return [
       ...s.deals.filter((d) => d.side === 'Buy' && d.item === item && d.amount >= amount)
         .map((d) => ({ key: `fill:${d.id}`, unit: d.price / d.amount, msg: { type: 'FillDeal', deal: d.id, amount, hire: null, region: REGION, courier: true } })),
+      // A player fill lands at the Exchange, no shipment (the client sends courier:false since 2026-11-25); withdrawActions brings it home.
       ...s.orders.filter((o) => o.side === 'Sell' && o.item === item && o.amount >= amount)
-        .map((o) => ({ key: `order:${o.id}`, unit: o.unit_price * 1.02, msg: { type: 'FillOrder', order: o.id, amount, hire: null, region: REGION, courier: true } })),
+        .map((o) => ({ key: `order:${o.id}`, unit: o.unit_price * 1.02, msg: { type: 'FillOrder', order: o.id, amount, hire: null, region: REGION, courier: false } })),
     ].filter((o) => !cap || o.unit <= cap).sort((a, z) => a.unit - z.unit);
   }
 
@@ -8734,10 +8745,9 @@ try {
       const n = Math.min(amount, o.amount);
       const cost = Math.ceil(o.unit_price * 1.02 * n);
       if (s.money - cost < moneyFloor(s)) { yield { wait: `${why}: need ${usd(cost)} for ${n} ${iname(s, item)}` }; return; }
-      if (!s.courierFree) { yield { wait: `courier busy (${courierEta(s)}): ${why}` }; return; }
-      const id0 = s.shipId, m0 = s.money;
-      yield act(`order:${o.id}`, `${why}: buy ${n} ${iname(s, item)} from a player @ ${usd(o.unit_price)}`,
-        { msg: { type: 'FillOrder', order: o.id, amount: n, hire: null, region: REGION, courier: true }, until: (x) => x.shipId > id0 || x.money < m0 - cost / 2 });
+      const m0 = s.money, u0 = s.atExchange(item);
+      yield act(`order:${o.id}`, `${why}: buy ${n} ${iname(s, item)} from a player @ ${usd(o.unit_price)} (lands at the Exchange)`,
+        { msg: { type: 'FillOrder', order: o.id, amount: n, hire: null, region: REGION, courier: false }, until: (x) => x.atExchange(item) > u0 || x.money < m0 - cost / 2 });
     }
     if (!s.madeHere.has(item)) yield* postBuyOrder(s, item, amount, cfg.floorBuyUsd, why);
   }
@@ -8756,11 +8766,30 @@ try {
     for (const o of offers) {
       const cost = Math.ceil(o.unit * amount);
       if (s.money - cost < moneyFloor(s)) { yield { wait: `${why}: need ${usd(cost)} for ${amount} ${iname(s, item)}` }; return; }
-      if (!s.courierFree) { yield { wait: `courier busy (${courierEta(s)}): ${why}` }; return; }
-      const id0 = s.shipId, m0 = s.money;
+      if (o.msg.courier && !s.courierFree) { yield { wait: `courier busy (${courierEta(s)}): ${why}` }; return; }
+      const id0 = s.shipId, m0 = s.money, u0 = s.atExchange(item);
       yield act(o.key, `${why}: buy ${amount} ${iname(s, item)} for ~${usd(cost)}`,
-        { msg: o.msg, until: (x) => x.shipId > id0 || x.money < m0 - cost / 2 });
+        { msg: o.msg, until: (x) => x.shipId > id0 || x.atExchange(item) > u0 || x.money < m0 - cost / 2 });
     }
+  }
+
+  // TransferStock between this region's inventory and its Exchange, as the client's Transfers dialog sends it.
+  // Withdraw = from the Exchange; to the Exchange = ship there to sell to players (listCents puts a sell order up on arrival).
+  const transferMsg = (item, amount, toExchange, listCents = null) => ({ type: 'TransferStock', from: REGION, to: REGION, item, amount,
+    courier: true, from_exchange: !toExchange, to_exchange: toExchange, list_price: toExchange ? listCents : null });
+
+  // Goods bought on the Exchange can't be used there: withdraw what the plan still lacks (`want` = the full amount it
+  // needs, before stock), one courier load at a time. Never more, so goods you keep there to sell stay. With the game's
+  // Auto-deliver on for this region it ships them itself.
+  function* withdrawActions(s, item, want, why) {
+    if (s.autoDeliver) return;
+    const load = Math.floor(COURIER_CU / (s.catalog.items[item]?.cargo_weight || 1));
+    const n = Math.min(s.atExchange(item), Math.ceil(want - s.has(item) - (s.inbound[item] ?? 0)), load);
+    if (!(n > 0)) return;
+    if (!s.courierFree) { yield { wait: `courier busy (${courierEta(s)}): ${why}: withdraw ${n} ${iname(s, item)} from the Exchange` }; return; }
+    const id0 = s.shipId, u0 = s.atExchange(item);
+    yield act(`withdraw:${item}`, `${why}: withdraw ${n} ${iname(s, item)} from the Exchange`,
+      { msg: transferMsg(item, n, false), until: (x) => x.shipId > id0 || x.atExchange(item) < u0 });
   }
 
   // Home-made items held back from a build: next tech's prototype + build cost of plan
@@ -8784,7 +8813,8 @@ try {
     return Math.ceil(r);
   }
 
-  // Parts to buy: owed kits + next tech's prototype, minus stock, inbound and home production.
+  // Parts to buy: owed kits + next tech's prototype (`want`), minus stock, inbound, what waits at the Exchange and home
+  // production. Items with nothing left to buy are kept (need <= 0) so their Exchange goods still get withdrawn.
   function partsToBuy(s) {
     const want = {};
     for (const [item, n] of Object.entries(s.kitOwed)) if (!s.madeHere.has(+item)) want[item] = n;
@@ -8799,8 +8829,7 @@ try {
       }
     }
     return Object.entries(want)
-      .map(([item, amount]) => ({ item: +item, need: amount - s.has(+item) - (s.inbound[+item] ?? 0) }))
-      .filter((p) => p.need > 0);
+      .map(([item, amount]) => ({ item: +item, want: amount, need: amount - s.has(+item) - (s.inbound[+item] ?? 0) - s.atExchange(+item) }));
   }
   // (An open buy order of ours is handled in buyActions: it waits instead of reposting.)
 
@@ -8886,7 +8915,12 @@ try {
     }
 
     // 5. Kit / prototype parts the corp can't make yet.
-    if (cfg.buyKits) for (const p of partsToBuy(s)) yield* buyActions(s, p.item, p.need, 'parts for kits/prototype');
+    if (cfg.buyKits) {
+      for (const p of partsToBuy(s)) {
+        yield* withdrawActions(s, p.item, p.want, 'parts for kits/prototype');
+        if (p.need > 0) yield* buyActions(s, p.item, p.need, 'parts for kits/prototype');
+      }
+    }
 
     // 6. Next plan tech.
     const nt = nextTech(s);
@@ -9769,7 +9803,7 @@ try {
     // Pure pieces for the offline simulator.
     _core: {
       checkGame, watchStall, stalledNow: () => stalled, resetWatch: () => { stalled = ''; prog.at = 0; lastPhase = null; },
-      snapshot: fullSnapshot, normalize, decide, checklist, phaseOf, finish, observe, userPaused, billPaused, floorTable, bomOf,
+      snapshot: fullSnapshot, normalize, decide, checklist, phaseOf, finish, observe, userPaused, billPaused, floorTable, bomOf, transferMsg,
       setClock: (fn) => { nowMs = fn; courierHoldUntil = 0; courierMisses = 0; cooldowns.clear(); successes.clear(); failures.clear(); for (const k in boosterLeft) delete boosterLeft[k]; },
     },
     _unload: () => {

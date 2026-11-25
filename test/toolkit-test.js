@@ -1504,6 +1504,38 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     assert.strictEqual(lib('Make Table'), lib('Make Chair'));
   });
 
+  await t('Exchange (patch 2026-11-25): bought goods at the Exchange are withdrawn, not bought again; Auto-deliver and to-Exchange shipments respected', () => {
+    const { ap } = loadBoth();
+    const k = ap._core, C = k.normalize(board.catalog);
+    k.setClock(() => 1e9);
+    const WOOD = 1;
+    const st = baseState();
+    st.groups = { 1: { building: 0, region: 0, count: 1, equipped: 0, recipe: 0, name: 'Fell Wood' } };   // owes a 9-Wood kit
+    st.exchange = { 0: { [WOOD]: { units: 50 } } };
+    st.courier_ready_at = 0; st.next_shipment_id = 5;
+    const ask = { id: 7, poster: 2, side: 'Sell', item: WOOD, amount: 1000, unit_price: 100, region: 0 };
+    const pick = () => k.decide(k.snapshot(st, C, [], [ask], 0));
+    let a = pick();
+    assert.ok(a.steps, 'expected an action, got wait: ' + a.wait);
+    assert.deepStrictEqual(a.steps[0].msg, { type: 'TransferStock', from: 0, to: 0, item: WOOD, amount: 9, courier: true, from_exchange: true, to_exchange: false, list_price: null });
+    // Confirmed when a shipment goes out or the Exchange holds less.
+    const after = JSON.parse(JSON.stringify(st)); after.exchange[0][WOOD].units = 41;
+    assert.ok(a.steps[0].until(k.snapshot(after, C, [], [ask], 0)));
+    // Auto-deliver on for the region: the game ships it; Autopilot neither withdraws nor buys again.
+    st.auto_deliver = [0];
+    a = pick();
+    assert.ok(!a.steps || !['TransferStock', 'FillOrder', 'PostOrder'].includes(a.steps[0].msg.type), JSON.stringify(a.steps?.[0]?.msg ?? a.wait));
+    // Nothing at the Exchange: a player ask is bought with courier:false (it lands at the Exchange, no shipment).
+    st.auto_deliver = []; st.exchange = { 0: {} };
+    a = pick();
+    assert.strictEqual(a.steps?.[0]?.msg.type, 'FillOrder', JSON.stringify(a.steps?.[0]?.msg ?? a.wait));
+    assert.strictEqual(a.steps[0].msg.courier, false);
+    // A shipment to the Exchange is leaving stock, not inbound: it doesn't cover the kit.
+    st.shipments = [{ id: 1, item: WOOD, amount: 9, remaining: 100, to_exchange: true }];
+    assert.strictEqual(k.snapshot(st, C, [], [], 0).inbound[WOOD], undefined);
+    // Ship-to-Exchange message (the sell side; no Autopilot path sells to players today).
+    assert.deepStrictEqual(k.transferMsg(WOOD, 400, true, 150), { type: 'TransferStock', from: 0, to: 0, item: WOOD, amount: 400, courier: true, from_exchange: false, to_exchange: true, list_price: 150 });
+  });
 
   console.log(failed ? '\n' + failed + ' failed' : '\nall passed');
   process.exit(failed ? 1 : 0);
