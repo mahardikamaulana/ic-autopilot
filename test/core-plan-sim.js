@@ -437,10 +437,10 @@ const fastPacer = () => ({ beforeCommand: async () => { }, noteConfirm() { }, no
     unload();
   });
 
-  await t('dry run is the default and sends nothing; the readout lands in the ledger', async () => {
+  await t('dry run sends nothing when asked for; the readout lands in the ledger', async () => {
     const { core, cp, w } = boot(stageA());
-    assert.strictEqual(cp.cfg.dryRun, true);
-    cp.start();
+    assert.strictEqual(cp.cfg.dryRun, false, 'Live is the default');
+    cp.start({ dryRun: true });
     await cp._step();
     assert.strictEqual(w.ws.sent.length, 0);
     const led = core.ledger.text();
@@ -536,7 +536,7 @@ const fastPacer = () => ({ beforeCommand: async () => { }, noteConfirm() { }, no
     const { core, cp } = boot(stageA());
     assert.ok(core.reserves.names().includes('corePlan'));
     assert.strictEqual(core.reserves.merged(), null);
-    cp.start();
+    cp.start({ dryRun: true });
     await cp._step();
     const m = core.reserves.merged();
     assert.strictEqual(m.items[I('Iron Frame')], 44);
@@ -624,6 +624,7 @@ const fastPacer = () => ({ beforeCommand: async () => { }, noteConfirm() { }, no
   await t('settings: validated, saved without dryRun, exported and imported', () => {
     const disk = {}; globalThis.localStorage = mem(disk);
     const { core, cp } = load();
+    cp.cfg.dryRun = true;   // the opposite of the default: an import must not turn it off
     const r = cp.importCfg({ cfg: { landPaybackAB: 12, dryRun: false, nope: 1, handoff: 'yes', cashReserve: -5 } });
     assert.deepStrictEqual(r.applied, ['landPaybackAB']);
     assert.deepStrictEqual(r.skipped.sort(), ['cashReserve', 'dryRun', 'handoff', 'nope']);

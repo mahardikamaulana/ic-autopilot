@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         IC Autopilot
 // @namespace    idlecorp-toolkit
-// @version      2.8.19
+// @version      2.8.20
 // @author       XPARAD0X
-// @description  Early-game Autopilot, CD Farm (Construction Data by building and demolishing buildings; Auto picks the cheapest source itself), Lab runner (keeps the Manufacturing Labs researching), Auto ship (an "Auto ship" button on every distributor bid) and Auto utilities (an "Auto" switch that keeps the power and water subscriptions at what the groups need) for IdleCorp, each with a panel, menu or switch in the game UI.
+// @description  Early-game Autopilot, CD Farm (Construction Data by building and demolishing buildings; Auto picks the cheapest source itself), Lab runner (keeps the Manufacturing Labs researching), Auto ship (an "Auto ship" button on every distributor bid), Auto utilities (an "Auto" switch that keeps the power and water subscriptions at what the groups need), Core plan and Keep online (keeps the socket alive while the tab is hidden) for IdleCorp, each with a panel, menu or switch in the game UI. Everything runs live by default.
 // @homepageURL  https://github.com/mahardikamaulana/ic-autopilot
 // @supportURL   https://github.com/mahardikamaulana/ic-autopilot/issues
 // @updateURL    https://raw.githubusercontent.com/mahardikamaulana/ic-autopilot/main/ic-autopilot.user.js
@@ -27,7 +27,7 @@
 //   1. CD Farm   (window.cdFarm)    sidebar tab "CD Farm"
 //   2. Autopilot (window.earlyGame) sidebar tab "Autopilot"
 //   3. Lab       (window.labRunner) sidebar tab "Lab": StartResearch whenever a Manufacturing Lab's
-//                                   slot is free, ClaimResearch for finished results (dry run by default)
+//                                   slot is free, ClaimResearch for finished results (live by default)
 //   4. Auto ship (window.autoSell)  "Auto ship" button left of Sell on every distributor bid in the Market table:
 //                                   a menu like the game's auto-ship menu, selling by FillDeal over the socket
 //                                   (no slot limit), plus an "Auto ship" jobs table on the Market page

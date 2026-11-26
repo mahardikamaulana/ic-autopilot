@@ -53,5 +53,7 @@ GitHub serves raw files through a cache of a few minutes, so an update can take 
 
 ## Notes
 
-- It talks to the game through the page's own WebSocket and only works while the tab is open. Autopilot starts as a dry run.
+- It talks to the game through the page's own WebSocket and only works while the tab is open. Everything runs live by default: Autopilot, Core plan, Lab and CD Farm resume live after a reload (Core plan after its 60 s cancel window); Dry run is still available through its switch.
+- **Keep online** (Autopilot settings, Connection): the game's socket watchdog only runs while the tab reports itself visible, so the script makes the page report visible. Nothing is sent to the server. Turn it off with the switch or `keepOnline.set(false)`.
+- Connection problems pause a feature instead of stopping it: unconfirmed commands while the socket is resyncing are not counted; after repeated real rejections Lab, Auto utilities and Auto ship retry every 10 minutes, and CD Farm's Auto cooldown retries after its wait. Only Alt+Shift+X and each feature's own Stop stay stopped.
 - If the repository is renamed or moved, update the four URLs in `src/header.js` (`@homepageURL`, `@supportURL`, `@updateURL`, `@downloadURL`) and rebuild.

@@ -251,7 +251,7 @@ async function sync(cp, st, ctx) { for (let i = 0; i < 4; i++) { const a = act(d
     const cf = fakeFarm({ cfg: { land: 'off', reserveAcres: 0 } });
     globalThis.cdFarm = cf;
     cp.cfg.land = false; cp.cfg.unlocks = false;
-    cp.start();
+    cp.start({ dryRun: true });
     await cp._step(); await cp._step();
     assert.strictEqual(cf.pauses, 0, 'dry run');
     assert.strictEqual(cf.calls.length, 0, 'dry run');

@@ -32,8 +32,8 @@ add('sim:coreplan', ['bun', T('core-plan-sim.js')], [BUILT, T('core-plan-sim.js'
 for (const m of ['cp-buildout', 'cp-retail', 'cp-lab', 'cp-ladder', 'cp-cadence', 'cp-endgame']) add(m, ['bun', T(m + '-test.js')], [BUILT, T(m + '-test.js'), T('cp-fixtures.js'), T('live-board.json'), T('live-stageB.json')], 4);
 add('core-math', ['bun', T('core-math-test.js')], ['src/core-math.js', T('core-math-test.js'), '../scripts/core-plan/my-plan.js', '../scripts/core-plan/state-example.json', '../scripts/core-plan/catalog-2026-11-22.json'], 2);
 add('autopilot-anycorp', ['bun', T('autopilot-anycorp-test.js')], [BUILT, T('autopilot-anycorp-test.js'), ...BOARD], 2);
-add('planner',['bun', T('planner-test.js')], ['src/core-1.js', 'src/core-2.js', 'src/core-form.js', 'src/core-3.js', 'src/planner.js', T('planner-test.js'), ...BOARD], 1);
-
+add('planner', ['bun', T('planner-test.js')], ['src/core-1.js', 'src/core-2.js', 'src/core-form.js', 'src/core-3.js', 'src/planner.js', T('planner-test.js'), ...BOARD], 1);
+add('keep-online', ['bun', T('keep-online-test.js')], [BUILT, T('keep-online-test.js')], 1);
 const argv = process.argv.slice(2);
 const flag = (n) => argv.includes('--' + n);
 const val = (n) => (argv.find((a) => a.startsWith('--' + n + '=')) || '').slice(n.length + 3);

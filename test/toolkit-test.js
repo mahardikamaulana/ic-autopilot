@@ -23,7 +23,7 @@ const SHARD = (process.argv.find((a) => a.startsWith('--shard=')) || '').slice(8
 let testNo = 0;
 async function t(name, fn) {
   if (SHARD.length === 2 && testNo++ % SHARD[1] !== SHARD[0]) return;
-  console.log = () => {}; console.warn = () => {};
+  console.log = () => { }; console.warn = () => { };
   const t0 = Date.now();
   try { await fn(); console.log = quietLog; console.warn = quietWarn; quietLog('ok   ' + name + (process.env.TEST_TIMES ? '  [' + (Date.now() - t0) + ' ms]' : '')); }
   catch (e) { console.log = quietLog; console.warn = quietWarn; failed++; quietLog('FAIL ' + name + '\n     ' + (e.stack || e).split('\n').slice(0, 4).join('\n     ')); }
@@ -107,6 +107,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     const rep = core.importConfig(json);
     assert.strictEqual(ap.cfg.workshops, 3); assert.strictEqual(ap.cfg.sellAll, false); assert.strictEqual(ap.cfg.goldMines, Infinity);
     assert.ok(/earlyGame: \d+ applied/.test(rep), rep);
+    ap.cfg.dryRun = true;   // the opposite of the default: an import must not turn it off
     const bad = JSON.stringify({ app: 'idlecorp-toolkit', format: 1, earlyGame: { cfg: { workshops: 'lots', sawmills: -4, dryRun: false, nosuchkey: 1, ironMines: 9 } } });
     const r2 = core.importConfig(bad);
     assert.strictEqual(ap.cfg.workshops, 3, 'string for a number is refused');
@@ -175,7 +176,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     (0, eval)(coreSrc);
     const core = globalThis.idleCore;
     for (const k of ['group', 'field', 'inputBox', 'createPanel', 'createChrome', 'createLogView', 'ensureStyle', 'hero', 'rowList', 'stateLine', 'banner', 'disclosure', 'amountField', 'toggleField', 'segField', 'quickPicks', 'runModeSeg', 'settingsTab', 'footer', 'logTab', 'syncLog', 'resetSettings']) assert.strictEqual(typeof core.ui[k], 'function', 'ui.' + k);
-    core.toast('plain'); core.toast('kind', 'error'); core.toast('undo', { kind: 'success', undo() {} });
+    core.toast('plain'); core.toast('kind', 'error'); core.toast('undo', { kind: 'success', undo() { } });
     core.ledger.clear(); core.ledger.add('AP', 'action', 'a'); core.ledger.add('CD', 'fail', 'b');
     const snap = core.ledger.list();
     core.ledger.clear(); assert.strictEqual(core.ledger.list().length, 0);
@@ -186,7 +187,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
   await t('walk(): reuses the result for 120 ms, walks again when fresh or expired', async () => {
     fresh();
     // A tiny fake React tree: root container -> fiber with hooks holding the game state and a socket ref.
-    class FakeWS { constructor() { this.readyState = 1; this.listeners = []; } addEventListener(_t, f) { this.listeners.push(f); } removeEventListener() {} }
+    class FakeWS { constructor() { this.readyState = 1; this.listeners = []; } addEventListener(_t, f) { this.listeners.push(f); } removeEventListener() { } }
     globalThis.WebSocket = FakeWS;
     const ws = new FakeWS();
     let walks = 0;
@@ -212,7 +213,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
 
   await t('sleep / sleepWake / every: a socket message fires timers that are due (hidden-tab throttling)', async () => {
     fresh();
-    class FakeWS { constructor() { this.readyState = 1; this.listeners = []; } addEventListener(_t, f) { this.listeners.push(f); } removeEventListener() {} }
+    class FakeWS { constructor() { this.readyState = 1; this.listeners = []; } addEventListener(_t, f) { this.listeners.push(f); } removeEventListener() { } }
     globalThis.WebSocket = FakeWS;
     const ws = new FakeWS();
     const st = { groups: {}, stock: {}, ssi: {}, items: {} };
@@ -247,12 +248,12 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
 
   await t('order book: off the Goods tab Autopilot waits (posts nothing) until a full-region board filter is answered, even by a book of only your own order; it releases only its own filter', async () => {
     fresh();
-    class FakeWS { constructor() { this.readyState = 1; this.sent = []; this.ls = []; } addEventListener(_t, f) { this.ls.push(f); } removeEventListener() {} send(m) { this.sent.push(JSON.parse(m)); } emit(m) { for (const f of this.ls) f({ data: JSON.stringify(m) }); } }
+    class FakeWS { constructor() { this.readyState = 1; this.sent = []; this.ls = []; } addEventListener(_t, f) { this.ls.push(f); } removeEventListener() { } send(m) { this.sent.push(JSON.parse(m)); } emit(m) { for (const f of this.ls) f({ data: JSON.stringify(m) }); } }
     globalThis.WebSocket = FakeWS;
     const ALL = { items: [], sides: [], regions: [0], utilities: [], quirks: [], nums: [] };
     const own = { id: 1, item: 6, amount: 5, unit_price: 100, side: 'Sell', poster: 1, region: 0 };
     const other = { id: 2, item: 1, amount: 500, unit_price: 50, side: 'Sell', poster: 7, region: 0 };
-    const el = () => ({ append() {}, remove() {}, addEventListener() {}, setAttribute() {}, style: {}, classList: { toggle() {} } });
+    const el = () => ({ append() { }, remove() { }, addEventListener() { }, setAttribute() { }, style: {}, classList: { toggle() { } } });
     // A game page: the socket ref and the game's board-filter store (a Map ref) in one component, the board context's
     // { truncated, deliveries } as a provider value, and the orders state (only yours while no board filter is set).
     function page(gameFilters = new Map(), board = { truncated: {}, deliveries: {} }) {
@@ -261,7 +262,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       st.groups = { 0: { id: 0, name: 'Planks', building: 4, recipe: recipeFor('Planks'), count: 1, equipped: 0, region: 0 } };   // owes a floor kit
       const ordersHook = { memoizedState: [own], next: null };
       const hooks = { memoizedState: { current: ws }, next: { memoizedState: { current: gameFilters }, next: { memoizedState: st, next: { memoizedState: board.deals ?? globalThis.__deals, next: ordersHook } } } };
-      const fiber = { memoizedState: hooks, memoizedProps: { catalog: JSON.parse(JSON.stringify(globalThis.__catalog)), value: { setBoardFilter() {}, ...board } }, child: null, sibling: null };
+      const fiber = { memoizedState: hooks, memoizedProps: { catalog: JSON.parse(JSON.stringify(globalThis.__catalog)), value: { setBoardFilter() { }, ...board } }, child: null, sibling: null };
       globalThis.document = { body: el(), head: el(), title: 'game', getElementById: (id) => (id === 'root' ? { __reactContainer$x: fiber } : null), createElement: el, querySelector: () => null, hidden: true };
       return { ws, ordersHook };
     }
@@ -367,7 +368,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
 
   await t('loop smoke: dry run sends nothing; live sends, slows down when unconfirmed, stops cleanly; broken game data refuses Live', async () => {
     fresh();
-    class FakeWS { constructor() { this.readyState = 1; this.sent = []; } addEventListener() {} removeEventListener() {} send(m) { this.sent.push(JSON.parse(m)); } }
+    class FakeWS { constructor() { this.readyState = 1; this.sent = []; } addEventListener() { } removeEventListener() { } send(m) { this.sent.push(JSON.parse(m)); } }
     globalThis.WebSocket = FakeWS;
     const ws = new FakeWS();
     const st = baseState();
@@ -375,7 +376,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     const props = { catalog };
     const fiber = { memoizedState: { memoizedState: { current: ws }, next: { memoizedState: st, next: { memoizedState: board.deals.filter((d) => d.region === 0), next: null } } }, memoizedProps: props, child: null, sibling: null };
     const root = { __reactContainer$x: fiber };
-    const el = () => ({ append() {}, remove() {}, addEventListener() {}, setAttribute() {}, style: {}, classList: { toggle() {} } });
+    const el = () => ({ append() { }, remove() { }, addEventListener() { }, setAttribute() { }, style: {}, classList: { toggle() { } } });
     globalThis.document = { body: el(), head: el(), title: 'game', getElementById: (id) => (id === 'root' ? root : null), createElement: el, querySelector: () => null, hidden: true };
     (0, eval)(coreSrc + '\n' + apSrc);
     const ap = globalThis.earlyGame;
@@ -421,7 +422,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     fresh();
     class FakeWS {
       constructor() { this.readyState = 1; this.sent = []; this.ls = []; this.n = 0; }
-      addEventListener(_t, f) { this.ls.push(f); } removeEventListener() {}
+      addEventListener(_t, f) { this.ls.push(f); } removeEventListener() { }
       send(m) {
         const msg = JSON.parse(m); this.sent.push(msg);
         if (this.sent.length > 1) return;                    // only the first action is echoed
@@ -439,7 +440,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     const props = { catalog: JSON.parse(JSON.stringify(board.catalog)) };
     const fiber = { memoizedState: { memoizedState: { current: ws }, next: { memoizedState: st, next: { memoizedState: board.deals.filter((d) => d.region === 0), next: null } } }, memoizedProps: props, child: null, sibling: null };
     const root = { __reactContainer$x: fiber };
-    const el = () => ({ append() {}, remove() {}, addEventListener() {}, setAttribute() {}, style: {}, classList: { toggle() {} } });
+    const el = () => ({ append() { }, remove() { }, addEventListener() { }, setAttribute() { }, style: {}, classList: { toggle() { } } });
     globalThis.document = { body: el(), head: el(), title: 'game', getElementById: (id) => (id === 'root' ? root : null), createElement: el, querySelector: () => null, hidden: true };
     (0, eval)(coreSrc + '\n' + apSrc);
     const ap = globalThis.earlyGame, core = globalThis.idleCore;
@@ -470,7 +471,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     const disk = {};
     globalThis.localStorage = { getItem: (k) => disk[k] ?? null, setItem: (k, v) => { disk[k] = String(v); }, removeItem: (k) => { delete disk[k]; } };
     // A game page that has not rendered yet: each copy's startup poll waits for it (it ends at _unload).
-    const el = () => ({ append() {}, remove() {}, addEventListener() {}, setAttribute() {}, style: {}, classList: { toggle() {} } });
+    const el = () => ({ append() { }, remove() { }, addEventListener() { }, setAttribute() { }, style: {}, classList: { toggle() { } } });
     globalThis.document = { body: el(), head: el(), title: 'game', getElementById: () => null, createElement: el, querySelector: () => null, hidden: true };
     let old = null, ap = null;
     try {
@@ -499,7 +500,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
 
   await t('Lab runner: picks the highest-value product the groups make, focus 0, at the best-value tier', () => {
     const { lab } = loadBoth();
-    assert.strictEqual(lab.cfg.dryRun, true, 'dry run is the default');
+    assert.strictEqual(lab.cfg.dryRun, false, 'Live is the default');
     const st = labState();    // makes Planks, Iron Sheet, Wooden Frame, Iron Frame (and Wood, which is no product); 200,000 MD, 20 RD, a Catalyst in Heartland
     // 'best' = value per MD: Tier III only with 10x its cost spare above the reserve (1,105,000), Tier II likewise (115,000)
     assert.deepStrictEqual(D(lab, st).msg, startMsg(IRON_FRAME, 0, 1, 0), '200,000 MD is not enough surplus for Tier III');
@@ -732,7 +733,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     const props = { catalog: JSON.parse(JSON.stringify(board.catalog)) };
     const fiber = { memoizedState: { memoizedState: { current: ws }, next: { memoizedState: st, next: null } }, memoizedProps: props, child: null, sibling: null };
     const root = { __reactContainer$x: fiber };
-    const el = () => ({ append() {}, remove() {}, addEventListener() {}, setAttribute() {}, style: {}, classList: { toggle() {} } });
+    const el = () => ({ append() { }, remove() { }, addEventListener() { }, setAttribute() { }, style: {}, classList: { toggle() { } } });
     globalThis.document = { body: el(), head: el(), title: 'game', getElementById: (id) => (id === 'root' ? root : null), createElement: el, querySelector: () => null, hidden: true };
     return { ws, props };
   }
@@ -747,7 +748,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     const arrived = [], everSent = [];     // arrived: what the server had applied when each command arrived (cleared per round); everSent: every command of the test
     class FakeWS {
       constructor() { this.readyState = 1; this.ls = []; }
-      addEventListener(_t, f) { this.ls.push(f); } removeEventListener() {}
+      addEventListener(_t, f) { this.ls.push(f); } removeEventListener() { }
       send(m) {
         const msg = JSON.parse(m);
         arrived.push({ msg, pending: st.pending_results.length, running: Object.keys(st.mfg_research).length });
@@ -764,8 +765,8 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     labFast(lab);
     core.ledger.clear();
     try {
-      // Dry run (the default): says what it would send, once, and sends nothing.
-      assert.strictEqual(lab.cfg.dryRun, true);
+      // Dry run (asked for here): says what it would send, once, and sends nothing.
+      lab.cfg.dryRun = true;
       lab.start();
       await waitFor(() => core.ledger.list().filter((e) => e.mod === 'LAB' && /would send/.test(e.text)).length >= 3, 2000);   // all three steps logged
       await sleep(100);
@@ -829,7 +830,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     const st = labState({ catalyst: { 0: 1 } });
     st.pending_results = [{ tick: 40, product: PLANKS, context: 0, tier: 0 }];
     const sent = [];
-    class FakeWS { constructor() { this.readyState = 1; } addEventListener() {} removeEventListener() {} send(m) { sent.push(JSON.parse(m)); } }   // never applies anything
+    class FakeWS { constructor() { this.readyState = 1; } addEventListener() { } removeEventListener() { } send(m) { sent.push(JSON.parse(m)); } }   // never applies anything
     const { props } = labPage(st, FakeWS);
     (0, eval)(coreSrc + '\n' + labSrc);
     const lab = globalThis.labRunner, core = globalThis.idleCore;
@@ -873,7 +874,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     globalThis.labRunner = { running: true, stop: () => stopped++ };
     assert.deepStrictEqual(core.stopAll('test'), ['Lab']);
     assert.strictEqual(stopped, 1);
-    globalThis.earlyGame = { running: true, stop() {} }; globalThis.cdFarm = { running: true, stop() {} };
+    globalThis.earlyGame = { running: true, stop() { } }; globalThis.cdFarm = { running: true, stop() { } };
     assert.deepStrictEqual(core.stopAll('test'), ['Autopilot', 'CD Farm', 'Lab']);
     globalThis.earlyGame = globalThis.cdFarm = undefined;
     globalThis.labRunner = real;
@@ -910,17 +911,17 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     try {
       let lab = reload();
       lab.importCfg({ cfg: { mode: 'list', tierMode: 3, mdReserve: 777, list: [{ product: PLANKS, focus: 1, tier: 2, junk: 'x' }] } });
-      lab.cfg.dryRun = false;
+      lab.cfg.dryRun = true;   // a dry run now, so the reload shows whether it was saved
       Object.assign(lab.mem.counts, { [PLANKS]: 3 }); lab.mem.next = 4;
       lab.importCfg({ cfg: {} });     // saves again, with the counts as they are now
       lab = reload();
       assert.deepStrictEqual({ mode: lab.cfg.mode, tierMode: lab.cfg.tierMode, mdReserve: lab.cfg.mdReserve, list: lab.cfg.list }, { mode: 'list', tierMode: 3, mdReserve: 777, list: [{ product: PLANKS, focus: 1, tier: 2 }] }, 'settings come back, a list entry keeps its three fields only');
-      assert.strictEqual(lab.cfg.dryRun, true, 'after a reload it is a dry run again');
+      assert.strictEqual(lab.cfg.dryRun, false, 'dryRun was never saved: the reload is Live (the default)');
       assert.deepStrictEqual(lab.mem, { counts: { [PLANKS]: 3 }, next: 4 });
       assert.ok(!disk['labRunner.v1'].includes('dryRun'), 'dryRun is not in the save');
-      disk['labRunner.v1'] = JSON.stringify({ cfg: { mode: 'chaos', mdReserve: -1, dryRun: false, tierMode: 2, list: 'no' }, mem: { counts: { x: 5, 9: 'a', 41: 2 }, next: -3 } });
+      disk['labRunner.v1'] = JSON.stringify({ cfg: { mode: 'chaos', mdReserve: -1, dryRun: true, tierMode: 2, list: 'no' }, mem: { counts: { x: 5, 9: 'a', 41: 2 }, next: -3 } });
       lab = reload();
-      assert.deepStrictEqual({ mode: lab.cfg.mode, tierMode: lab.cfg.tierMode, mdReserve: lab.cfg.mdReserve, list: lab.cfg.list, dryRun: lab.cfg.dryRun }, { mode: 'process', tierMode: 2, mdReserve: 5000, list: [], dryRun: true });
+      assert.deepStrictEqual({ mode: lab.cfg.mode, tierMode: lab.cfg.tierMode, mdReserve: lab.cfg.mdReserve, list: lab.cfg.list, dryRun: lab.cfg.dryRun }, { mode: 'process', tierMode: 2, mdReserve: 5000, list: [], dryRun: false });
       assert.deepStrictEqual(lab.mem, { counts: { 41: 2 }, next: 0 });
       disk['labRunner.v1'] = '{not json';
       assert.strictEqual(reload().cfg.mode, 'process', 'unreadable save: defaults');
@@ -1068,7 +1069,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     let courierBusy = 0;     // ticks the courier stays busy after a send
     class FakeWS {
       constructor() { this.readyState = 1; this.ls = []; }
-      addEventListener(_t, f) { this.ls.push(f); } removeEventListener() {}
+      addEventListener(_t, f) { this.ls.push(f); } removeEventListener() { }
       send(m) {
         const msg = JSON.parse(m); sent.push(msg);
         const tick = (st.ssi.last_user_mutation_tick += 4);
@@ -1136,7 +1137,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     const sent = [];
     class FakeWS {
       constructor() { this.readyState = 1; this.ls = []; }
-      addEventListener(_t, f) { this.ls.push(f); } removeEventListener() {}
+      addEventListener(_t, f) { this.ls.push(f); } removeEventListener() { }
       send(m) {
         const msg = JSON.parse(m); sent.push(msg);
         const tick = (st.ssi.last_user_mutation_tick += 4);
@@ -1209,6 +1210,50 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     }
   });
 
+  await t('link(): Resync sent makes the socket resyncing until a Snapshot; a socket that is not open is closed', async () => {
+    fresh();
+    const st = labState();
+    const listeners = [];
+    class FakeWS { constructor() { this.readyState = 1; } addEventListener(_t, f) { listeners.push(f); } removeEventListener() { } send() { } }
+    labPage(st, FakeWS);
+    (0, eval)(coreSrc);
+    const core = globalThis.idleCore;
+    try {
+      core.walk(true);
+      const ws = core.sock.ws;
+      assert.strictEqual(core.link().state, 'open');
+      ws.send(JSON.stringify({ type: 'Resync' }));
+      assert.strictEqual(core.link().state, 'resyncing');
+      for (const f of listeners) f({ data: JSON.stringify({ kind: 'Snapshot', state: {} }) });
+      assert.strictEqual(core.link().state, 'open');
+      ws.readyState = 3;
+      assert.strictEqual(core.link().state, 'closed');
+    } finally { core._unload(); globalThis.idleCore = undefined; delete globalThis.document; delete globalThis.WebSocket; }
+  });
+
+  await t('Lab runner: unconfirmed commands while the socket resyncs are not counted, so the run goes on', async () => {
+    fresh();
+    const st = labState({ labs: { 0: 1, 1: 1, 2: 1, 3: 1 }, catalyst: { 0: 1 } });
+    st.pending_results = [{ tick: 40, product: PLANKS, context: 0, tier: 0, reward: 'a Planks process' }];   // five actions: one claim, four starts
+    const sent = [];
+    class FakeWS { constructor() { this.readyState = 1; } addEventListener() { } removeEventListener() { } send(m) { sent.push(JSON.parse(m)); } }   // applies nothing
+    labPage(st, FakeWS);
+    (0, eval)(coreSrc + '\n' + labSrc);
+    const lab = globalThis.labRunner, core = globalThis.idleCore;
+    labFast(lab);
+    try {
+      core.walk(true);
+      core.sock.ws.send(JSON.stringify({ type: 'Resync' }));   // open, but out of step until a Snapshot
+      core.ledger.clear();
+      lab.start({ dryRun: false });
+      await until(() => sent.length >= 5, 6000);
+      await sleep(300);
+      assert.strictEqual(sent.length, 5, 'each of the five actions is tried');
+      assert.ok(lab.running, 'five unconfirmed commands during a resync do not stop the run');
+      assert.ok(!core.ledger.list().some((e) => /commands in a row/.test(e.text)), 'nothing counted as a failure');
+    } finally { await halt(lab); lab._unload(); globalThis.labRunner = undefined; core._unload(); globalThis.idleCore = undefined; delete globalThis.document; delete globalThis.WebSocket; }
+  });
+
   await t('Auto ship loop: a moved job never takes a bid below cfg.switchFloorPct of the first bid (unit0), however many times it moved, and unit0 survives a reload', async () => {
     fresh();
     const disk = {};
@@ -1217,7 +1262,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     st.stock = { 0: { [COTTON]: 1200 } };
     st.courier_ready_at = 1e9; st.next_shipment_id = 10; st.standing_fills = {};   // courier busy: nothing is sent, only moves are tested
     const deals = [bid(31, COTTON, 100000, 200)];
-    class FakeWS { constructor() { this.readyState = 1; } addEventListener() {} removeEventListener() {} send() {} }
+    class FakeWS { constructor() { this.readyState = 1; } addEventListener() { } removeEventListener() { } send() { } }
     labPage(st, FakeWS);
     globalThis.document.getElementById('root').__reactContainer$x.memoizedState.next.next = { memoizedState: deals, next: null };
     (0, eval)(coreSrc + '\n' + asSrc);
@@ -1270,14 +1315,14 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     }
   });
 
-  await t('Auto ship loop: a send the server never applies backs off, and five in a row end the job; the game\'s own auto-ship is left alone', async () => {
+  await t('Auto ship loop: a send the server never applies backs off; five in a row back off 10 min and the job stays; the game\'s own auto-ship is left alone', async () => {
     fresh();
     const st = baseState();
     st.stock = { 0: { [COTTON]: 1200 } };
     st.courier_ready_at = 0; st.next_shipment_id = 10; st.standing_fills = {};
     const deals = [bid(7, COTTON, 100000, 150), bid(9, COTTON, 100000, 140)];
     const sent = [];
-    class FakeWS { constructor() { this.readyState = 1; } addEventListener() {} removeEventListener() {} send(m) { sent.push(JSON.parse(m)); } }   // applies nothing
+    class FakeWS { constructor() { this.readyState = 1; } addEventListener() { } removeEventListener() { } send(m) { sent.push(JSON.parse(m)); } }   // applies nothing
     labPage(st, FakeWS);
     globalThis.document.getElementById('root').__reactContainer$x.memoizedState.next.next = { memoizedState: deals, next: null };
     (0, eval)(coreSrc + '\n' + asSrc);
@@ -1291,9 +1336,10 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       assert.strictEqual(sent.length, 0, 'the game\'s auto-ship already runs on bid 9: nothing is sent for it');
       as.stop(9);
       as.start({ deal: 7 });
-      await until(() => !as.jobs().length, 20000);
-      assert.strictEqual(as.jobs().length, 0, 'the job ended');
-      assert.strictEqual(sent.length, 5, 'exactly MAX_FAILS sends, with a back-off between them');
+      await until(() => sent.length >= 5, 20000);
+      await sleep(200);
+      assert.strictEqual(sent.length, 5, 'exactly MAX_FAILS sends, then a 10 min back-off: nothing more is sent');
+      assert.strictEqual(as.jobs().length, 1, 'the job stays and retries after the back-off');
       assert.ok(core.ledger.list().some((e) => e.mod === 'AS' && e.kind === 'fail' && /did not apply 5 sends in a row/.test(e.text)));
     } finally {
       as._unload(); core._unload(); globalThis.idleCore = undefined; globalThis.autoSell = undefined;
@@ -1315,7 +1361,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     const sent = [];
     class FakeWS {
       constructor() { this.readyState = 1; this.ls = []; }
-      addEventListener(_t, f) { this.ls.push(f); } removeEventListener() {}
+      addEventListener(_t, f) { this.ls.push(f); } removeEventListener() { }
       send(m) {
         const msg = JSON.parse(m); sent.push(msg);
         const tick = (st.ssi.last_user_mutation_tick += 4);
@@ -1495,7 +1541,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     } finally { unloadUt(); }
   });
 
-  await t('Auto utilities loop: SetSubscription per confirmed change, lowers after the hold, off means no sends, 3 unconfirmed changes switch it off, state survives a reload', async () => {
+  await t('Auto utilities loop: SetSubscription per confirmed change, lowers after the hold, off means no sends, 3 unconfirmed changes back off 10 min and the switch stays on, state survives a reload', async () => {
     fresh();
     const disk = {};
     globalThis.localStorage = { getItem: (k) => disk[k] ?? null, setItem: (k, v) => { disk[k] = v; } };
@@ -1508,7 +1554,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     let apply = true;
     class FakeWS {
       constructor() { this.readyState = 1; this.ls = []; }
-      addEventListener(_t, f) { this.ls.push(f); } removeEventListener() {}
+      addEventListener(_t, f) { this.ls.push(f); } removeEventListener() { }
       send(m) {
         const msg = JSON.parse(m); sent.push(msg);
         const tick = (st.ssi.last_user_mutation_tick += 4);
@@ -1616,9 +1662,9 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       st.groups = { 1: run(WORKSHOP, 9, chair) }; st.subscriptions = { 0: { power: 1 } };
       const before = sent.length;
       for (let i = 0; i < 4; i++) await ut2._step(T0 + (20 + i) * MIN);
-      assert.strictEqual(sent.length - before, 3, 'three tries, then it stops asking');
-      assert.strictEqual(ut2.conf.power.on, false, 'switched off');
-      assert.ok(core.ledger.list().some((e) => e.kind === 'fail' && /switched off/.test(e.text)));
+      assert.strictEqual(sent.length - before, 3, 'three tries, then a 10 min back-off');
+      assert.strictEqual(ut2.conf.power.on, true, 'the switch stays on: it retries after the back-off');
+      assert.ok(core.ledger.list().some((e) => e.kind === 'fail' && /retries every 10 min/.test(e.text)));
     } finally { unloadUt(); }
   });
 
@@ -1667,7 +1713,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     const { core } = loadBoth();
     assert.ok(core.reserves.names().includes('earlyGame'), 'Autopilot registers itself');
     const calls = [], logErr = console.error;
-    console.error = () => {};   // the throwing provider below is logged, not fatal
+    console.error = () => { };   // the throwing provider below is logged, not fatal
     core.reserves.register('a', { reserve: () => ({ moneyFloor: 100, items: { 1: 5 }, nextTech: null, phase: 3 }), busy: () => false, hold: async (w) => { calls.push('hold-a:' + w); }, release: (w) => calls.push('rel-a:' + w) });
     const offB = core.reserves.register('b', { reserve: () => ({ moneyFloor: 500, items: { 1: 7, 9: Infinity }, nextTech: { cd: 5000, name: 'Retail Store' }, phase: 'x' }), busy: () => true, hold: async (w) => { calls.push('hold-b:' + w); }, release: (w) => calls.push('rel-b:' + w) });
     core.reserves.register('broken', { reserve: () => { throw new Error('boom'); }, busy: () => { throw new Error('boom'); } });

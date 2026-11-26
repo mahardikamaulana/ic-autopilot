@@ -442,7 +442,7 @@ const wsGroups = (st) => Object.values(st.groups).filter((g) => g.building === B
     const st = buyReady();
     const { core, cp, w } = F.boot(st, { modules: ['cp-buildout'], catalog: cat, deals, retail });
     Object.assign(cp.cfg, { land: false, unlocks: false });
-    cp.start();
+    cp.start({ dryRun: true });
     await cp._step();
     assert.strictEqual(w.ws.sent.length, 0);
     assert.match(core.ledger.text(), /dry run, would: build-out: buy Workshop/);
@@ -610,7 +610,7 @@ const wsGroups = (st) => Object.values(st.groups).filter((g) => g.building === B
     st.groups[95] = { building: B('Textile Mill'), region: 0, count: 1, recipe: Rc('Spin Thread'), paused: true, modules: {} };
     d = decideOn(cp, st);
     assert.ok(!bo(d) || !/wave/.test(bo(d).id), bo(d)?.text);
-    const ws = cp._buildout.waveStep(cp._view(st, cat, deals), F.ctxOf({ retailBoard: retail, boMemOk: true, mem: () => ({ get: () => ({ base: 88, wave: 0 }), set() {} }) }), d.rule, 'C');
+    const ws = cp._buildout.waveStep(cp._view(st, cat, deals), F.ctxOf({ retailBoard: retail, boMemOk: true, mem: () => ({ get: () => ({ base: 88, wave: 0 }), set() { } }) }), d.rule, 'C');
     assert.match(ws.wait, /conversion: group 95 \(Spin Thread\) eats Cotton: Farms stay/);
     F.unload();
   });

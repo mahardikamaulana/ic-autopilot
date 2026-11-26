@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         IC Autopilot
 // @namespace    idlecorp-toolkit
-// @version      2.8.19
+// @version      2.8.20
 // @author       XPARAD0X
-// @description  Early-game Autopilot, CD Farm (Construction Data by building and demolishing buildings; Auto picks the cheapest source itself), Lab runner (keeps the Manufacturing Labs researching), Auto ship (an "Auto ship" button on every distributor bid) and Auto utilities (an "Auto" switch that keeps the power and water subscriptions at what the groups need) for IdleCorp, each with a panel, menu or switch in the game UI.
+// @description  Early-game Autopilot, CD Farm (Construction Data by building and demolishing buildings; Auto picks the cheapest source itself), Lab runner (keeps the Manufacturing Labs researching), Auto ship (an "Auto ship" button on every distributor bid), Auto utilities (an "Auto" switch that keeps the power and water subscriptions at what the groups need), Core plan and Keep online (keeps the socket alive while the tab is hidden) for IdleCorp, each with a panel, menu or switch in the game UI. Everything runs live by default.
 // @homepageURL  https://github.com/mahardikamaulana/ic-autopilot
 // @supportURL   https://github.com/mahardikamaulana/ic-autopilot/issues
 // @updateURL    https://raw.githubusercontent.com/mahardikamaulana/ic-autopilot/main/ic-autopilot.user.js
@@ -27,7 +27,7 @@
 //   1. CD Farm   (window.cdFarm)    sidebar tab "CD Farm"
 //   2. Autopilot (window.earlyGame) sidebar tab "Autopilot"
 //   3. Lab       (window.labRunner) sidebar tab "Lab": StartResearch whenever a Manufacturing Lab's
-//                                   slot is free, ClaimResearch for finished results (dry run by default)
+//                                   slot is free, ClaimResearch for finished results (live by default)
 //   4. Auto ship (window.autoSell)  "Auto ship" button left of Sell on every distributor bid in the Market table:
 //                                   a menu like the game's auto-ship menu, selling by FillDeal over the socket
 //                                   (no slot limit), plus an "Auto ship" jobs table on the Market page
@@ -42,352 +42,359 @@
 // hotkey (Alt+Shift+X) and config export / import. Each module below still loads on its own.
 // @@MODULE core
 try {
-(() => {
-  const W = typeof window !== 'undefined' ? window : globalThis;
-  const HAS_DOM = typeof document !== 'undefined' && !!document.body;
-  if (W.idleCore?._unload) W.idleCore._unload();
-  const store = (() => { try { return W.localStorage ?? null; } catch { return null; } })();
-  // Chrome may run timers in a tab hidden 5+ minutes only once a minute, but socket messages (2 ticks/s) still
-  // arrive, so every message also fires the timers that are due. after() is setTimeout with that rescue.
-  const due = new Set();
-  function after(ms, fn) {
-    const d = { at: Date.now() + ms, fn: () => { clearTimeout(t); due.delete(d); fn(); } };
-    const t = setTimeout(d.fn, ms);
-    due.add(d);
-    return () => { clearTimeout(t); due.delete(d); };
-  }
-  function runDue() { const now = Date.now(); for (const d of due) if (now >= d.at) { try { d.fn(); } catch (e) { console.error('[idleCore]', e); } } }
-  const sleep = (ms) => new Promise((r) => after(ms, r));
-  // setInterval with the same rescue; returns a stop function.
-  function every(ms, fn) { let stop = null; const run = () => { stop = after(ms, run); fn(); }; stop = after(ms, run); return () => stop(); }
-  let unloaded = false;
-
-  // ---- game state: one walk of the React fiber tree --------------------------
-  // Fibers are double-buffered and the state object is replaced on every update, so nothing
-  // from the tree is kept: the result is only reused for WALK_TTL ms. Anything that sends a
-  // command, or waits for the server to apply one, passes fresh = true.
-  const WALK_TTL = 120;
-  let walkOut = null, walkAt = 0;
-  function walk(fresh = false) {
-    const now = Date.now();
-    if (!fresh && walkOut && now - walkAt < WALK_TTL) return walkOut;
-    const out = { ws: null, st: null, catalog: null, deals: null, orders: null, engine: null, contracts: null, boardFilters: null, board: null };
-    if (!HAS_DOM) return out;
-    const root = document.getElementById('root');
-    const key = root && Object.keys(root).find((k) => k.startsWith('__reactContainer'));
-    if (!key) return out;
-    const seen = new Set(), stack = [root[key]];
-    while (stack.length) {
-      const f = stack.pop();
-      if (!f || seen.has(f)) continue;
-      seen.add(f);
-      let h = f.memoizedState, n = 0, hasWs = false, map = null;
-      while (h && n < 50) {
-        const v = h.memoizedState;
-        if (v && v.current instanceof WebSocket) { out.ws = v.current; hasWs = true; }
-        if (v && v.current instanceof Map) map = v.current;
-        if (v && typeof v === 'object' && v.groups && v.stock && v.ssi) out.st = v;
-        if (Array.isArray(v) && v[0] && v[0].side) {
-          if (v[0].price !== undefined && v[0].poster === undefined) out.deals = v;
-          else if (v[0].unit_price !== undefined && v[0].poster !== undefined) out.orders = v;
-        }
-        h = h.next; n++;
-      }
-      if (hasWs && map) out.boardFilters = map;   // the game's board filters (re-sent on every reconnect), a ref next to the socket's
-      const p = f.memoizedProps;
-      if (p && p.value?.setBoardFilter && p.value.deliveries && !out.board) out.board = p.value;   // { truncated, deliveries } per board
-      if (p && p.catalog?.techs && !out.catalog) out.catalog = p.catalog;
-      if (p && p.engine && typeof p.engine.evaluateLayout === 'function' && !out.engine) out.engine = p.engine;
-      if (p && Array.isArray(p.contracts) && !out.contracts) out.contracts = p.contracts;
-      if (f.child) stack.push(f.child);
-      if (f.sibling) stack.push(f.sibling);
+  (() => {
+    const W = typeof window !== 'undefined' ? window : globalThis;
+    const HAS_DOM = typeof document !== 'undefined' && !!document.body;
+    if (W.idleCore?._unload) W.idleCore._unload();
+    const store = (() => { try { return W.localStorage ?? null; } catch { return null; } })();
+    // Chrome may run timers in a tab hidden 5+ minutes only once a minute, but socket messages (2 ticks/s) still
+    // arrive, so every message also fires the timers that are due. after() is setTimeout with that rescue.
+    const due = new Set();
+    function after(ms, fn) {
+      const d = { at: Date.now() + ms, fn: () => { clearTimeout(t); due.delete(d); fn(); } };
+      const t = setTimeout(d.fn, ms);
+      due.add(d);
+      return () => { clearTimeout(t); due.delete(d); };
     }
-    walkOut = out; walkAt = now;
-    if (out.ws?.readyState === 1) attach(out.ws, out);
-    return out;
-  }
+    function runDue() { const now = Date.now(); for (const d of due) if (now >= d.at) { try { d.fn(); } catch (e) { console.error('[idleCore]', e); } } }
+    const sleep = (ms) => new Promise((r) => after(ms, r));
+    // setInterval with the same rescue; returns a stop function.
+    function every(ms, fn) { let stop = null; const run = () => { stop = after(ms, run); fn(); }; stop = after(ms, run); return () => stop(); }
+    let unloaded = false;
 
-  // ---- socket listener ----------------------------------------------------------
-  // muts counts Diffs that carry a newer ssi.last_user_mutation_tick, i.e. the server applying
-  // one of the player's commands (not production updates).
-  // sendAt / ackAt: performance.now() at ws.send and when the first player-mutation Diff after it arrived
-  // (sub-millisecond, unlike the confirm poll): their difference is the command's round trip.
-  const sock = { ws: null, textMsgs: 0, diffs: 0, muts: 0, mutTick: 0, tick: 0, tickAt: 0, sendAt: 0, ackAt: 0 };
-  const hrNow = () => globalThis.performance?.now?.() ?? Date.now();
-  const wakers = new Set();
-  function seeTick(t) { if (typeof t === 'number' && t > sock.tick) { sock.tick = t; sock.tickAt = Date.now(); } }
-  function onMessage(e) {
-    runDue();
-    if (typeof e.data !== 'string') return;
-    sock.textMsgs++;
-    try {
-      const m = JSON.parse(e.data);
-      seeTick(m.tick ?? m.diff?.tick);
-      if (m.kind === 'Diff') sock.diffs++;
-      if (m.kind === 'WorldEvents') sock.worldEvents = { raw: e.data, at: Date.now() };   // plan D5: kept for a readout only, nothing acts on it
-      const u = m.diff?.ssi?.last_user_mutation_tick;
-      if (typeof u === 'number' && u > sock.mutTick) { sock.mutTick = u; sock.muts++; if (sock.sendAt && !sock.ackAt) sock.ackAt = hrNow(); for (const w of [...wakers]) w(); }
-      if (m.kind === 'Orders') Object.assign(sock.book, { at: Date.now(), pending: Math.max(0, sock.book.pending - 1), truncated: !!m.truncated });
-    } catch {}
-  }
-  // ---- player order book ---------------------------------------------------------------
-  // The server sends other players' orders only while this socket has an "Orders" board filter: the game
-  // sets one while its Goods tab is open and null when it closes (the reply then holds only your own orders).
-  // sock.book: the last Orders filter sent on this socket (by the game or by us, seen through a send hook),
-  // whether we sent it, and when the reply came. Replies don't say which filter they answer, but each filter gets
-  // exactly one (seen live), so pending counts filters not answered yet. The game re-sends its filters in onopen,
-  // before we attach, so a new socket starts from the game's own store: its filter, answered if it counted a reply.
-  const newBook = (g) => {
-    const f = g?.boardFilters?.get('Orders') ?? null;
-    return { filter: f, filterAt: 1, ours: false, pending: 0, at: f && g.board?.deliveries?.Orders > 0 ? 1 : 0, truncated: !!g?.board?.truncated?.Orders };
-  };
-  sock.book = newBook();
-  let baseSend = null, sendingOurs = false;
-  function hookSend(d) {
-    if (typeof d === 'string' && d.includes('"SetBoardFilter"')) {
-      try { const m = JSON.parse(d); if (m.board === 'Orders') Object.assign(sock.book, { filter: m.filter ?? null, filterAt: Date.now(), ours: sendingOurs, pending: sock.book.pending + 1 }); } catch {}
-    }
-    return baseSend.call(this, d);
-  }
-  function attach(ws, g) {
-    if (ws === sock.ws) return;
-    sock.ws?.removeEventListener('message', onMessage);
-    if (sock.ws?.send === hookSend) sock.ws.send = baseSend;
-    sock.ws = ws; sock.book = newBook(g);
-    ws?.addEventListener('message', onMessage);
-    if (ws && typeof ws.send === 'function') { baseSend = ws.send; ws.send = hookSend; }
-  }
-  const BOOK_IDLE_MS = 60000;   // well above Autopilot's longest idle sleep (maxIdleMs), so it can't drop between cycles
-  const BOOK_SETTLE_MS = 200;
-  let bookTimer = 0;
-  const onGoodsTab = () => /^\/market\/goods/.test(W.location?.pathname ?? '');
-  const orderBook = {
-    // Loaded: the current filter shows every item in `region` (a Goods tab narrowed to some items or on another
-    // region does not count) and its untruncated reply came at least BOOK_SETTLE_MS ago (the game puts it into its
-    // React state on the next render). It may hold only your own orders, or none. A reply missing for 30 s no longer blocks.
-    live(region) {
-      const b = sock.book, f = b.filter;
-      return !!f && b.at >= b.filterAt && Date.now() - b.at >= BOOK_SETTLE_MS && (!b.pending || Date.now() - b.filterAt > 30000) && !b.truncated && !f.items?.length && !f.sides?.length && !f.nums?.length && !f.quirks?.length
-        && (!f.regions?.length || f.regions.includes(region));
-    },
-    // Autopilot wants prices: subscribe like the Goods tab with no filters, unless any filter is set (the game's
-    // stays untouched) or the Goods tab is open (it owns the board, also right after a reconnect).
-    need(region) {
-      const ws = sock.ws;
-      if (!ws || ws.readyState !== 1 || unloaded) return;
-      if (!sock.book.filter && !onGoodsTab()) {
-        sendingOurs = true;
-        try { ws.send(JSON.stringify({ type: 'SetBoardFilter', board: 'Orders', filter: { items: [], sides: [], regions: [region], utilities: [], quirks: [], nums: [] } })); }
-        finally { sendingOurs = false; }
-      }
-      clearTimeout(bookTimer); bookTimer = setTimeout(orderBook.release, BOOK_IDLE_MS);
-    },
-    // Drop our filter once nothing needs it (only ours, and only while it is still the current one).
-    release() {
-      clearTimeout(bookTimer);
-      const ws = sock.ws;
-      if (sock.book.ours && sock.book.filter && ws?.readyState === 1 && !onGoodsTab()) ws.send(JSON.stringify({ type: 'SetBoardFilter', board: 'Orders', filter: null }));
-    },
-  };
-  // Server tick now: last tick seen plus elapsed time (2 ticks/s), so checks work between messages.
-  const nowTick = () => (sock.tick ? sock.tick + Math.floor((Date.now() - sock.tickAt) / 500) : 0);
-  // Call right before ws.send: only a later mutation confirms this command. Returns the Diff count to wait past.
-  function markSend(stMutTick) { sock.mutTick = Math.max(sock.mutTick, stMutTick || 0); sock.sendAt = hrNow(); sock.ackAt = 0; return sock.muts; }
-  // Round trip of the last marked command in ms (float), or null while its acknowledgement has not been seen.
-  const lastRtt = () => (sock.sendAt && sock.ackAt >= sock.sendAt ? sock.ackAt - sock.sendAt : null);
-  // Sleep that ends early when the server applies a player command (yours, or one you click yourself).
-  function sleepWake(ms) {
-    return new Promise((res) => {
-      const done = () => { cancel(); wakers.delete(done); res(); };
-      const cancel = after(ms, done);
-      wakers.add(done);
-    });
-  }
-
-  // Waits until the server has applied a player command after this one was sent AND pred(state)
-  // holds. The client applies commands locally first, and production Diffs arrive on their own, so
-  // neither alone is proof. If the socket has never delivered a text frame the acknowledgement
-  // can't be seen at all (e.g. the game moved to binary frames): then the state must hold steadily
-  // for STEADY_MS instead of passing on the first look, and the first time is logged.
-  const tune = { steadyMs: 1500, pollMs: 100 };   // tests shorten both: the steady hold and the poll step
-  let warnedBlind = false;
-  async function waitConfirm({ read, pred, d0, timeoutMs, closed }) {
-    const t0 = Date.now();
-    let okSince = 0;
-    while (Date.now() - t0 < timeoutMs) {
-      const r = read(true);
-      if (!r || !r.wsOpen) closed();
-      if (r && pred(r)) {
-        if (sock.textMsgs > 0) { if (sock.muts > d0) return r; }
-        else {
-          okSince ||= Date.now();
-          if (Date.now() - okSince >= tune.steadyMs) {
-            if (!warnedBlind) { warnedBlind = true; console.warn('[idleCore] no text frames seen on the game socket: confirming from state alone (held for ' + tune.steadyMs + ' ms)'); }
-            return r;
+    // ---- game state: one walk of the React fiber tree --------------------------
+    // Fibers are double-buffered and the state object is replaced on every update, so nothing
+    // from the tree is kept: the result is only reused for WALK_TTL ms. Anything that sends a
+    // command, or waits for the server to apply one, passes fresh = true.
+    const WALK_TTL = 120;
+    let walkOut = null, walkAt = 0;
+    function walk(fresh = false) {
+      const now = Date.now();
+      if (!fresh && walkOut && now - walkAt < WALK_TTL) return walkOut;
+      const out = { ws: null, st: null, catalog: null, deals: null, orders: null, engine: null, contracts: null, boardFilters: null, board: null };
+      if (!HAS_DOM) return out;
+      const root = document.getElementById('root');
+      const key = root && Object.keys(root).find((k) => k.startsWith('__reactContainer'));
+      if (!key) return out;
+      const seen = new Set(), stack = [root[key]];
+      while (stack.length) {
+        const f = stack.pop();
+        if (!f || seen.has(f)) continue;
+        seen.add(f);
+        let h = f.memoizedState, n = 0, hasWs = false, map = null;
+        while (h && n < 50) {
+          const v = h.memoizedState;
+          if (v && v.current instanceof WebSocket) { out.ws = v.current; hasWs = true; }
+          if (v && v.current instanceof Map) map = v.current;
+          if (v && typeof v === 'object' && v.groups && v.stock && v.ssi) out.st = v;
+          if (Array.isArray(v) && v[0] && v[0].side) {
+            if (v[0].price !== undefined && v[0].poster === undefined) out.deals = v;
+            else if (v[0].unit_price !== undefined && v[0].poster !== undefined) out.orders = v;
           }
+          h = h.next; n++;
         }
-      } else okSince = 0;
-      await sleep(tune.pollMs);
+        if (hasWs && map) out.boardFilters = map;   // the game's board filters (re-sent on every reconnect), a ref next to the socket's
+        const p = f.memoizedProps;
+        if (p && p.value?.setBoardFilter && p.value.deliveries && !out.board) out.board = p.value;   // { truncated, deliveries } per board
+        if (p && p.catalog?.techs && !out.catalog) out.catalog = p.catalog;
+        if (p && p.engine && typeof p.engine.evaluateLayout === 'function' && !out.engine) out.engine = p.engine;
+        if (p && Array.isArray(p.contracts) && !out.contracts) out.contracts = p.contracts;
+        if (f.child) stack.push(f.child);
+        if (f.sibling) stack.push(f.sibling);
+      }
+      walkOut = out; walkAt = now;
+      if (out.ws?.readyState === 1) attach(out.ws, out);
+      return out;
     }
-    return null;
-  }
 
-  // ---- DOM helpers ----------------------------------------------------------------
-  const h = (tag, props = {}, ...kids) => {
-    const el = document.createElement(tag);
-    for (const [k, v] of Object.entries(props)) {
-      if (k === 'class') el.className = v;
-      else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
-      else if (k in el) el[k] = v;
-      else el.setAttribute(k, v);
+    // ---- socket listener ----------------------------------------------------------
+    // muts counts Diffs that carry a newer ssi.last_user_mutation_tick, i.e. the server applying
+    // one of the player's commands (not production updates).
+    // sendAt / ackAt: performance.now() at ws.send and when the first player-mutation Diff after it arrived
+    // (sub-millisecond, unlike the confirm poll): their difference is the command's round trip.
+    const sock = { ws: null, textMsgs: 0, diffs: 0, muts: 0, mutTick: 0, tick: 0, tickAt: 0, sendAt: 0, ackAt: 0, resyncing: false };
+    const hrNow = () => globalThis.performance?.now?.() ?? Date.now();
+    const wakers = new Set();
+    function seeTick(t) { if (typeof t === 'number' && t > sock.tick) { sock.tick = t; sock.tickAt = Date.now(); } }
+    function onMessage(e) {
+      runDue();
+      if (typeof e.data !== 'string') return;
+      sock.textMsgs++;
+      try {
+        const m = JSON.parse(e.data);
+        seeTick(m.tick ?? m.diff?.tick);
+        if (m.kind === 'Diff') sock.diffs++;
+        if (m.kind === 'Snapshot') sock.resyncing = false;
+        if (m.kind === 'WorldEvents') sock.worldEvents = { raw: e.data, at: Date.now() };   // plan D5: kept for a readout only, nothing acts on it
+        const u = m.diff?.ssi?.last_user_mutation_tick;
+        if (typeof u === 'number' && u > sock.mutTick) { sock.mutTick = u; sock.muts++; if (sock.sendAt && !sock.ackAt) sock.ackAt = hrNow(); for (const w of [...wakers]) w(); }
+        if (m.kind === 'Orders') Object.assign(sock.book, { at: Date.now(), pending: Math.max(0, sock.book.pending - 1), truncated: !!m.truncated });
+      } catch { }
     }
-    el.append(...kids);
-    return el;
-  };
-  function makeDraggable(handle, getPanel, ui, place, saveUi) {
-    handle.addEventListener('pointerdown', (e) => {
-      if (e.target.closest('button') || getPanel().classList.contains('idc-docked')) return;   // a docked panel stays put
-      const r = getPanel().getBoundingClientRect();
-      const dx = e.clientX - r.left, dy = e.clientY - r.top;
-      handle.setPointerCapture(e.pointerId);
-      const move = (ev) => { ui.x = ev.clientX - dx; ui.y = ev.clientY - dy; place(); };
-      const up = () => { handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', up); saveUi(); };
-      handle.addEventListener('pointermove', move);
-      handle.addEventListener('pointerup', up);
-    });
-  }
-  // Toasts: up to 3 stacked, pause while hovered, optional action (Undo). opts: 'info' | 'success' | 'error' or { kind, undo }.
-  let toastBox = null;
-  const toasts = [];
-  function toast(text, opts) {
-    const o = typeof opts === 'string' ? { kind: opts } : opts || {};
-    console.log('[idleCore] ' + text);
-    if (!HAS_DOM || unloaded) return;
-    ensureStyle();
-    if (!toastBox || !toastBox.isConnected) { toastBox = h('div', { class: 'idc-toasts', role: 'status', 'aria-live': 'polite' }); document.body.append(toastBox); toasts.length = 0; }
-    const t = { el: null, timer: 0 };
-    const dismiss = () => { clearTimeout(t.timer); t.el.remove(); const i = toasts.indexOf(t); if (i >= 0) toasts.splice(i, 1); };
-    const arm = (ms) => { clearTimeout(t.timer); t.timer = setTimeout(dismiss, ms); };
-    const act = o.undo ? [h('button', { type: 'button', onclick: () => { dismiss(); o.undo(); } }, 'Undo')] : [];
-    t.el = h('div', { class: 'idc-toast k-' + (o.kind || 'info') }, h('span', {}, text), ...act);
-    for (const [on, off] of [['mouseenter', 'mouseleave'], ['focusin', 'focusout']]) {   // hovered or keyboard-focused: stay
-      t.el.addEventListener(on, () => clearTimeout(t.timer));
-      t.el.addEventListener(off, () => arm(1500));
+    // ---- player order book ---------------------------------------------------------------
+    // The server sends other players' orders only while this socket has an "Orders" board filter: the game
+    // sets one while its Goods tab is open and null when it closes (the reply then holds only your own orders).
+    // sock.book: the last Orders filter sent on this socket (by the game or by us, seen through a send hook),
+    // whether we sent it, and when the reply came. Replies don't say which filter they answer, but each filter gets
+    // exactly one (seen live), so pending counts filters not answered yet. The game re-sends its filters in onopen,
+    // before we attach, so a new socket starts from the game's own store: its filter, answered if it counted a reply.
+    const newBook = (g) => {
+      const f = g?.boardFilters?.get('Orders') ?? null;
+      return { filter: f, filterAt: 1, ours: false, pending: 0, at: f && g.board?.deliveries?.Orders > 0 ? 1 : 0, truncated: !!g?.board?.truncated?.Orders };
+    };
+    sock.book = newBook();
+    let baseSend = null, sendingOurs = false;
+    function hookSend(d) {
+      if (typeof d === 'string' && d.includes('"Resync"')) sock.resyncing = true;
+      if (typeof d === 'string' && d.includes('"SetBoardFilter"')) {
+        try { const m = JSON.parse(d); if (m.board === 'Orders') Object.assign(sock.book, { filter: m.filter ?? null, filterAt: Date.now(), ours: sendingOurs, pending: sock.book.pending + 1 }); } catch { }
+      }
+      return baseSend.call(this, d);
     }
-    toastBox.append(t.el);
-    toasts.push(t);
-    while (toasts.length > 3) { const old = toasts[0]; clearTimeout(old.timer); old.el.remove(); toasts.shift(); }
-    arm(o.undo ? 7000 : 3500);
-  }
-
-  // ---- ledger: what the modules did, kept across reloads ------------------------------
-  const LEDGER_KEY = 'idleCore.ledger.v1', LEDGER_MAX = 300;
-  let ledger = [];
-  try { const l = JSON.parse(store?.getItem(LEDGER_KEY) || '[]'); if (Array.isArray(l)) ledger = l.slice(-LEDGER_MAX); } catch {}
-  let ledgerTimer = 0, ledgerRev = 0;
-  const flushLedger = () => { ledgerTimer = 0; try { store?.setItem(LEDGER_KEY, JSON.stringify(ledger)); } catch {} };
-  const ledgerApi = {
-    // mod: 'AP' | 'CD' | 'LAB'; kind: 'action' | 'fail' | 'info' | 'alert'; extra: { money (cents or $ — whatever the module logs), ok }
-    add(mod, kind, text, extra = {}) {
-      ledgerRev++;
-      ledger.push({ t: Date.now(), mod, kind, text: String(text).slice(0, 240), ...extra });
-      if (ledger.length > LEDGER_MAX) ledger.splice(0, ledger.length - LEDGER_MAX);
-      if (!ledgerTimer) ledgerTimer = setTimeout(flushLedger, 2000);
-    },
-    list: () => ledger.slice(),
-    clear() { ledgerRev++; ledger = []; flushLedger(); },
-    // Puts lines taken out by clear() back in front of whatever was logged since (the Undo for Clear log).
-    restore(list) { ledgerRev++; ledger = list.concat(ledger).slice(-LEDGER_MAX); flushLedger(); },
-    rev: () => ledgerRev,
-    text: () => ledger.map((e) => new Date(e.t).toISOString() + ' ' + e.mod + ' ' + e.kind + ' ' + e.text + (e.dMoney != null ? ' (' + (e.dMoney >= 0 ? '+$' : '-$') + Math.abs(e.dMoney).toLocaleString('en-US') + ')' : '')).join('\n'),
-    async copy() {
-      const t = ledgerApi.text();
-      try { await navigator.clipboard.writeText(t); toast('Copied ' + ledger.length + ' log lines', 'success'); return true; }
-      catch { console.log(t); toast('Clipboard blocked: the log is in the console', 'error'); return false; }
-    },
-  };
-
-  // ---- alerts: tab title badge + desktop notification when the tab is hidden ----------------
-  const badges = new Map();
-  const TITLE_RE = /^⚠ [^·]*· /;
-  function applyTitle() {
-    if (!HAS_DOM || unloaded) return;
-    const base = document.title.replace(TITLE_RE, '');
-    const want = badges.size ? '⚠ ' + [...badges.values()].join(', ') + ' · ' + base : base;
-    if (document.title !== want) document.title = want;
-  }
-  function setBadge(mod, text) { if (text) badges.set(mod, text); else badges.delete(mod); applyTitle(); }
-  const notifyPerm = () => (typeof Notification === 'undefined' ? 'unsupported' : Notification.permission);
-  async function askNotify() {
-    if (typeof Notification === 'undefined') return 'unsupported';
-    try { return await Notification.requestPermission(); } catch { return 'denied'; }
-  }
-  function notify(mod, title, body = '') {
-    ledgerApi.add(mod, 'alert', title + (body ? ': ' + body : ''));
-    if (HAS_DOM && notifyPerm() === 'granted' && document.hidden) {
-      try { new Notification(title, { body, tag: 'idlecorp-' + mod }); } catch {}
+    function attach(ws, g) {
+      if (ws === sock.ws) return;
+      sock.ws?.removeEventListener('message', onMessage);
+      if (sock.ws?.send === hookSend) sock.ws.send = baseSend;
+      sock.ws = ws; sock.book = newBook(g);
+      sock.resyncing = false;
+      ws?.addEventListener('message', onMessage);
+      if (ws && typeof ws.send === 'function') { baseSend = ws.send; ws.send = hookSend; }
     }
-  }
-
-  // ---- stop everything (Alt+Shift+X) ------------------------------------------------------
-  function stopAll(why = 'stop-all') {
-    const live = [];
-    try { if (W.earlyGame?.running) { W.earlyGame.stop(); live.push('Autopilot'); } } catch (e) { console.error(e); }
-    try { if (W.cdFarm?.running) { W.cdFarm.stop(); live.push('CD Farm'); } else if (W.cdFarm?.pauseAuto?.()) live.push('CD Farm Auto'); } catch (e) { console.error(e); }
-    try { if (W.corePlan?.running) { W.corePlan.stop(); live.push('Core plan'); } } catch (e) { console.error(e); }
-    try { if (W.labRunner?.running) { W.labRunner.stop(); live.push('Lab'); } } catch (e) { console.error(e); }
-    try { if (W.autoSell?.running) { W.autoSell.stop(); live.push('Auto ship'); } } catch (e) { console.error(e); }
-    try { if (W.autoUtil?.running) { W.autoUtil.stop(); live.push('Auto utilities'); } } catch (e) { console.error(e); }
-    ledgerApi.add('--', 'info', 'stop all (' + why + '): ' + (live.join(' + ') || 'nothing was running'));
-    toast(live.length ? 'Stopped ' + live.join(' + ') + ' (' + why + ')' : 'Nothing was running');
-    return live;
-  }
-  const onKey = (e) => { if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && e.code === 'KeyX') { e.preventDefault(); stopAll('Alt+Shift+X'); } };
-  if (HAS_DOM) addEventListener('keydown', onKey, true);
-
-  // ---- config export / import ---------------------------------------------------------------
-  // Each module offers exportCfg() / importCfg(obj); Infinity travels as the string "Infinity".
-  const rep = (_k, v) => (v === Infinity ? 'Infinity' : v);
-  const rev = (_k, v) => (v === 'Infinity' ? Infinity : v);
-  const MODS = ['earlyGame', 'cdFarm', 'labRunner', 'autoUtil', 'corePlan'];
-  function exportConfig() {
-    const out = { app: 'idlecorp-toolkit', format: 1, exportedAt: new Date().toISOString() };
-    for (const m of MODS) out[m] = W[m]?.exportCfg?.() ?? null;
-    return JSON.stringify(out, rep, 2);
-  }
-  function importConfig(text) {
-    let o;
-    try { o = JSON.parse(text, rev); } catch { throw new Error('not valid JSON'); }
-    if (!o || o.app !== 'idlecorp-toolkit' || o.format !== 1) throw new Error('not an IdleCorp Toolkit export');
-    const report = [];
-    for (const m of MODS) {
-      if (!o[m]) continue;
-      if (!W[m]?.importCfg) { report.push(m + ': module not loaded, skipped'); continue; }
-      const r = W[m].importCfg(o[m]);
-      report.push(m + ': ' + r.applied.length + ' applied' + (r.skipped.length ? ', skipped ' + r.skipped.join(', ') : ''));
+    const BOOK_IDLE_MS = 60000;   // well above Autopilot's longest idle sleep (maxIdleMs), so it can't drop between cycles
+    const BOOK_SETTLE_MS = 200;
+    let bookTimer = 0;
+    const onGoodsTab = () => /^\/market\/goods/.test(W.location?.pathname ?? '');
+    const orderBook = {
+      // Loaded: the current filter shows every item in `region` (a Goods tab narrowed to some items or on another
+      // region does not count) and its untruncated reply came at least BOOK_SETTLE_MS ago (the game puts it into its
+      // React state on the next render). It may hold only your own orders, or none. A reply missing for 30 s no longer blocks.
+      live(region) {
+        const b = sock.book, f = b.filter;
+        return !!f && b.at >= b.filterAt && Date.now() - b.at >= BOOK_SETTLE_MS && (!b.pending || Date.now() - b.filterAt > 30000) && !b.truncated && !f.items?.length && !f.sides?.length && !f.nums?.length && !f.quirks?.length
+          && (!f.regions?.length || f.regions.includes(region));
+      },
+      // Autopilot wants prices: subscribe like the Goods tab with no filters, unless any filter is set (the game's
+      // stays untouched) or the Goods tab is open (it owns the board, also right after a reconnect).
+      need(region) {
+        const ws = sock.ws;
+        if (!ws || ws.readyState !== 1 || unloaded) return;
+        if (!sock.book.filter && !onGoodsTab()) {
+          sendingOurs = true;
+          try { ws.send(JSON.stringify({ type: 'SetBoardFilter', board: 'Orders', filter: { items: [], sides: [], regions: [region], utilities: [], quirks: [], nums: [] } })); }
+          finally { sendingOurs = false; }
+        }
+        clearTimeout(bookTimer); bookTimer = setTimeout(orderBook.release, BOOK_IDLE_MS);
+      },
+      // Drop our filter once nothing needs it (only ours, and only while it is still the current one).
+      release() {
+        clearTimeout(bookTimer);
+        const ws = sock.ws;
+        if (sock.book.ours && sock.book.filter && ws?.readyState === 1 && !onGoodsTab()) ws.send(JSON.stringify({ type: 'SetBoardFilter', board: 'Orders', filter: null }));
+      },
+    };
+    // Server tick now: last tick seen plus elapsed time (2 ticks/s), so checks work between messages.
+    const nowTick = () => (sock.tick ? sock.tick + Math.floor((Date.now() - sock.tickAt) / 500) : 0);
+    // Call right before ws.send: only a later mutation confirms this command. Returns the Diff count to wait past.
+    function markSend(stMutTick) { sock.mutTick = Math.max(sock.mutTick, stMutTick || 0); sock.sendAt = hrNow(); sock.ackAt = 0; return sock.muts; }
+    // Round trip of the last marked command in ms (float), or null while its acknowledgement has not been seen.
+    const lastRtt = () => (sock.sendAt && sock.ackAt >= sock.sendAt ? sock.ackAt - sock.sendAt : null);
+    // What the tab really reports, even while keep-online spoofs document.hidden.
+    const realHidden = () => { try { return Object.getOwnPropertyDescriptor(Document.prototype, 'hidden').get.call(document); } catch { return !!document.hidden; } };
+    // The game socket as the modules see it: 'closed', 'resyncing' (a Resync was sent and no Snapshot came back yet) or 'open'.
+    const link = () => ({ state: !sock.ws || sock.ws.readyState !== 1 ? 'closed' : sock.resyncing ? 'resyncing' : 'open' });
+    // Sleep that ends early when the server applies a player command (yours, or one you click yourself).
+    function sleepWake(ms) {
+      return new Promise((res) => {
+        const done = () => { cancel(); wakers.delete(done); res(); };
+        const cancel = after(ms, done);
+        wakers.add(done);
+      });
     }
-    return report.join(' · ');
-  }
-  function download(name, text) {
-    const a = h('a', { href: URL.createObjectURL(new Blob([text], { type: 'application/json' })), download: name });
-    document.body.append(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-  }
-  function exportFile() { download('idlecorp-toolkit-' + new Date().toISOString().slice(0, 10) + '.json', exportConfig()); toast('Exported settings', 'success'); }
-  function importFile() {
-    const input = h('input', { type: 'file', accept: 'application/json,.json', hidden: true });
-    input.addEventListener('change', async () => {
-      try { toast('Imported — ' + importConfig(await input.files[0].text()), 'success'); }
-      catch (e) { toast('Import failed: ' + e.message, 'error'); }
-      input.remove();
-    });
-    document.body.append(input); input.click();
-  }
 
-  // Required-field check for the game's state objects: [] when everything is there.
-  function missingFields(obj, paths) {
-    return paths.filter((p) => { let v = obj; for (const k of p.split('.')) { v = v?.[k]; if (v === undefined || v === null) return true; } return false; });
-  }
+    // Waits until the server has applied a player command after this one was sent AND pred(state)
+    // holds. The client applies commands locally first, and production Diffs arrive on their own, so
+    // neither alone is proof. If the socket has never delivered a text frame the acknowledgement
+    // can't be seen at all (e.g. the game moved to binary frames): then the state must hold steadily
+    // for STEADY_MS instead of passing on the first look, and the first time is logged.
+    const tune = { steadyMs: 1500, pollMs: 100 };   // tests shorten both: the steady hold and the poll step
+    let warnedBlind = false;
+    async function waitConfirm({ read, pred, d0, timeoutMs, closed }) {
+      const t0 = Date.now();
+      let okSince = 0;
+      while (Date.now() - t0 < timeoutMs) {
+        const r = read(true);
+        if (!r || !r.wsOpen) closed();
+        if (r && pred(r)) {
+          if (sock.textMsgs > 0) { if (sock.muts > d0) return r; }
+          else {
+            okSince ||= Date.now();
+            if (Date.now() - okSince >= tune.steadyMs) {
+              if (!warnedBlind) { warnedBlind = true; console.warn('[idleCore] no text frames seen on the game socket: confirming from state alone (held for ' + tune.steadyMs + ' ms)'); }
+              return r;
+            }
+          }
+        } else okSince = 0;
+        await sleep(tune.pollMs);
+      }
+      return null;
+    }
+
+    // ---- DOM helpers ----------------------------------------------------------------
+    const h = (tag, props = {}, ...kids) => {
+      const el = document.createElement(tag);
+      for (const [k, v] of Object.entries(props)) {
+        if (k === 'class') el.className = v;
+        else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+        else if (k in el) el[k] = v;
+        else el.setAttribute(k, v);
+      }
+      el.append(...kids);
+      return el;
+    };
+    function makeDraggable(handle, getPanel, ui, place, saveUi) {
+      handle.addEventListener('pointerdown', (e) => {
+        if (e.target.closest('button') || getPanel().classList.contains('idc-docked')) return;   // a docked panel stays put
+        const r = getPanel().getBoundingClientRect();
+        const dx = e.clientX - r.left, dy = e.clientY - r.top;
+        handle.setPointerCapture(e.pointerId);
+        const move = (ev) => { ui.x = ev.clientX - dx; ui.y = ev.clientY - dy; place(); };
+        const up = () => { handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', up); saveUi(); };
+        handle.addEventListener('pointermove', move);
+        handle.addEventListener('pointerup', up);
+      });
+    }
+    // Toasts: up to 3 stacked, pause while hovered, optional action (Undo). opts: 'info' | 'success' | 'error' or { kind, undo }.
+    let toastBox = null;
+    const toasts = [];
+    function toast(text, opts) {
+      const o = typeof opts === 'string' ? { kind: opts } : opts || {};
+      console.log('[idleCore] ' + text);
+      if (!HAS_DOM || unloaded) return;
+      ensureStyle();
+      if (!toastBox || !toastBox.isConnected) { toastBox = h('div', { class: 'idc-toasts', role: 'status', 'aria-live': 'polite' }); document.body.append(toastBox); toasts.length = 0; }
+      const t = { el: null, timer: 0 };
+      const dismiss = () => { clearTimeout(t.timer); t.el.remove(); const i = toasts.indexOf(t); if (i >= 0) toasts.splice(i, 1); };
+      const arm = (ms) => { clearTimeout(t.timer); t.timer = setTimeout(dismiss, ms); };
+      const act = o.undo ? [h('button', { type: 'button', onclick: () => { dismiss(); o.undo(); } }, 'Undo')] : [];
+      t.el = h('div', { class: 'idc-toast k-' + (o.kind || 'info') }, h('span', {}, text), ...act);
+      for (const [on, off] of [['mouseenter', 'mouseleave'], ['focusin', 'focusout']]) {   // hovered or keyboard-focused: stay
+        t.el.addEventListener(on, () => clearTimeout(t.timer));
+        t.el.addEventListener(off, () => arm(1500));
+      }
+      toastBox.append(t.el);
+      toasts.push(t);
+      while (toasts.length > 3) { const old = toasts[0]; clearTimeout(old.timer); old.el.remove(); toasts.shift(); }
+      arm(o.undo ? 7000 : 3500);
+    }
+
+    // ---- ledger: what the modules did, kept across reloads ------------------------------
+    const LEDGER_KEY = 'idleCore.ledger.v1', LEDGER_MAX = 300;
+    let ledger = [];
+    try { const l = JSON.parse(store?.getItem(LEDGER_KEY) || '[]'); if (Array.isArray(l)) ledger = l.slice(-LEDGER_MAX); } catch { }
+    let ledgerTimer = 0, ledgerRev = 0;
+    const flushLedger = () => { ledgerTimer = 0; try { store?.setItem(LEDGER_KEY, JSON.stringify(ledger)); } catch { } };
+    const ledgerApi = {
+      // mod: 'AP' | 'CD' | 'LAB'; kind: 'action' | 'fail' | 'info' | 'alert'; extra: { money (cents or $ — whatever the module logs), ok }
+      add(mod, kind, text, extra = {}) {
+        ledgerRev++;
+        ledger.push({ t: Date.now(), mod, kind, text: String(text).slice(0, 240), ...extra });
+        if (ledger.length > LEDGER_MAX) ledger.splice(0, ledger.length - LEDGER_MAX);
+        if (!ledgerTimer) ledgerTimer = setTimeout(flushLedger, 2000);
+      },
+      list: () => ledger.slice(),
+      clear() { ledgerRev++; ledger = []; flushLedger(); },
+      // Puts lines taken out by clear() back in front of whatever was logged since (the Undo for Clear log).
+      restore(list) { ledgerRev++; ledger = list.concat(ledger).slice(-LEDGER_MAX); flushLedger(); },
+      rev: () => ledgerRev,
+      text: () => ledger.map((e) => new Date(e.t).toISOString() + ' ' + e.mod + ' ' + e.kind + ' ' + e.text + (e.dMoney != null ? ' (' + (e.dMoney >= 0 ? '+$' : '-$') + Math.abs(e.dMoney).toLocaleString('en-US') + ')' : '')).join('\n'),
+      async copy() {
+        const t = ledgerApi.text();
+        try { await navigator.clipboard.writeText(t); toast('Copied ' + ledger.length + ' log lines', 'success'); return true; }
+        catch { console.log(t); toast('Clipboard blocked: the log is in the console', 'error'); return false; }
+      },
+    };
+
+    // ---- alerts: tab title badge + desktop notification when the tab is hidden ----------------
+    const badges = new Map();
+    const TITLE_RE = /^⚠ [^·]*· /;
+    function applyTitle() {
+      if (!HAS_DOM || unloaded) return;
+      const base = document.title.replace(TITLE_RE, '');
+      const want = badges.size ? '⚠ ' + [...badges.values()].join(', ') + ' · ' + base : base;
+      if (document.title !== want) document.title = want;
+    }
+    function setBadge(mod, text) { if (text) badges.set(mod, text); else badges.delete(mod); applyTitle(); }
+    const notifyPerm = () => (typeof Notification === 'undefined' ? 'unsupported' : Notification.permission);
+    async function askNotify() {
+      if (typeof Notification === 'undefined') return 'unsupported';
+      try { return await Notification.requestPermission(); } catch { return 'denied'; }
+    }
+    function notify(mod, title, body = '') {
+      ledgerApi.add(mod, 'alert', title + (body ? ': ' + body : ''));
+      if (HAS_DOM && notifyPerm() === 'granted' && realHidden()) {
+        try { new Notification(title, { body, tag: 'idlecorp-' + mod }); } catch { }
+      }
+    }
+
+    // ---- stop everything (Alt+Shift+X) ------------------------------------------------------
+    function stopAll(why = 'stop-all') {
+      const live = [];
+      try { if (W.earlyGame?.running) { W.earlyGame.stop(); live.push('Autopilot'); } } catch (e) { console.error(e); }
+      try { if (W.cdFarm?.running) { W.cdFarm.stop(); live.push('CD Farm'); } else if (W.cdFarm?.pauseAuto?.()) live.push('CD Farm Auto'); } catch (e) { console.error(e); }
+      try { if (W.corePlan?.running) { W.corePlan.stop(); live.push('Core plan'); } } catch (e) { console.error(e); }
+      try { if (W.labRunner?.running) { W.labRunner.stop(); live.push('Lab'); } } catch (e) { console.error(e); }
+      try { if (W.autoSell?.running) { W.autoSell.stop(); live.push('Auto ship'); } } catch (e) { console.error(e); }
+      try { if (W.autoUtil?.running) { W.autoUtil.stop(); live.push('Auto utilities'); } } catch (e) { console.error(e); }
+      ledgerApi.add('--', 'info', 'stop all (' + why + '): ' + (live.join(' + ') || 'nothing was running'));
+      toast(live.length ? 'Stopped ' + live.join(' + ') + ' (' + why + ')' : 'Nothing was running');
+      return live;
+    }
+    const onKey = (e) => { if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && e.code === 'KeyX') { e.preventDefault(); stopAll('Alt+Shift+X'); } };
+    if (HAS_DOM) addEventListener('keydown', onKey, true);
+
+    // ---- config export / import ---------------------------------------------------------------
+    // Each module offers exportCfg() / importCfg(obj); Infinity travels as the string "Infinity".
+    const rep = (_k, v) => (v === Infinity ? 'Infinity' : v);
+    const rev = (_k, v) => (v === 'Infinity' ? Infinity : v);
+    const MODS = ['earlyGame', 'cdFarm', 'labRunner', 'autoUtil', 'corePlan', 'keepOnline'];
+    function exportConfig() {
+      const out = { app: 'idlecorp-toolkit', format: 1, exportedAt: new Date().toISOString() };
+      for (const m of MODS) out[m] = W[m]?.exportCfg?.() ?? null;
+      return JSON.stringify(out, rep, 2);
+    }
+    function importConfig(text) {
+      let o;
+      try { o = JSON.parse(text, rev); } catch { throw new Error('not valid JSON'); }
+      if (!o || o.app !== 'idlecorp-toolkit' || o.format !== 1) throw new Error('not an IdleCorp Toolkit export');
+      const report = [];
+      for (const m of MODS) {
+        if (!o[m]) continue;
+        if (!W[m]?.importCfg) { report.push(m + ': module not loaded, skipped'); continue; }
+        const r = W[m].importCfg(o[m]);
+        report.push(m + ': ' + r.applied.length + ' applied' + (r.skipped.length ? ', skipped ' + r.skipped.join(', ') : ''));
+      }
+      return report.join(' · ');
+    }
+    function download(name, text) {
+      const a = h('a', { href: URL.createObjectURL(new Blob([text], { type: 'application/json' })), download: name });
+      document.body.append(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    }
+    function exportFile() { download('idlecorp-toolkit-' + new Date().toISOString().slice(0, 10) + '.json', exportConfig()); toast('Exported settings', 'success'); }
+    function importFile() {
+      const input = h('input', { type: 'file', accept: 'application/json,.json', hidden: true });
+      input.addEventListener('change', async () => {
+        try { toast('Imported — ' + importConfig(await input.files[0].text()), 'success'); }
+        catch (e) { toast('Import failed: ' + e.message, 'error'); }
+        input.remove();
+      });
+      document.body.append(input); input.click();
+    }
+
+    // Required-field check for the game's state objects: [] when everything is there.
+    function missingFields(obj, paths) {
+      return paths.filter((p) => { let v = obj; for (const k of p.split('.')) { v = v?.[k]; if (v === undefined || v === null) return true; } return false; });
+    }
 
 // continues the core closure from core-1.js (same try / IIFE)
   // ---- UI kit (core.ui): one stylesheet, panel shell, tabs, sidebar tab + top-bar chip, log view -------------
@@ -1061,82 +1068,82 @@ const ui = {
   settingsTab, planLine, footer, logTab, syncLog, resetSettings,
 };
 // continues the core closure from core-2.js (same try / IIFE)
-  // ---- reserves: what each spending module keeps back, shared by CD Farm Auto --------------------------------------
-  // A provider is { reserve(): { moneyFloor (cents), items: {id: n}, nextTech, phase } | null, busy(): bool, hold?(who): Promise, release?(who) }.
-  // Autopilot registers itself; Core plan registers its own. CD Farm reads the merged view instead of asking Autopilot alone:
-  // money floor = the highest, item reserves add up (Infinity stays Infinity), the first provider with a next unlock wins.
-  const reserveProviders = new Map();
-  const reserves = {
-    register(name, p) { reserveProviders.set(String(name), p); return () => { if (reserveProviders.get(String(name)) === p) reserveProviders.delete(String(name)); }; },
-    unregister(name) { reserveProviders.delete(String(name)); },
-    names: () => [...reserveProviders.keys()],
-    anyBusy() { for (const p of reserveProviders.values()) { try { if (p.busy?.()) return true; } catch (e) { console.error(e); } } return false; },
-    merged() {
-      let any = false, moneyFloor = 0, nextTech = null, phase = null;
-      const items = {}, by = {};
-      for (const [name, p] of reserveProviders) {
-        let r = null;
-        try { r = p.reserve?.() ?? null; } catch (e) { console.error(e); }
-        if (!r) continue;
-        any = true; by[name] = r;
-        moneyFloor = Math.max(moneyFloor, r.moneyFloor ?? 0);
-        for (const [i, n] of Object.entries(r.items ?? {})) items[i] = (items[i] ?? 0) + n;
-        nextTech ||= r.nextTech ?? null;
-        if (phase == null && r.phase != null) phase = r.phase;
-      }
-      return any ? { moneyFloor, items, nextTech, phase, by } : null;
-    },
-    // Every provider pauses after its current step (CD Farm takes its baseline of unassigned buildings after this).
-    // `except` names a provider that must not be held (a module holding the others while it spends must not wait for itself).
-    async holdAll(who, except) { await Promise.all([...reserveProviders].filter(([n]) => n !== except).map(async ([, p]) => { try { await p.hold?.(who); } catch (e) { console.error(e); } })); },
-    releaseAll(who, except) { for (const [n, p] of reserveProviders) { if (n === except) continue; try { p.release?.(who); } catch (e) { console.error(e); } } },
-  };
+// ---- reserves: what each spending module keeps back, shared by CD Farm Auto --------------------------------------
+// A provider is { reserve(): { moneyFloor (cents), items: {id: n}, nextTech, phase } | null, busy(): bool, hold?(who): Promise, release?(who) }.
+// Autopilot registers itself; Core plan registers its own. CD Farm reads the merged view instead of asking Autopilot alone:
+// money floor = the highest, item reserves add up (Infinity stays Infinity), the first provider with a next unlock wins.
+const reserveProviders = new Map();
+const reserves = {
+  register(name, p) { reserveProviders.set(String(name), p); return () => { if (reserveProviders.get(String(name)) === p) reserveProviders.delete(String(name)); }; },
+  unregister(name) { reserveProviders.delete(String(name)); },
+  names: () => [...reserveProviders.keys()],
+  anyBusy() { for (const p of reserveProviders.values()) { try { if (p.busy?.()) return true; } catch (e) { console.error(e); } } return false; },
+  merged() {
+    let any = false, moneyFloor = 0, nextTech = null, phase = null;
+    const items = {}, by = {};
+    for (const [name, p] of reserveProviders) {
+      let r = null;
+      try { r = p.reserve?.() ?? null; } catch (e) { console.error(e); }
+      if (!r) continue;
+      any = true; by[name] = r;
+      moneyFloor = Math.max(moneyFloor, r.moneyFloor ?? 0);
+      for (const [i, n] of Object.entries(r.items ?? {})) items[i] = (items[i] ?? 0) + n;
+      nextTech ||= r.nextTech ?? null;
+      if (phase == null && r.phase != null) phase = r.phase;
+    }
+    return any ? { moneyFloor, items, nextTech, phase, by } : null;
+  },
+  // Every provider pauses after its current step (CD Farm takes its baseline of unassigned buildings after this).
+  // `except` names a provider that must not be held (a module holding the others while it spends must not wait for itself).
+  async holdAll(who, except) { await Promise.all([...reserveProviders].filter(([n]) => n !== except).map(async ([, p]) => { try { await p.hold?.(who); } catch (e) { console.error(e); } })); },
+  releaseAll(who, except) { for (const [n, p] of reserveProviders) { if (n === except) continue; try { p.release?.(who); } catch (e) { console.error(e); } } },
+};
 
-  // ---- saved floor designs shared by Autopilot (floor upgrades) and Core plan (furniture floors) --------------------------
-  // "x,y:item:rot" cells. Scored with the game's engine.evaluateLayout on 2026-11-22: Workshop v1 = x5 on Frame Timber, Make Bookshelf,
-  // Make Table, Make Chair (one input); Rivet x3 = x3 on Rivet Iron Frame, Make Bench, Make Desk (two inputs).
-  // mineX3 = x3 merge on a 5x2 Mine (Extract, no inputs; proven max), smeltX3 = Smelt x3 on the Smelter: both moved from Autopilot's floor library.
-  const floorDesigns = Object.freeze({
-    workshopV1: '0,0:114:0 0,1:114:0 0,2:114:0 0,3:114:0 0,4:114:0 10,1:123:0 10,2:116:2 10,4:123:0 11,0:123:0 11,1:126:0 11,4:123:0 12,0:123:0 12,1:123:0 12,4:123:0 13,0:123:0 13,1:126:0 13,2:123:1 13,3:123:2 13,4:123:0 14,0:123:0 14,1:123:1 14,2:123:0 14,4:123:0 15,0:116:0 15,2:116:0 15,4:123:0 16,4:123:0 17,4:123:0 2,0:123:0 2,1:123:0 2,2:123:0 2,3:123:0 2,4:123:0 3,0:123:0 3,1:123:1 3,2:127:0 3,3:123:3 3,4:123:0 4,0:116:0 4,2:123:0 4,3:116:0 5,2:123:0 6,2:123:0 7,0:123:0 7,1:123:0 7,2:123:3 7,3:123:0 8,0:123:1 8,1:128:0 8,2:123:1 8,3:127:1 8,4:123:0 9,1:123:0 9,3:123:1 9,4:127:0',
-    rivetX3: '0,0:123:0 0,1:123:1 0,2:123:1 0,3:123:1 0,4:123:0 1,0:123:0 1,4:123:0 10,1:123:0 10,2:123:0 10,4:123:0 11,1:123:0 11,2:123:0 11,4:123:0 12,1:123:0 12,2:116:0 12,4:123:0 13,1:123:0 13,4:123:0 14,1:123:0 14,4:123:0 15,0:116:0 15,2:123:0 15,3:116:0 16,2:123:0 17,2:123:0 2,0:126:0 2,1:123:1 2,2:126:1 2,3:123:0 2,4:123:0 3,0:123:0 3,2:123:0 3,3:114:0 3,4:123:0 4,0:114:0 4,2:114:0 4,4:123:0 5,3:123:0 5,4:123:0 6,0:123:0 6,2:123:0 6,3:127:0 6,4:123:3 7,0:123:1 7,1:123:1 7,2:127:0 7,3:123:3 8,2:123:0 9,1:123:0 9,2:126:0 9,3:123:1 9,4:123:0',
-    mineX3: '0,0:121:0 0,1:121:0 1,0:123:0 1,1:123:0 2,0:127:0 2,1:123:3 3,0:123:0 4,0:123:0 4,1:121:0',
-    smeltX3: '0,0:123:1 0,1:127:1 0,2:123:1 0,3:123:0 1,0:113:0 1,2:123:3 1,3:126:0 2,3:123:0 3,0:123:0 3,2:123:0 3,3:126:0 4,0:123:0 4,1:113:0 4,3:123:0 5,0:123:0 5,3:123:0 6,0:123:0 6,1:123:0 6,2:113:0 7,0:123:0 7,1:123:0 8,0:123:0 8,1:123:0 8,2:123:0 9,0:114:0 9,1:114:0 9,2:114:0',
-  });
+// ---- saved floor designs shared by Autopilot (floor upgrades) and Core plan (furniture floors) --------------------------
+// "x,y:item:rot" cells. Scored with the game's engine.evaluateLayout on 2026-11-22: Workshop v1 = x5 on Frame Timber, Make Bookshelf,
+// Make Table, Make Chair (one input); Rivet x3 = x3 on Rivet Iron Frame, Make Bench, Make Desk (two inputs).
+// mineX3 = x3 merge on a 5x2 Mine (Extract, no inputs; proven max), smeltX3 = Smelt x3 on the Smelter: both moved from Autopilot's floor library.
+const floorDesigns = Object.freeze({
+  workshopV1: '0,0:114:0 0,1:114:0 0,2:114:0 0,3:114:0 0,4:114:0 10,1:123:0 10,2:116:2 10,4:123:0 11,0:123:0 11,1:126:0 11,4:123:0 12,0:123:0 12,1:123:0 12,4:123:0 13,0:123:0 13,1:126:0 13,2:123:1 13,3:123:2 13,4:123:0 14,0:123:0 14,1:123:1 14,2:123:0 14,4:123:0 15,0:116:0 15,2:116:0 15,4:123:0 16,4:123:0 17,4:123:0 2,0:123:0 2,1:123:0 2,2:123:0 2,3:123:0 2,4:123:0 3,0:123:0 3,1:123:1 3,2:127:0 3,3:123:3 3,4:123:0 4,0:116:0 4,2:123:0 4,3:116:0 5,2:123:0 6,2:123:0 7,0:123:0 7,1:123:0 7,2:123:3 7,3:123:0 8,0:123:1 8,1:128:0 8,2:123:1 8,3:127:1 8,4:123:0 9,1:123:0 9,3:123:1 9,4:127:0',
+  rivetX3: '0,0:123:0 0,1:123:1 0,2:123:1 0,3:123:1 0,4:123:0 1,0:123:0 1,4:123:0 10,1:123:0 10,2:123:0 10,4:123:0 11,1:123:0 11,2:123:0 11,4:123:0 12,1:123:0 12,2:116:0 12,4:123:0 13,1:123:0 13,4:123:0 14,1:123:0 14,4:123:0 15,0:116:0 15,2:123:0 15,3:116:0 16,2:123:0 17,2:123:0 2,0:126:0 2,1:123:1 2,2:126:1 2,3:123:0 2,4:123:0 3,0:123:0 3,2:123:0 3,3:114:0 3,4:123:0 4,0:114:0 4,2:114:0 4,4:123:0 5,3:123:0 5,4:123:0 6,0:123:0 6,2:123:0 6,3:127:0 6,4:123:3 7,0:123:1 7,1:123:1 7,2:127:0 7,3:123:3 8,2:123:0 9,1:123:0 9,2:126:0 9,3:123:1 9,4:123:0',
+  mineX3: '0,0:121:0 0,1:121:0 1,0:123:0 1,1:123:0 2,0:127:0 2,1:123:3 3,0:123:0 4,0:123:0 4,1:121:0',
+  smeltX3: '0,0:123:1 0,1:127:1 0,2:123:1 0,3:123:0 1,0:113:0 1,2:123:3 1,3:126:0 2,3:123:0 3,0:123:0 3,2:123:0 3,3:126:0 4,0:123:0 4,1:113:0 4,3:123:0 5,0:123:0 5,3:123:0 6,0:123:0 6,1:123:0 6,2:113:0 7,0:123:0 7,1:123:0 8,0:123:0 8,1:123:0 8,2:123:0 9,0:114:0 9,1:114:0 9,2:114:0',
+});
 
-  // ---- game numbers other modules share ------------------------------------------------------------------------------
-  // Courier allowance per run in CU: 10,000 + 5,000 per capacity level, at most 50,000 (the client's own formula, st.courier_levels.capacity).
-  const courierCU = (st = walk().st) => Math.min(50000, 10000 + Math.max(0, Number(st?.courier_levels?.capacity) || 0) * 5000);
-  // NPC power price multiplier from the world event in force: the client's event chip reads engine.worldEventAt(tick) and shows
-  // "NPC power x(100 + percent) / 100" when the event is an outage. 1 when there is none, or no engine / tick to ask.
-  function powerPriceMult(engine = walk().engine, tick = nowTick()) {
-    try {
-      const ev = tick > 0 && typeof engine?.worldEventAt === 'function' ? JSON.parse(engine.worldEventAt(tick)) : null;
-      return ev?.outage && Number.isFinite(ev.percent) ? Math.max(0, (100 + ev.percent) / 100) : 1;
-    } catch { return 1; }
-  }
+// ---- game numbers other modules share ------------------------------------------------------------------------------
+// Courier allowance per run in CU: 10,000 + 5,000 per capacity level, at most 50,000 (the client's own formula, st.courier_levels.capacity).
+const courierCU = (st = walk().st) => Math.min(50000, 10000 + Math.max(0, Number(st?.courier_levels?.capacity) || 0) * 5000);
+// NPC power price multiplier from the world event in force: the client's event chip reads engine.worldEventAt(tick) and shows
+// "NPC power x(100 + percent) / 100" when the event is an outage. 1 when there is none, or no engine / tick to ask.
+function powerPriceMult(engine = walk().engine, tick = nowTick()) {
+  try {
+    const ev = tick > 0 && typeof engine?.worldEventAt === 'function' ? JSON.parse(engine.worldEventAt(tick)) : null;
+    return ev?.outage && Number.isFinite(ev.percent) ? Math.max(0, (100 + ev.percent) / 100) : 1;
+  } catch { return 1; }
+}
 
-  const titleTimer = HAS_DOM ? setInterval(applyTitle, 2000) : 0;
-  addEventListener?.('pagehide', flushLedger);
+const titleTimer = HAS_DOM ? setInterval(applyTitle, 2000) : 0;
+addEventListener?.('pagehide', flushLedger);
 
-  W.idleCore = {
-    version: 1,
-    walk, sleep, every, sleepWake,waitConfirm, tune, markSend, lastRtt, nowTick, seeTick, sock, orderBook,
-    h, makeDraggable, toast, ledger: ledgerApi, ui,
-    setBadge, notify, askNotify, notifyPerm, stopAll, reserves, floorDesigns, courierCU, powerPriceMult,
-    exportConfig, importConfig, exportFile, importFile, missingFields,
-    _unload() {
-      orderBook.release();
-      unloaded = true;
-      sock.ws?.removeEventListener('message', onMessage);
-      if (sock.ws?.send === hookSend) sock.ws.send = baseSend;
-      sock.ws = null;
-      if (HAS_DOM) removeEventListener('keydown', onKey, true);
-      clearInterval(titleTimer);
-      flushLedger();
-      if (HAS_DOM) { uiStyleEl?.remove(); toastBox?.remove(); uiStyleEl = toastBox = null; domObs?.disconnect(); domObs = null; domSubs.clear(); dockOff = null; }
-    },
-  };
-})();
+W.idleCore = {
+  version: 1,
+  walk, sleep, every, sleepWake, waitConfirm, tune, markSend, lastRtt, nowTick, seeTick, sock, orderBook, link, realHidden,
+  h, makeDraggable, toast, ledger: ledgerApi, ui,
+  setBadge, notify, askNotify, notifyPerm, stopAll, reserves, floorDesigns, courierCU, powerPriceMult,
+  exportConfig, importConfig, exportFile, importFile, missingFields,
+  _unload() {
+    orderBook.release();
+    unloaded = true;
+    sock.ws?.removeEventListener('message', onMessage);
+    if (sock.ws?.send === hookSend) sock.ws.send = baseSend;
+    sock.ws = null;
+    if (HAS_DOM) removeEventListener('keydown', onKey, true);
+    clearInterval(titleTimer);
+    flushLedger();
+    if (HAS_DOM) { uiStyleEl?.remove(); toastBox?.remove(); uiStyleEl = toastBox = null; domObs?.disconnect(); domObs = null; domSubs.clear(); dockOff = null; }
+  },
+};
+}) ();
 } catch (e) { console.error('[IdleCorp] shared core failed to load:', e); }
 // @@END core
 
@@ -1871,269 +1878,269 @@ try {
 // those settings apply to that run only and yours come back when it stops.
 
 try {
-(() => {
-  const core = window.idleCore;
-  if (!core) throw new Error('the shared core did not load');
-  const KEY = 'cdFarm.v1';
-  if (window.cdFarm) {
-    // Replace a previous copy without letting it overwrite the saved state.
-    if (window.cdFarm._unload) window.cdFarm._unload();
-    else { window.cdFarm.stop(); window.cdFarm.panel(false); }
-  }
+  (() => {
+    const core = window.idleCore;
+    if (!core) throw new Error('the shared core did not load');
+    const KEY = 'cdFarm.v1';
+    if (window.cdFarm) {
+      // Replace a previous copy without letting it overwrite the saved state.
+      if (window.cdFarm._unload) window.cdFarm._unload();
+      else { window.cdFarm.stop(); window.cdFarm.panel(false); }
+    }
 
-  const MONEY = 0;         // items[0], cents
-  const CD = 24;           // items[24], Construction Data
-  // Buildings the farm can cycle: money only (no build items), 1 acre and 1 CD each, same price curve. Id and base price are
-  // read from the catalog by name (syncIds); these numbers are the fallback.
-  const BUILDINGS = [
-    { id: 0, name: 'Lumber Camp', plural: 'camps', base: 41 },
-    { id: 10, name: 'Farm', plural: 'farms', base: 41 },
-  ];
-  const isBuilding = (v) => v === 'auto' || v === 'cheapest' || BUILDINGS.some((b) => b.id === v);
-  let RETAIL = 38;   // Retail Store (by name from the catalog; this id is the fallback)
-  const RATE_WINDOW_MS = 15 * 60 * 1000;
+    const MONEY = 0;         // items[0], cents
+    const CD = 24;           // items[24], Construction Data
+    // Buildings the farm can cycle: money only (no build items), 1 acre and 1 CD each, same price curve. Id and base price are
+    // read from the catalog by name (syncIds); these numbers are the fallback.
+    const BUILDINGS = [
+      { id: 0, name: 'Lumber Camp', plural: 'camps', base: 41 },
+      { id: 10, name: 'Farm', plural: 'farms', base: 41 },
+    ];
+    const isBuilding = (v) => v === 'auto' || v === 'cheapest' || BUILDINGS.some((b) => b.id === v);
+    let RETAIL = 38;   // Retail Store (by name from the catalog; this id is the fallback)
+    const RATE_WINDOW_MS = 15 * 60 * 1000;
 
 
-  const cfg = {
-    building: 'auto',      // 'auto': the planner picks types and batch every cycle; 'cheapest': Lumber Camp or Farm, whichever costs less at start; or an id: 0 Lumber Camp, 10 Farm
-    region: 'auto',        // 'auto': the region you hold with the most free acres (Heartland on a tie); or 0 Heartland, 1 Industrial Basin, 2 Coastal Cities, 3 Frontier
-    batch: 10,             // max buildings per cycle
-    fullBatch: false,      // true: only build when all `batch` camps fit (land + money); never a smaller batch
-    cycles: Infinity,      // stop after this many cycles
-    reserveAcres: 10,      // free acres never used by the farm (always kept spare)
-    minMoney: 30000,       // cash reserve ($): never spend below this
-    // 'reserve': floor is minMoney; stops when the next batch would go below it.
-    // 'floor':   floor is minMoney; waits for income instead of stopping (also waits to start if money is below it).
-    // 'income':  floor is max(minMoney, money at start); waits for income instead of stopping.
-    budget: 'reserve',
-    maxSpendPerMin: Infinity, // net build spend cap per rolling minute ($)
-    maxSpend: Infinity,    // stop once net spend ($) reaches this
-    targetCd: Infinity,    // stop once CD reaches this (ETA uses 20,000 if unset)
-    existingPool: 'keep',  // unassigned camps found at start: 'keep' or 'demolish'
-    autoResume: false,     // resume an interrupted run automatically when the script loads
-    pace: 'balanced',      // Auto: 'thrifty' | 'balanced' | 'fast' (how much waiting for CD costs)
-    land: 'plan',          // Auto: 'off' | 'plan' (acres only inside Autopilot's own land plan) | max $ per acre
-    autoStart: true,       // Auto: start by itself when the engine needs CD (switched off when you press Stop)
-    solo: false,           // Auto: with Autopilot and Core plan off and no Target CD, farm for the cheapest tech that can start next
-    autoFloor: 0,          // Auto: money floor ($) on top of Autopilot's power-bill floor
-    maxTypes: 2,           // Auto: building types per cycle (each adds a Buy and a Demolish round trip)
-    cmdsPerMin: 20,        // command budget per rolling minute (shared pacer)
-    dryRun: false,         // Auto: log what it would build, send nothing
-    timeoutMs: 8000,       // max wait for the server to confirm a step
-    reconnectMs: 60000,    // max wait for the socket to come back
-    maxReconnects: 3,      // consecutive reconnects before giving up
-  };
-
-  const DEFAULTS = { ...cfg };
-
-  class ConnError extends Error {}
-
-  const freshStats = () => ({
-    cycles: 0, built: 0, spent: 0, refunded: 0,
-    cdStart: 0, moneyStart: 0, startedAt: 0, baselinePool: 0, rushCd: 0,
-    samples: [], spends: [], last: '', by: '', building: null,
-    baseline: {}, types: [], byType: {}, land: 0, acresBought: 0, holding: {},   // Auto: per-type pool baseline, types touched, spend per type
-  });
-
-  let running = false;
-  let active = false;      // a run (loop) is still executing, even after stop()
-  let unloaded = false;
-  let resumable = false;
-  let stopReason = '';
-  let phase = 'idle';
-  let inFlight = null;
-  let stats = freshStats();
-  let restoreCfg = null;   // your settings, kept while a runOnly run (e.g. started by Autopilot) uses its own
-
-  // The building the farm cycles. A run (even an interrupted one) keeps the building it started with,
-  // so changing the setting can never make cleanup touch the wrong buildings.
-  const farmId = () => { const b = runBuilding(); return typeof b === 'number' ? b : b === 'cheapest' ? cheaperId() : BUILDINGS[0].id; };   // Auto: the shared read() just looks at Lumber Camps
-  // Lumber Camp or Farm, whichever is cheaper now: the price is base x (20 + owned) / 20, owned counting every region and both queues.
-  function cheaperId() {
-    const { st, catalog } = core.walk();
-    if (!st || !catalog) return BUILDINGS[0].id;
-    const own = PL().ownedAll({ st, catalog });
-    return [...BUILDINGS].sort((a, b) => a.base * (20 + (own[a.id] ?? 0)) - b.base * (20 + (own[b.id] ?? 0)))[0].id;
-  }
-  // The region a run uses is fixed when it starts (stats.region; a run saved before regions existed was in Heartland), so cleanup
-  // never looks at another region's pool. With no run on, it is cfg.region ('auto': PL().pickRegion).
-  function region(st, catalog) {
-    if (running || active || resumable) return stats.region ?? 0;
-    if (!st) ({ st, catalog } = core.walk());
-    return st && catalog ? PL().pickRegion({ st, catalog, choice: cfg.region }) : 0;
-  }
-  const pickRegionNow = () => { const { st, catalog } = core.walk(true); return st && catalog ? PL().pickRegion({ st, catalog, choice: cfg.region }) : 0; };
-  // Ids by name from the catalog (once per catalog), with the numbers above as the fallback.
-  const synced = new WeakSet();
-  function syncIds(catalog) {
-    if (synced.has(catalog)) return;
-    synced.add(catalog);
-    const byName = (n) => (catalog.buildings ?? []).find((b) => b.name === n);
-    for (const b of BUILDINGS) { const x = byName(b.name); if (x) { b.id = x.id; b.base = x.cost / 100; } }
-    RETAIL = byName('Retail Store')?.id ?? RETAIL;
-  }
-  const isAuto = () => runBuilding() === 'auto';
-  const bld = () => BUILDINGS.find((b) => b.id === farmId()) ?? BUILDINGS[0];
-  const unitRefund = () => bld().base / 2; // demolish refunds 50% of base ($)
-
-  // ---- persistence (#5) --------------------------------------------------
-
-  const replacer = (_k, v) => (v === Infinity ? 'Infinity' : v);
-  const reviver = (_k, v) => (v === 'Infinity' ? Infinity : v);
-
-  function save() {
-    if (unloaded) return;
-    try { localStorage.setItem(KEY, JSON.stringify({ cfg, stats, running, inFlight, stopReason, restoreCfg, quarantine, measure: core.measure?.save() }, replacer)); } catch {}
-  }
-  function load() {
-    try { const s = localStorage.getItem(KEY); return s ? JSON.parse(s, reviver) : null; } catch { return null; }
-  }
-
-  // ---- socket listener (#6) ----------------------------------------------
-  // Shared with Autopilot: core.sock holds the Diff / mutation counters, core.walk() reads the game state.
-
-  // ---- state access ------------------------------------------------------
-  // (core.walk: one cached walk of the game's React state)
-
-  function campCost(owned, n) {
-    let c = 0;
-    const base = bld().base;
-    for (let i = 0; i < n; i++) c += base * (20 + owned + i) / 20;
-    return c;
-  }
-
-  // stats.scaleFloor: the run started on the default floor (nobody set one), so it is capped by the cash at start (PL().manualFloor).
-  const baseFloor = (scale, moneyStart) => PL().manualFloor({ minMoney: cfg.minMoney, isDefault: scale, moneyStart });
-  const moneyFloor = () => { const f = baseFloor(!!stats.scaleFloor, stats.moneyStart); return cfg.budget === 'income' ? Math.max(f, stats.moneyStart) : f; };
-
-  // Live snapshot. Every decision in the script goes through this.
-  function read(fresh = false) {
-    const { ws, st, catalog } = core.walk(fresh);
-    if (!st || !catalog) return null;
-    syncIds(catalog);
-    const R = region(st, catalog);
-    const id = farmId();
-    const unassignedCamps = st.building_pool?.[R]?.[id] ?? 0;
-    // Queued builds and demolitions count in the price and hold acres: a queued demolition keeps its acre until it finishes.
-    const q = PL().queued({ st, catalog, region: R });
-    const ra = PL().regionAcres({ st, catalog, region: R });
-    let campsInGroups = 0;
-    for (const g of Object.values(st.groups)) if (g.building === id) campsInGroups += g.count;   // every region: the price counts them all
-
-    const acresOwned = ra.owned, acresUsed = ra.used, freeAcres = ra.free;
-    const money = (st.items?.[MONEY] ?? 0) / 100;
-    const ownedCamps = PL().ownedAll({ st, catalog })[id] ?? 0;
-    const usableAcres = Math.max(0, freeAcres - cfg.reserveAcres);
-    // With no run on, the floor is what a run started now would use ('income' keeps the money you have at Start).
-    const f0 = baseFloor(cfg.minMoney === DEFAULTS.minMoney, money);
-    const floor = !(running || active || resumable) ? (cfg.budget === 'income' ? Math.max(f0, money) : f0) : moneyFloor();
-
-    let affordable = 0;
-    while (affordable < cfg.batch && money - campCost(ownedCamps, affordable + 1) >= floor) affordable++;
-    const nextBatch = Math.min(cfg.batch, usableAcres, affordable);
-    const sec = PL().secsOf(catalog, id);
-
-    return {
-      money, cd: st.items?.[CD] ?? 0, region: R,
-      unassignedCamps, campsInGroups, ownedCamps,
-      acresOwned, acresUsed, freeAcres, usableAcres, moneyFloor: floor,
-      nextBatch, nextBatchCost: campCost(ownedCamps, nextBatch),
-      buildSec: sec.build, demolishSec: sec.demolish, queue: { build: q.build, demolish: q.demolish }, acresComing: q.demolishAcres,
-      mutTick: st.ssi?.last_user_mutation_tick ?? 0,
-      wsOpen: ws?.readyState === 1, ws,
+    const cfg = {
+      building: 'auto',      // 'auto': the planner picks types and batch every cycle; 'cheapest': Lumber Camp or Farm, whichever costs less at start; or an id: 0 Lumber Camp, 10 Farm
+      region: 'auto',        // 'auto': the region you hold with the most free acres (Heartland on a tie); or 0 Heartland, 1 Industrial Basin, 2 Coastal Cities, 3 Frontier
+      batch: 10,             // max buildings per cycle
+      fullBatch: false,      // true: only build when all `batch` camps fit (land + money); never a smaller batch
+      cycles: Infinity,      // stop after this many cycles
+      reserveAcres: 10,      // free acres never used by the farm (always kept spare)
+      minMoney: 30000,       // cash reserve ($): never spend below this
+      // 'reserve': floor is minMoney; stops when the next batch would go below it.
+      // 'floor':   floor is minMoney; waits for income instead of stopping (also waits to start if money is below it).
+      // 'income':  floor is max(minMoney, money at start); waits for income instead of stopping.
+      budget: 'reserve',
+      maxSpendPerMin: Infinity, // net build spend cap per rolling minute ($)
+      maxSpend: Infinity,    // stop once net spend ($) reaches this
+      targetCd: Infinity,    // stop once CD reaches this (ETA uses 20,000 if unset)
+      existingPool: 'keep',  // unassigned camps found at start: 'keep' or 'demolish'
+      autoResume: true,     // resume an interrupted run automatically when the script loads
+      pace: 'balanced',      // Auto: 'thrifty' | 'balanced' | 'fast' (how much waiting for CD costs)
+      land: 'plan',          // Auto: 'off' | 'plan' (acres only inside Autopilot's own land plan) | max $ per acre
+      autoStart: true,       // Auto: start by itself when the engine needs CD (switched off when you press Stop)
+      solo: false,           // Auto: with Autopilot and Core plan off and no Target CD, farm for the cheapest tech that can start next
+      autoFloor: 0,          // Auto: money floor ($) on top of Autopilot's power-bill floor
+      maxTypes: 2,           // Auto: building types per cycle (each adds a Buy and a Demolish round trip)
+      cmdsPerMin: 20,        // command budget per rolling minute (shared pacer)
+      dryRun: false,         // Auto: log what it would build, send nothing
+      timeoutMs: 8000,       // max wait for the server to confirm a step
+      reconnectMs: 60000,    // max wait for the socket to come back
+      maxReconnects: 3,      // consecutive reconnects before giving up
     };
-  }
 
-  // read() that treats a missing game state as a connection problem.
-  function mustRead(fresh = false) {
-    const r = read(fresh);
-    if (!r) throw new ConnError('game state not found');
-    return r;
-  }
+    const DEFAULTS = { ...cfg };
 
-  // ---- actions -----------------------------------------------------------
+    class ConnError extends Error { }
 
-  const sleep = core.sleep;
+    const freshStats = () => ({
+      cycles: 0, built: 0, spent: 0, refunded: 0,
+      cdStart: 0, moneyStart: 0, startedAt: 0, baselinePool: 0, rushCd: 0,
+      samples: [], spends: [], last: '', by: '', building: null,
+      baseline: {}, types: [], byType: {}, land: 0, acresBought: 0, holding: {},   // Auto: per-type pool baseline, types touched, spend per type
+    });
 
-  // ---- pacing and measurement ----------------------------------------------
-  // Every wait goes through the shared pacer (core.pacer): log-normal, fractional-millisecond, drifting
-  // delays plus a command budget per minute. Round trips are timed from ws.send to the confirming Diff.
-  const hr = () => globalThis.performance?.now?.() ?? Date.now();
-  let pacer = null;
-  const getPacer = () => (pacer ||= core.pacer({ cmdsPerMin: cfg.cmdsPerMin }));
-  const acc = { wait: 0 };   // own waiting inside the current cycle (ms), to tell it from server time
-  async function pause(kind) { const w = await getPacer().wait(kind); acc.wait += w.actual; return w; }
-  async function jitter() { await getPacer().beforeCommand(); await pause('before'); }
+    let running = false;
+    let active = false;      // a run (loop) is still executing, even after stop()
+    let unloaded = false;
+    let resumable = false;
+    let stopReason = '';
+    let phase = 'idle';
+    let inFlight = null;
+    let stats = freshStats();
+    let restoreCfg = null;   // your settings, kept while a runOnly run (e.g. started by Autopilot) uses its own
 
-  // Sends a command; returns the mutation-Diff count at send time.
-  function send(msg) {
-    const r = mustRead(true);
-    if (!r.wsOpen) throw new ConnError('socket not open');
-    const d = core.markSend(r.mutTick); // only a later mutation confirms this command
-    r.ws.send(JSON.stringify(msg));
-    return d;
-  }
-
-  // Waits until the server has applied a player command after this one was sent
-  // AND the state matches. The client applies commands locally first, and
-  // production Diffs arrive on their own, so neither alone is proof.
-  // Falls back to state polling if no text messages have been seen on the socket.
-  // Waits for the server to confirm a command, and feeds the round trip (core.lastRtt: ws.send to the
-  // confirming Diff, sub-millisecond) to the measurements and the pacer's backoff / breaker.
-  async function waitConfirm(pred, d0, rd = read, timeoutMs = cfg.timeoutMs) {
-    const r = await core.waitConfirm({ read: rd, pred, d0, timeoutMs, closed: () => { throw new ConnError('socket closed while waiting'); } });
-    const rtt = r ? core.lastRtt() : null;
-    const p = getPacer();
-    p.noteConfirm({ ok: !!r, rtt }); p.noteResult(!!r);
-    if (rtt != null) core.measure.get('rtt').add(rtt);
-    return r;
-  }
-
-  // Returns the observed money change (includes passive income during the wait).
-  async function demolish(n, { count = true } = {}) {
-    await jitter();
-    const r0 = mustRead(true);
-    inFlight = { action: 'demolish', amount: n, at: Date.now() }; save();
-    const d = send({ type: 'DemolishBuilding', building: farmId(), amount: n, region: region() });
-    const r1 = await waitConfirm((r) => r.unassignedCamps <= r0.unassignedCamps - n, d);
-    if (!r1) throw new Error(`demolish of ${n} not confirmed`);
-    if (count) stats.refunded += n * unitRefund();
-    inFlight = null; save();
-    return r1.money - r0.money;
-  }
-
-  // ---- reconnect (#4) ----------------------------------------------------
-
-  async function waitForSocket() {
-    const t0 = Date.now();
-    while (running && Date.now() - t0 < cfg.reconnectMs) {
-      const r = read();
-      if (r?.wsOpen) { await sleep(2000); return true; } // let the fresh Snapshot land
-      await sleep(1000);
+    // The building the farm cycles. A run (even an interrupted one) keeps the building it started with,
+    // so changing the setting can never make cleanup touch the wrong buildings.
+    const farmId = () => { const b = runBuilding(); return typeof b === 'number' ? b : b === 'cheapest' ? cheaperId() : BUILDINGS[0].id; };   // Auto: the shared read() just looks at Lumber Camps
+    // Lumber Camp or Farm, whichever is cheaper now: the price is base x (20 + owned) / 20, owned counting every region and both queues.
+    function cheaperId() {
+      const { st, catalog } = core.walk();
+      if (!st || !catalog) return BUILDINGS[0].id;
+      const own = PL().ownedAll({ st, catalog });
+      return [...BUILDINGS].sort((a, b) => a.base * (20 + (own[a.id] ?? 0)) - b.base * (20 + (own[b.id] ?? 0)))[0].id;
     }
-    return false;
-  }
+    // The region a run uses is fixed when it starts (stats.region; a run saved before regions existed was in Heartland), so cleanup
+    // never looks at another region's pool. With no run on, it is cfg.region ('auto': PL().pickRegion).
+    function region(st, catalog) {
+      if (running || active || resumable) return stats.region ?? 0;
+      if (!st) ({ st, catalog } = core.walk());
+      return st && catalog ? PL().pickRegion({ st, catalog, choice: cfg.region }) : 0;
+    }
+    const pickRegionNow = () => { const { st, catalog } = core.walk(true); return st && catalog ? PL().pickRegion({ st, catalog, choice: cfg.region }) : 0; };
+    // Ids by name from the catalog (once per catalog), with the numbers above as the fallback.
+    const synced = new WeakSet();
+    function syncIds(catalog) {
+      if (synced.has(catalog)) return;
+      synced.add(catalog);
+      const byName = (n) => (catalog.buildings ?? []).find((b) => b.name === n);
+      for (const b of BUILDINGS) { const x = byName(b.name); if (x) { b.id = x.id; b.base = x.cost / 100; } }
+      RETAIL = byName('Retail Store')?.id ?? RETAIL;
+    }
+    const isAuto = () => runBuilding() === 'auto';
+    const bld = () => BUILDINGS.find((b) => b.id === farmId()) ?? BUILDINGS[0];
+    const unitRefund = () => bld().base / 2; // demolish refunds 50% of base ($)
 
-  // Demolish any farm camps left over from an interrupted step. If the
-  // interruption hit an unaccounted build, count those camps as built.
-  async function reconcile() {
-    const pending = inFlight;
-    inFlight = null;
-    if (isAuto()) return reconcileAuto(pending);
-    const r = read();
-    if (!r) return;
-    const extra = r.unassignedCamps - stats.baselinePool;
-    if (extra > 0) {
-      if (pending?.action === 'build') {
-        const n = Math.min(extra, pending.amount);
-        stats.built += n;
-        stats.spent += campCost(r.ownedCamps - n, n);
+    // ---- persistence (#5) --------------------------------------------------
+
+    const replacer = (_k, v) => (v === Infinity ? 'Infinity' : v);
+    const reviver = (_k, v) => (v === 'Infinity' ? Infinity : v);
+
+    function save() {
+      if (unloaded) return;
+      try { localStorage.setItem(KEY, JSON.stringify({ cfg, stats, running, inFlight, stopReason, restoreCfg, quarantine, measure: core.measure?.save() }, replacer)); } catch { }
+    }
+    function load() {
+      try { const s = localStorage.getItem(KEY); return s ? JSON.parse(s, reviver) : null; } catch { return null; }
+    }
+
+    // ---- socket listener (#6) ----------------------------------------------
+    // Shared with Autopilot: core.sock holds the Diff / mutation counters, core.walk() reads the game state.
+
+    // ---- state access ------------------------------------------------------
+    // (core.walk: one cached walk of the game's React state)
+
+    function campCost(owned, n) {
+      let c = 0;
+      const base = bld().base;
+      for (let i = 0; i < n; i++) c += base * (20 + owned + i) / 20;
+      return c;
+    }
+
+    // stats.scaleFloor: the run started on the default floor (nobody set one), so it is capped by the cash at start (PL().manualFloor).
+    const baseFloor = (scale, moneyStart) => PL().manualFloor({ minMoney: cfg.minMoney, isDefault: scale, moneyStart });
+    const moneyFloor = () => { const f = baseFloor(!!stats.scaleFloor, stats.moneyStart); return cfg.budget === 'income' ? Math.max(f, stats.moneyStart) : f; };
+
+    // Live snapshot. Every decision in the script goes through this.
+    function read(fresh = false) {
+      const { ws, st, catalog } = core.walk(fresh);
+      if (!st || !catalog) return null;
+      syncIds(catalog);
+      const R = region(st, catalog);
+      const id = farmId();
+      const unassignedCamps = st.building_pool?.[R]?.[id] ?? 0;
+      // Queued builds and demolitions count in the price and hold acres: a queued demolition keeps its acre until it finishes.
+      const q = PL().queued({ st, catalog, region: R });
+      const ra = PL().regionAcres({ st, catalog, region: R });
+      let campsInGroups = 0;
+      for (const g of Object.values(st.groups)) if (g.building === id) campsInGroups += g.count;   // every region: the price counts them all
+
+      const acresOwned = ra.owned, acresUsed = ra.used, freeAcres = ra.free;
+      const money = (st.items?.[MONEY] ?? 0) / 100;
+      const ownedCamps = PL().ownedAll({ st, catalog })[id] ?? 0;
+      const usableAcres = Math.max(0, freeAcres - cfg.reserveAcres);
+      // With no run on, the floor is what a run started now would use ('income' keeps the money you have at Start).
+      const f0 = baseFloor(cfg.minMoney === DEFAULTS.minMoney, money);
+      const floor = !(running || active || resumable) ? (cfg.budget === 'income' ? Math.max(f0, money) : f0) : moneyFloor();
+
+      let affordable = 0;
+      while (affordable < cfg.batch && money - campCost(ownedCamps, affordable + 1) >= floor) affordable++;
+      const nextBatch = Math.min(cfg.batch, usableAcres, affordable);
+      const sec = PL().secsOf(catalog, id);
+
+      return {
+        money, cd: st.items?.[CD] ?? 0, region: R,
+        unassignedCamps, campsInGroups, ownedCamps,
+        acresOwned, acresUsed, freeAcres, usableAcres, moneyFloor: floor,
+        nextBatch, nextBatchCost: campCost(ownedCamps, nextBatch),
+        buildSec: sec.build, demolishSec: sec.demolish, queue: { build: q.build, demolish: q.demolish }, acresComing: q.demolishAcres,
+        mutTick: st.ssi?.last_user_mutation_tick ?? 0,
+        wsOpen: ws?.readyState === 1, ws,
+      };
+    }
+
+    // read() that treats a missing game state as a connection problem.
+    function mustRead(fresh = false) {
+      const r = read(fresh);
+      if (!r) throw new ConnError('game state not found');
+      return r;
+    }
+
+    // ---- actions -----------------------------------------------------------
+
+    const sleep = core.sleep;
+
+    // ---- pacing and measurement ----------------------------------------------
+    // Every wait goes through the shared pacer (core.pacer): log-normal, fractional-millisecond, drifting
+    // delays plus a command budget per minute. Round trips are timed from ws.send to the confirming Diff.
+    const hr = () => globalThis.performance?.now?.() ?? Date.now();
+    let pacer = null;
+    const getPacer = () => (pacer ||= core.pacer({ cmdsPerMin: cfg.cmdsPerMin }));
+    const acc = { wait: 0 };   // own waiting inside the current cycle (ms), to tell it from server time
+    async function pause(kind) { const w = await getPacer().wait(kind); acc.wait += w.actual; return w; }
+    async function jitter() { await getPacer().beforeCommand(); await pause('before'); }
+
+    // Sends a command; returns the mutation-Diff count at send time.
+    function send(msg) {
+      const r = mustRead(true);
+      if (!r.wsOpen) throw new ConnError('socket not open');
+      const d = core.markSend(r.mutTick); // only a later mutation confirms this command
+      r.ws.send(JSON.stringify(msg));
+      return d;
+    }
+
+    // Waits until the server has applied a player command after this one was sent
+    // AND the state matches. The client applies commands locally first, and
+    // production Diffs arrive on their own, so neither alone is proof.
+    // Falls back to state polling if no text messages have been seen on the socket.
+    // Waits for the server to confirm a command, and feeds the round trip (core.lastRtt: ws.send to the
+    // confirming Diff, sub-millisecond) to the measurements and the pacer's backoff / breaker.
+    async function waitConfirm(pred, d0, rd = read, timeoutMs = cfg.timeoutMs) {
+      const r = await core.waitConfirm({ read: rd, pred, d0, timeoutMs, closed: () => { throw new ConnError('socket closed while waiting'); } });
+      const rtt = r ? core.lastRtt() : null;
+      const p = getPacer();
+      p.noteConfirm({ ok: !!r, rtt }); p.noteResult(!!r);
+      if (rtt != null) core.measure.get('rtt').add(rtt);
+      return r;
+    }
+
+    // Returns the observed money change (includes passive income during the wait).
+    async function demolish(n, { count = true } = {}) {
+      await jitter();
+      const r0 = mustRead(true);
+      inFlight = { action: 'demolish', amount: n, at: Date.now() }; save();
+      const d = send({ type: 'DemolishBuilding', building: farmId(), amount: n, region: region() });
+      const r1 = await waitConfirm((r) => r.unassignedCamps <= r0.unassignedCamps - n, d);
+      if (!r1) throw new Error(`demolish of ${n} not confirmed`);
+      if (count) stats.refunded += n * unitRefund();
+      inFlight = null; save();
+      return r1.money - r0.money;
+    }
+
+    // ---- reconnect (#4) ----------------------------------------------------
+
+    async function waitForSocket() {
+      const t0 = Date.now();
+      while (running && Date.now() - t0 < cfg.reconnectMs) {
+        const r = read();
+        if (r?.wsOpen) { await sleep(2000); return true; } // let the fresh Snapshot land
+        await sleep(1000);
       }
-      console.log(`[cdFarm] cleanup: demolishing ${extra} leftover farm ${bld().plural}`);
-      await demolish(extra);
+      return false;
     }
-    save();
-  }
+
+    // Demolish any farm camps left over from an interrupted step. If the
+    // interruption hit an unaccounted build, count those camps as built.
+    async function reconcile() {
+      const pending = inFlight;
+      inFlight = null;
+      if (isAuto()) return reconcileAuto(pending);
+      const r = read();
+      if (!r) return;
+      const extra = r.unassignedCamps - stats.baselinePool;
+      if (extra > 0) {
+        if (pending?.action === 'build') {
+          const n = Math.min(extra, pending.amount);
+          stats.built += n;
+          stats.spent += campCost(r.ownedCamps - n, n);
+        }
+        console.log(`[cdFarm] cleanup: demolishing ${extra} leftover farm ${bld().plural}`);
+        await demolish(extra);
+      }
+      save();
+    }
 
 // continues the cd-farm closure from cd-farm-1.js (same try / IIFE)
   // ---- cycle -------------------------------------------------------------
@@ -2715,240 +2722,240 @@ try {
   }
 
 // continues the cd-farm closure from cd-farm-2.js (same try / IIFE)
-  // ---- always-on controller ----------------------------------------------
-  // Every 2 s: when Auto is on and idle, look at the world; when the engine needs CD and the plan has
-  // something to build, start a run. The run ends when the need is met or a gate closes, then a cooldown.
-  function setIdle(note) { if (note !== idleNote) { idleNote = note; render(); } }
-  async function controllerTick() {
-    if (unloaded || running || active || cfg.building !== 'auto' || !cfg.autoStart) { if (!running && !active) setIdle(''); return; }
-    if (Date.now() < bootAt) return;
-    if (resumable) { if (runBuilding() === 'auto') resume(); return; }
-    if (Date.now() < cooldownUntil) return;
-    let ev;
-    try { ev = evaluateAuto(); } catch (e) { setIdle('error: ' + e.message); return; }
-    lastEval = ev;
-    if (ev.idle) return setIdle(ev.reason);
-    if ((ev.plan.wait || !ev.plan.units.length) && !(ev.land?.buy > 0)) return setIdle(ev.plan.wait?.reason ?? 'nothing to build right now');
-    setIdle('');
-    start({ by: 'Auto' });
+// ---- always-on controller ----------------------------------------------
+// Every 2 s: when Auto is on and idle, look at the world; when the engine needs CD and the plan has
+// something to build, start a run. The run ends when the need is met or a gate closes, then a cooldown.
+function setIdle(note) { if (note !== idleNote) { idleNote = note; render(); } }
+async function controllerTick() {
+  if (unloaded || running || active || cfg.building !== 'auto' || !cfg.autoStart) { if (!running && !active) setIdle(''); return; }
+  if (Date.now() < bootAt) return;
+  if (resumable) { if (runBuilding() === 'auto') resume(); return; }
+  if (Date.now() < cooldownUntil) return;
+  let ev;
+  try { ev = evaluateAuto(); } catch (e) { setIdle('error: ' + e.message); return; }
+  lastEval = ev;
+  if (ev.idle) return setIdle(ev.reason);
+  if ((ev.plan.wait || !ev.plan.units.length) && !(ev.land?.buy > 0)) return setIdle(ev.plan.wait?.reason ?? 'nothing to build right now');
+  setIdle('');
+  start({ by: 'Auto' });
+}
+
+// ---- control -----------------------------------------------------------
+
+const fmt = (x) => Number(x).toLocaleString('en-US', { maximumFractionDigits: 2 });
+const perCd = () => { const netCd = stats.built - (stats.rushCd ?? 0); return netCd > 0 ? (netSpend() / netCd).toFixed(2) : '-'; };
+
+async function start(opts = {}) {
+  if (running) return console.warn('[cdFarm] already running');
+  if (active) return console.warn('[cdFarm] previous run is still finishing its step; try again in a moment');
+  const { resume: resumeFlag, runOnly, by, ...rest } = opts;
+  const resume = !!resumeFlag;
+  let r = read();
+  if (!r) return console.error('[cdFarm] game state not found');
+  const miss = core.missingFields(core.walk(true).st, ['groups', 'items']);
+  if (miss.length) return console.error('[cdFarm] the game state no longer has ' + miss.join(', ') + ': refusing to run (did the game update?)');
+  if (rest.building != null && !isBuilding(rest.building)) {
+    return console.error(`[cdFarm] building must be 'auto', 'cheapest' or one of: ${BUILDINGS.map((b) => `${b.id} (${b.name})`).join(', ')}`);
   }
+  if (rest.region != null && rest.region !== 'auto' && ![0, 1, 2, 3].includes(rest.region)) return console.error("[cdFarm] region must be 'auto' or 0-3");
+  // runOnly: these settings are for this run only; yours come back when it stops.
+  if (runOnly && !restoreCfg) restoreCfg = { ...cfg };
+  // cycles and maxSpend apply to one run only; other settings are remembered.
+  if (!resume) { cfg.cycles = Infinity; cfg.maxSpend = Infinity; }
+  Object.assign(cfg, rest);
+  const scaleFloor = !('minMoney' in rest) && cfg.minMoney === DEFAULTS.minMoney;   // a floor passed in (Autopilot's booster) is never scaled
 
-  // ---- control -----------------------------------------------------------
-
-  const fmt = (x) => Number(x).toLocaleString('en-US', { maximumFractionDigits: 2 });
-  const perCd = () => { const netCd = stats.built - (stats.rushCd ?? 0); return netCd > 0 ? (netSpend() / netCd).toFixed(2) : '-'; };
-
-  async function start(opts = {}) {
-    if (running) return console.warn('[cdFarm] already running');
-    if (active) return console.warn('[cdFarm] previous run is still finishing its step; try again in a moment');
-    const { resume: resumeFlag, runOnly, by, ...rest } = opts;
-    const resume = !!resumeFlag;
-    let r = read();
-    if (!r) return console.error('[cdFarm] game state not found');
-    const miss = core.missingFields(core.walk(true).st, ['groups', 'items']);
-    if (miss.length) return console.error('[cdFarm] the game state no longer has ' + miss.join(', ') + ': refusing to run (did the game update?)');
-    if (rest.building != null && !isBuilding(rest.building)) {
-      return console.error(`[cdFarm] building must be 'auto', 'cheapest' or one of: ${BUILDINGS.map((b) => `${b.id} (${b.name})`).join(', ')}`);
-    }
-    if (rest.region != null && rest.region !== 'auto' && ![0, 1, 2, 3].includes(rest.region)) return console.error("[cdFarm] region must be 'auto' or 0-3");
-    // runOnly: these settings are for this run only; yours come back when it stops.
-    if (runOnly && !restoreCfg) restoreCfg = { ...cfg };
-    // cycles and maxSpend apply to one run only; other settings are remembered.
-    if (!resume) { cfg.cycles = Infinity; cfg.maxSpend = Infinity; }
-    Object.assign(cfg, rest);
-    const scaleFloor = !('minMoney' in rest) && cfg.minMoney === DEFAULTS.minMoney;   // a floor passed in (Autopilot's booster) is never scaled
-
-    active = true;
-    running = true; stopReason = '';
-    phase = canHold() ? 'waiting for Autopilot to finish its step' : (resume ? 'resuming' : 'running');
-    let began = false;
-    try {
-      // Autopilot must not send anything between our baseline and the end of the run
-      // (a camp it builds would look like ours). hold() resolves once its current step is done.
-      if (canHold()) { await holdOthers('CD Farm'); r = mustRead(); }
-      if (!running) throw new Error(STOPPED_EARLY);
-      phase = resume ? 'resuming' : 'running';
-      getPacer().resetBreaker(); getPacer().clearTrips();
-      if (!resume) {
-        if (resumable) {
-          // Clean up the interrupted run's camps (with its own baseline) before starting fresh.
-          await reconcile();
-          r = mustRead();
-        }
-        // Fix the building ('cheapest' resolves to one type now) and the region for the whole run, before resetting stats.
-        const building = cfg.building === 'cheapest' ? cheaperId() : cfg.building, reg = pickRegionNow();
-        stats = freshStats();
-        stats.building = building; stats.region = reg; stats.scaleFloor = scaleFloor;
-        r = mustRead(); // re-read: the pool count must be for the building this run uses
-        Object.assign(stats, { cdStart: r.cd, moneyStart: r.money, startedAt: Date.now(), baselinePool: r.unassignedCamps, by: by || '' });
-        stats.baseline = { ...(readPool()?.pool ?? {}) }; strikes = 0; recovering = 0; dryCycles = 0; waitSince = 0;
-        for (const k of Object.keys(mismatch)) delete mismatch[k];
-
-        sample();
-      }
-      resumable = false; began = true;
-      segStart = Date.now();
-      save(); render();
-
-      if (resume) {
+  active = true;
+  running = true; stopReason = '';
+  phase = canHold() ? 'waiting for Autopilot to finish its step' : (resume ? 'resuming' : 'running');
+  let began = false;
+  try {
+    // Autopilot must not send anything between our baseline and the end of the run
+    // (a camp it builds would look like ours). hold() resolves once its current step is done.
+    if (canHold()) { await holdOthers('CD Farm'); r = mustRead(); }
+    if (!running) throw new Error(STOPPED_EARLY);
+    phase = resume ? 'resuming' : 'running';
+    getPacer().resetBreaker(); getPacer().clearTrips();
+    if (!resume) {
+      if (resumable) {
+        // Clean up the interrupted run's camps (with its own baseline) before starting fresh.
         await reconcile();
-        console.log(`[cdFarm] resumed after ${stats.cycles} cycles`);
-      } else if (!isAuto() && r.unassignedCamps > 0) {
-        if (cfg.existingPool === 'demolish') {
-          const got = await demolish(r.unassignedCamps, { count: false });
-          stats.baselinePool = 0;
-          console.log(`[cdFarm] demolished ${r.unassignedCamps} existing unassigned ${bld().plural} (+$${fmt(got)})`);
-        } else {
-          console.log(`[cdFarm] keeping ${r.unassignedCamps} existing unassigned ${bld().plural} (start({ existingPool: 'demolish' }) to clear them)`);
-        }
+        r = mustRead();
       }
-      const r1 = mustRead();
-      console.log(isAuto() ? `[cdFarm] start | Auto (${cfg.pace}) | CD ${fmt(r1.cd)} | $${fmt(r1.money)} | free acres ${r1.freeAcres}`
-        : `[cdFarm] start | CD ${fmt(r1.cd)} | $${fmt(r1.money)} | floor $${fmt(r1.moneyFloor)} | free acres ${r1.freeAcres} | next batch ${r1.nextBatch}`);
-      phase = 'running';
-      await runLoop();
-      if (!stopReason) stopReason = running ? `finished ${stats.cycles} cycles` : 'stopped by user';
-      // An error can leave a batch in the pool: take it down before giving up.
-      // An Auto run also cleans up after a normal stop: a late Buy or an interrupted step must never leave buildings behind.
-      if (isAuto() && Object.values(stats.holding ?? {}).some((n) => n > 0)) await sleep(graceMs);   // a Buy may still be on its way
-      if (/^error/.test(stopReason) || isAuto()) { try { await reconcile(); } catch (e2) { console.warn('[cdFarm] cleanup failed:', e2.message); } }
-    } catch (e) {
-      stopReason = e.message === STOPPED_EARLY ? 'stopped by user' : 'error: ' + e.message;
-    } finally {
-      const wasAuto = stats.building === 'auto';
-      running = false;
-      active = false;
-      phase = 'idle';
-      cooldownUntil = Date.now() + IDLE_COOLDOWN_MS;
-      if (began && !wasAuto) { hist.cum.net += Math.round(netSpend() * 100); hist.cum.farmCd += stats.built; }   // a manual run's CD and spending are not organic: take them out of the windows
-      if (wasAuto) {
-        if (/^error/.test(stopReason)) {
-          errStreak++;
-          cooldownUntil = Date.now() + Math.min(1800000, ERR_COOLDOWN_MS * 2 ** (errStreak - 1));
-          if (errStreak >= 3) { cfg.autoStart = false; core.ledger.add('CD', 'fail', 'Auto switched off after 3 errors in a row; switch it on again to retry'); }
-        } else if (stats.cycles > 0) errStreak = 0;
-      }
-      if (restoreCfg) { Object.assign(cfg, restoreCfg); restoreCfg = null; }
-      releaseOthers('CD Farm');
+      // Fix the building ('cheapest' resolves to one type now) and the region for the whole run, before resetting stats.
+      const building = cfg.building === 'cheapest' ? cheaperId() : cfg.building, reg = pickRegionNow();
+      stats = freshStats();
+      stats.building = building; stats.region = reg; stats.scaleFloor = scaleFloor;
+      r = mustRead(); // re-read: the pool count must be for the building this run uses
+      Object.assign(stats, { cdStart: r.cd, moneyStart: r.money, startedAt: Date.now(), baselinePool: r.unassignedCamps, by: by || '' });
+      stats.baseline = { ...(readPool()?.pool ?? {}) }; strikes = 0; recovering = 0; dryCycles = 0; waitSince = 0;
+      for (const k of Object.keys(mismatch)) delete mismatch[k];
+
+      sample();
     }
-    save();
-    console.log(`[cdFarm] stopped: ${stopReason}`);
-    core.ledger.add('CD', /^error/.test(stopReason) ? 'fail' : 'info', `stopped: ${stopReason} (${stats.cycles} cycles, +${stats.built} CD)${stats.by ? ' · ' + stats.by : ''}`);
-    // Autopilot starts its own CD Farm runs all the time: only tell about errors and runs you started.
-    if (/^error/.test(stopReason) || (!stats.by && stopReason !== 'stopped by user')) core.notify('CD', 'CD Farm stopped', stopReason);
-    status();
-  }
-
-  const STOPPED_EARLY = 'stopped before the first cycle';
-  const resume = (opts = {}) => start({ ...opts, resume: true });
-
-  function stop() {
-    if (running) {
-      console.log('[cdFarm] stopping after current step');
-      // You stopped an Auto run: it stays off until you switch it on again (Settings > Run by itself, or Start).
-      if ((isAuto() || cfg.building === 'auto') && cfg.autoStart) { cfg.autoStart = false; core.ledger.add('CD', 'info', 'Auto switched off because you stopped it'); }
-    }
-    running = false;
-    save();
-  }
-
-  // Alt+Shift+X: switch Auto off even while it is idle.
-  function pauseAuto() {
-    if (cfg.building !== 'auto' || !cfg.autoStart) return false;
-    cfg.autoStart = false; save(); render();
-    core.ledger.add('CD', 'info', 'Auto switched off (stop all)');
-    return true;
-  }
-
-  function reset() {
-    if (running || active) return console.warn('[cdFarm] stop the run (and let it finish its step) before reset()');
-    try { localStorage.removeItem(KEY); } catch {}
-    stats = freshStats(); resumable = false; stopReason = ''; inFlight = null;
-    if (restoreCfg) { Object.assign(cfg, restoreCfg); restoreCfg = null; }
+    resumable = false; began = true;
+    segStart = Date.now();
     save(); render();
-  }
 
-  // ---- rates (#7) --------------------------------------------------------
-
-  // Net spend per sample, across runs (stats reset at every run start): rates().spendH sums its last hour (Core plan E5).
-  let spendLog = [];
-  function sample(now = Date.now()) {
-    const net = netSpend(), prev = stats.netLogged ?? 0;
-    if (net !== prev) spendLog.push({ t: now, amount: net - prev });
-    stats.netLogged = net;
-    spendLog = spendLog.filter((s) => now - s.t <= 3600000);
-    stats.samples.push({ t: now, cycles: stats.cycles, built: stats.built, net });
-    stats.samples = stats.samples.filter((s) => now - s.t <= RATE_WINDOW_MS);
-  }
-
-  // Uses camps built (not the CD balance) so research spending doesn't skew it.
-  // Rates stay hidden until MIN_RATE_CYCLES cycles are in, since one fast cycle
-  // extrapolates to absurd hourly figures.
-  const MIN_RATE_CYCLES = 3;
-  function rates(r = read(), now = Date.now()) {
-    const s = stats.samples.filter((x) => now - x.t <= RATE_WINDOW_MS);
-    let cdh15 = null, spendh15 = null, cyclesh15 = null;
-    if (s.length >= 2) {
-      const a = s[0], b = s[s.length - 1];
-      const h = (b.t - a.t) / 3.6e6;
-      if (h > 0 && b.cycles - a.cycles >= MIN_RATE_CYCLES) {
-        cdh15 = (b.built - a.built) / h;
-        spendh15 = (b.net - a.net) / h;
-        cyclesh15 = (b.cycles - a.cycles) / h;
+    if (resume) {
+      await reconcile();
+      console.log(`[cdFarm] resumed after ${stats.cycles} cycles`);
+    } else if (!isAuto() && r.unassignedCamps > 0) {
+      if (cfg.existingPool === 'demolish') {
+        const got = await demolish(r.unassignedCamps, { count: false });
+        stats.baselinePool = 0;
+        console.log(`[cdFarm] demolished ${r.unassignedCamps} existing unassigned ${bld().plural} (+$${fmt(got)})`);
+      } else {
+        console.log(`[cdFarm] keeping ${r.unassignedCamps} existing unassigned ${bld().plural} (start({ existingPool: 'demolish' }) to clear them)`);
       }
     }
-    const hAll = stats.startedAt ? (now - stats.startedAt) / 3.6e6 : 0;
-    const cdhAll = hAll > 0 && stats.cycles >= MIN_RATE_CYCLES ? stats.built / hAll : null;
-    const target = Number.isFinite(cfg.targetCd) ? cfg.targetCd : 20000;
-    const rate = cdh15 ?? cdhAll;
-
-    // In reserve mode, cash above the floor caps how much CD the farm can buy.
-    let reachableCd = null, capped = false;
-    if (r && !isAuto()) {
-      const perCd = (campCost(r.ownedCamps, cfg.batch) - cfg.batch * unitRefund()) / cfg.batch;
-      reachableCd = r.cd + Math.max(0, Math.floor((r.money - r.moneyFloor) / perCd));
-      capped = cfg.budget === 'reserve' && reachableCd < target;
+    const r1 = mustRead();
+    console.log(isAuto() ? `[cdFarm] start | Auto (${cfg.pace}) | CD ${fmt(r1.cd)} | $${fmt(r1.money)} | free acres ${r1.freeAcres}`
+      : `[cdFarm] start | CD ${fmt(r1.cd)} | $${fmt(r1.money)} | floor $${fmt(r1.moneyFloor)} | free acres ${r1.freeAcres} | next batch ${r1.nextBatch}`);
+    phase = 'running';
+    await runLoop();
+    if (!stopReason) stopReason = running ? `finished ${stats.cycles} cycles` : 'stopped by user';
+    // An error can leave a batch in the pool: take it down before giving up.
+    // An Auto run also cleans up after a normal stop: a late Buy or an interrupted step must never leave buildings behind.
+    if (isAuto() && Object.values(stats.holding ?? {}).some((n) => n > 0)) await sleep(graceMs);   // a Buy may still be on its way
+    if (/^error/.test(stopReason) || isAuto()) { try { await reconcile(); } catch (e2) { console.warn('[cdFarm] cleanup failed:', e2.message); } }
+  } catch (e) {
+    stopReason = e.message === STOPPED_EARLY ? 'stopped by user' : 'error: ' + e.message;
+  } finally {
+    const wasAuto = stats.building === 'auto';
+    running = false;
+    active = false;
+    phase = 'idle';
+    cooldownUntil = Date.now() + IDLE_COOLDOWN_MS;
+    if (began && !wasAuto) { hist.cum.net += Math.round(netSpend() * 100); hist.cum.farmCd += stats.built; }   // a manual run's CD and spending are not organic: take them out of the windows
+    if (wasAuto) {
+      if (/^error/.test(stopReason)) {
+        errStreak++;
+        cooldownUntil = Date.now() + Math.min(1800000, ERR_COOLDOWN_MS * 2 ** (errStreak - 1));
+        if (errStreak >= 3) core.ledger.add('CD', 'fail', 'Auto: 3 errors in a row; it retries after the cooldown');
+      } else if (stats.cycles > 0) errStreak = 0;
     }
-    const goal = capped ? reachableCd : target;
-    const etaH = r && rate > 0 ? Math.max(0, goal - r.cd) / rate : null;
-    // spendH: dollars net spent in the last 60 min, across runs (Core plan adds it back to the cash trend for net income).
-    const spendH = spendLog.filter((x) => now - x.t <= 3600000).reduce((a, x) => a + x.amount, 0);
-    return { cdh15, spendh15, cyclesh15, spendH, cdhAll, target, etaH, reachableCd, capped };
+    if (restoreCfg) { Object.assign(cfg, restoreCfg); restoreCfg = null; }
+    releaseOthers('CD Farm');
   }
+  save();
+  console.log(`[cdFarm] stopped: ${stopReason}`);
+  core.ledger.add('CD', /^error/.test(stopReason) ? 'fail' : 'info', `stopped: ${stopReason} (${stats.cycles} cycles, +${stats.built} CD)${stats.by ? ' · ' + stats.by : ''}`);
+  // Autopilot starts its own CD Farm runs all the time: only tell about errors and runs you started.
+  if (/^error/.test(stopReason) || (!stats.by && stopReason !== 'stopped by user')) core.notify('CD', 'CD Farm stopped', stopReason);
+  status();
+}
 
-  // "1h 10m" to the target, or where cash runs out first.
-  function etaText(rt) {
-    if (rt.capped) return `cash runs out at ~${fmt(rt.reachableCd)} CD${rt.etaH != null ? ` (${fmtH(rt.etaH)})` : ''}`;
-    return rt.etaH == null ? 'after 3 cycles' : fmtH(rt.etaH);
+const STOPPED_EARLY = 'stopped before the first cycle';
+const resume = (opts = {}) => start({ ...opts, resume: true });
+
+function stop() {
+  if (running) {
+    console.log('[cdFarm] stopping after current step');
+    // You stopped an Auto run: it stays off until you switch it on again (Settings > Run by itself, or Start).
+    if ((isAuto() || cfg.building === 'auto') && cfg.autoStart) { cfg.autoStart = false; core.ledger.add('CD', 'info', 'Auto switched off because you stopped it'); }
   }
+  running = false;
+  save();
+}
 
-  const fmtRate = (x) => (x == null ? '-' : fmt(Math.round(x)));
-  const fmtH = (h) => {
-    if (h == null) return '-';
-    if (h === 0) return 'done';
-    const m = Math.round(h * 60);
-    return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`;
-  };
+// Alt+Shift+X: switch Auto off even while it is idle.
+function pauseAuto() {
+  if (cfg.building !== 'auto' || !cfg.autoStart) return false;
+  cfg.autoStart = false; save(); render();
+  core.ledger.add('CD', 'info', 'Auto switched off (stop all)');
+  return true;
+}
 
-  function status() {
-    const r = read();
-    if (!r) return console.error('[cdFarm] game state not found');
-    const rt = rates(r);
-    console.table({
-      Money: `$${fmt(r.money)} (floor $${fmt(r.moneyFloor)}, ${cfg.budget})`,
-      CD: `${fmt(r.cd)}${stats.built ? ` (+${stats.built} farmed)` : ''}`,
-      [`Unassigned ${bld().plural}`]: `${r.unassignedCamps} (baseline ${stats.baselinePool})`,
-      [`${cap(bld().plural)} in groups`]: r.campsInGroups,
-      Acres: `${r.acresUsed} / ${r.acresOwned} (${r.freeAcres} free)`,
-      'Next batch': `${r.nextBatch} ${bld().plural}, $${fmt(r.nextBatchCost)}`,
-      Cycles: stats.cycles,
-      'Net $/CD': perCd(),
-      'CD/h (15m / run)': `${fmtRate(rt.cdh15)} / ${fmtRate(rt.cdhAll)}`,
-      'Spend/h (15m)': rt.spendh15 == null ? '-' : `$${fmt(Math.round(rt.spendh15))}`,
-      [`ETA to ${fmt(rt.target)} CD`]: etaText(rt),
-      State: running ? phase : (resumable ? 'interrupted (resume available)' : (stopReason || 'idle')),
-    });
+function reset() {
+  if (running || active) return console.warn('[cdFarm] stop the run (and let it finish its step) before reset()');
+  try { localStorage.removeItem(KEY); } catch { }
+  stats = freshStats(); resumable = false; stopReason = ''; inFlight = null;
+  if (restoreCfg) { Object.assign(cfg, restoreCfg); restoreCfg = null; }
+  save(); render();
+}
+
+// ---- rates (#7) --------------------------------------------------------
+
+// Net spend per sample, across runs (stats reset at every run start): rates().spendH sums its last hour (Core plan E5).
+let spendLog = [];
+function sample(now = Date.now()) {
+  const net = netSpend(), prev = stats.netLogged ?? 0;
+  if (net !== prev) spendLog.push({ t: now, amount: net - prev });
+  stats.netLogged = net;
+  spendLog = spendLog.filter((s) => now - s.t <= 3600000);
+  stats.samples.push({ t: now, cycles: stats.cycles, built: stats.built, net });
+  stats.samples = stats.samples.filter((s) => now - s.t <= RATE_WINDOW_MS);
+}
+
+// Uses camps built (not the CD balance) so research spending doesn't skew it.
+// Rates stay hidden until MIN_RATE_CYCLES cycles are in, since one fast cycle
+// extrapolates to absurd hourly figures.
+const MIN_RATE_CYCLES = 3;
+function rates(r = read(), now = Date.now()) {
+  const s = stats.samples.filter((x) => now - x.t <= RATE_WINDOW_MS);
+  let cdh15 = null, spendh15 = null, cyclesh15 = null;
+  if (s.length >= 2) {
+    const a = s[0], b = s[s.length - 1];
+    const h = (b.t - a.t) / 3.6e6;
+    if (h > 0 && b.cycles - a.cycles >= MIN_RATE_CYCLES) {
+      cdh15 = (b.built - a.built) / h;
+      spendh15 = (b.net - a.net) / h;
+      cyclesh15 = (b.cycles - a.cycles) / h;
+    }
   }
+  const hAll = stats.startedAt ? (now - stats.startedAt) / 3.6e6 : 0;
+  const cdhAll = hAll > 0 && stats.cycles >= MIN_RATE_CYCLES ? stats.built / hAll : null;
+  const target = Number.isFinite(cfg.targetCd) ? cfg.targetCd : 20000;
+  const rate = cdh15 ?? cdhAll;
+
+  // In reserve mode, cash above the floor caps how much CD the farm can buy.
+  let reachableCd = null, capped = false;
+  if (r && !isAuto()) {
+    const perCd = (campCost(r.ownedCamps, cfg.batch) - cfg.batch * unitRefund()) / cfg.batch;
+    reachableCd = r.cd + Math.max(0, Math.floor((r.money - r.moneyFloor) / perCd));
+    capped = cfg.budget === 'reserve' && reachableCd < target;
+  }
+  const goal = capped ? reachableCd : target;
+  const etaH = r && rate > 0 ? Math.max(0, goal - r.cd) / rate : null;
+  // spendH: dollars net spent in the last 60 min, across runs (Core plan adds it back to the cash trend for net income).
+  const spendH = spendLog.filter((x) => now - x.t <= 3600000).reduce((a, x) => a + x.amount, 0);
+  return { cdh15, spendh15, cyclesh15, spendH, cdhAll, target, etaH, reachableCd, capped };
+}
+
+// "1h 10m" to the target, or where cash runs out first.
+function etaText(rt) {
+  if (rt.capped) return `cash runs out at ~${fmt(rt.reachableCd)} CD${rt.etaH != null ? ` (${fmtH(rt.etaH)})` : ''}`;
+  return rt.etaH == null ? 'after 3 cycles' : fmtH(rt.etaH);
+}
+
+const fmtRate = (x) => (x == null ? '-' : fmt(Math.round(x)));
+const fmtH = (h) => {
+  if (h == null) return '-';
+  if (h === 0) return 'done';
+  const m = Math.round(h * 60);
+  return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`;
+};
+
+function status() {
+  const r = read();
+  if (!r) return console.error('[cdFarm] game state not found');
+  const rt = rates(r);
+  console.table({
+    Money: `$${fmt(r.money)} (floor $${fmt(r.moneyFloor)}, ${cfg.budget})`,
+    CD: `${fmt(r.cd)}${stats.built ? ` (+${stats.built} farmed)` : ''}`,
+    [`Unassigned ${bld().plural}`]: `${r.unassignedCamps} (baseline ${stats.baselinePool})`,
+    [`${cap(bld().plural)} in groups`]: r.campsInGroups,
+    Acres: `${r.acresUsed} / ${r.acresOwned} (${r.freeAcres} free)`,
+    'Next batch': `${r.nextBatch} ${bld().plural}, $${fmt(r.nextBatchCost)}`,
+    Cycles: stats.cycles,
+    'Net $/CD': perCd(),
+    'CD/h (15m / run)': `${fmtRate(rt.cdh15)} / ${fmtRate(rt.cdhAll)}`,
+    'Spend/h (15m)': rt.spendh15 == null ? '-' : `$${fmt(Math.round(rt.spendh15))}`,
+    [`ETA to ${fmt(rt.target)} CD`]: etaText(rt),
+    State: running ? phase : (resumable ? 'interrupted (resume available)' : (stopReason || 'idle')),
+  });
+}
 
 // continues the cd-farm closure from cd-farm-3.js (same try / IIFE)
   // ---- game UI -----------------------------------------------------------
@@ -3381,8 +3388,8 @@ try {
 // project (StartResearch), and it claims finished results (ClaimResearch). Open "Lab" in the game's
 // sidebar (or click the Lab chip in the top bar). Settings there map to cfg below; the console API
 // also works:
-//   labRunner.start()                          // DRY RUN: logs "would send ...", sends nothing
-//   labRunner.start({ dryRun: false })         // live
+//   labRunner.start()                          // live: sends the research commands
+//   labRunner.start({ dryRun: true })          // dry run: logs "would send ...", sends nothing
 //   labRunner.start({ mode: 'list', list: [{ product: 41, focus: 1, tier: 'default' }] })
 //   labRunner.stop() / status() / panel(true) / exportCfg() / importCfg(obj) / resetCfg()
 //
@@ -3396,535 +3403,539 @@ try {
 //
 // What it never sends: QueueResearch. The research queue is shared with the construction slot, and
 // Autopilot treats anything in it as "research busy", so a project is only ever started (StartResearch)
-// when that region's Lab slot is free. dryRun is on by default and is never remembered or imported:
-// nothing is sent until you turn it off and confirm the start. Opt-in keepLive: a Live run still going at a reload starts Live again.
+// when that region's Lab slot is free. dryRun is off by default and is never remembered or imported: a reload starts Live again
+// (keepLive, on by default). Dry run is for checking: start({ dryRun: true }).
 // @@MODULE lab
 try {
-(() => {
-  const W = typeof window !== 'undefined' ? window : globalThis;
-  const core = W.idleCore;
-  if (!core) throw new Error('the shared core did not load');
-  const HAS_DOM = typeof document !== 'undefined' && !!document.body;
-  const store = (() => { try { return W.localStorage ?? null; } catch { return null; } })();
-  const KEY = 'labRunner.v1';
-  const TAG = 'LAB';
-  if (W.labRunner) {
-    // Replace a previous copy without letting it overwrite the saved state.
-    if (W.labRunner._unload) W.labRunner._unload();
-    else { W.labRunner.stop(); W.labRunner.panel(false); }
-  }
-
-  // ---- game facts (read from the live client) -----------------------------------------------
-  const LAB = 14;                          // Manufacturing Lab (building id)
-  const MD = 25, RD = 26;                  // Manufacturing Data, Research Data: global, st.items
-  const CATALYST = 63;                     // Research Catalyst: regional, st.stock[region]
-  // Wire tier 0..2 = Tier I..III. md / rd are paid from st.items, cat from the project's region.
-  const TIERS = [
-    { name: 'I', base: 90, md: 1000, rd: 0, cat: 0 },
-    { name: 'II', base: 70, md: 10000, rd: 5, cat: 0 },
-    { name: 'III', base: 50, md: 100000, rd: 0, cat: 1 },
-  ];
-  const FOCUS = ['Process study', 'Module fabrication', 'Quality engineering'];   // StartResearch.context
-  const REGION_NAMES = ['Heartland', 'Industrial Basin', 'Coastal Cities', 'Frontier'];
-  const regionName = (r) => REGION_NAMES[r] ?? 'Region ' + r;
-  const LIST_MAX = 50;
-  const MAX_FAILS = 5;                     // sends (or errors) in a row before the run stops itself
-
-  // ---- settings -----------------------------------------------------------------------------
-  const MODE_IDS = ['process', 'modules', 'list'];
-  const cfg = {
-    mode: 'process',       // 'process' (focus 0) | 'modules' (focus 1) | 'list' (your own list)
-    tierMode: 'best',      // 'best' (Tier I; a higher tier only out of surplus MD, see richOk) | 1 | 2 | 3 (that tier only: waits, never falls back)
-    mdReserve: 5000,       // MD never spent below this
-    autoClaim: true,       // claim finished results
-    keepLive: false,       // a Live run that was still running when the page reloaded starts Live again (off: it stays stopped)
-    dryRun: true,          // log "would send ..." instead of sending (session-only: never remembered or imported)
-    list: [],              // [{ product, focus: 0 | 1 | 2, tier: 'default' | 1 | 2 | 3 }], cycled in order
-    intervalMs: 10000,     // look this often
-    delayMs: 500,          // look again this soon after sending something
-    jitterMinMs: 150,      // random extra wait before each command (min)
-    jitterMaxMs: 900,      // random extra wait before each command (max)
-    timeoutMs: 8000,       // max wait for the server to confirm a command
-  };
-  const clone = (v) => JSON.parse(JSON.stringify(v));
-  const DEFAULTS = clone(cfg);
-  const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
-  const validEntry = (e) => !!e && typeof e === 'object' && Number.isInteger(e.product) && e.product >= 0
-    && [0, 1, 2].includes(e.focus) && (e.tier === 'default' || [1, 2, 3].includes(e.tier));
-  const VALID = {
-    mode: (v) => MODE_IDS.includes(v),
-    tierMode: (v) => v === 'best' || v === 1 || v === 2 || v === 3,
-    mdReserve: (v) => isNum(v) && v >= 0,
-    autoClaim: (v) => typeof v === 'boolean',
-    keepLive: (v) => typeof v === 'boolean',
-    list: (v) => Array.isArray(v) && v.length <= LIST_MAX && v.every(validEntry),
-    intervalMs: (v) => isNum(v) && v >= 500 && v <= 600000,
-    delayMs: (v) => isNum(v) && v >= 0 && v <= 60000,
-    jitterMinMs: (v) => isNum(v) && v >= 0 && v <= 60000,
-    jitterMaxMs: (v) => isNum(v) && v >= 0 && v <= 60000,
-    timeoutMs: (v) => isNum(v) && v >= 500 && v <= 120000,
-  };
-  const entryOf = (e) => ({ product: e.product, focus: e.focus, tier: e.tier });
-  const take = (k, v) => (k === 'list' ? v.map(entryOf) : clone(v));   // a validated value, kept as a private copy (list entries: known fields only)
-
-  // ---- persistence: settings, and what this runner has already done -------------------------------
-  const SESSION_ONLY = ['dryRun'];
-  const persistable = () => clone(Object.fromEntries(Object.entries(cfg).filter(([k]) => !SESSION_ONLY.includes(k))));
-  let saved = {};
-  try { saved = JSON.parse(store?.getItem(KEY) || '{}') ?? {}; } catch {}
-  for (const [k, v] of Object.entries(saved.cfg || {})) if (k in cfg && !SESSION_ONLY.includes(k) && VALID[k]?.(v)) cfg[k] = take(k, v);
-  // counts: projects started per product (what the Process / Modules pick rotates on); next: the next custom-list entry.
-  const mem = { counts: {}, next: 0 };
-  for (const [k, v] of Object.entries(saved.mem?.counts || {})) if (Number.isInteger(+k) && isNum(v) && v > 0) mem.counts[k] = v;
-  if (Number.isInteger(saved.mem?.next) && saved.mem.next >= 0) mem.next = saved.mem.next;
-
-  let unloaded = false;
-  function save() {
-    if (unloaded) return;
-    // live: a Live run is going (cleared when it stops; a reload does not stop it), for cfg.keepLive.
-    try { store?.setItem(KEY, JSON.stringify({ cfg: persistable(), mem, live: running && !cfg.dryRun })); } catch {}
-  }
-
-  // ---- the Lab, as the game state shows it ---------------------------------------------------
-  const fmt = (x) => Number(x).toLocaleString('en-US', { maximumFractionDigits: 2 });
-  const asMap = (x) => (Array.isArray(x) ? new Map(x.map((o) => [o.id, o])) : new Map(Object.entries(x ?? {}).map(([k, o]) => [+k, o])));
-  const ixCache = new WeakMap();
-  // Catalog lookups, built once per catalog object. products = what the Lab's picker lists: base value above 0,
-  // not a floor piece, and some recipe makes it from inputs (extraction doesn't count).
-  function index(catalog) {
-    let ix = ixCache.get(catalog);
-    if (ix) return ix;
-    const items = asMap(catalog.items), recipes = asMap(catalog.recipes), buildings = asMap(catalog.buildings);
-    const fromInputs = new Set();
-    for (const r of recipes.values()) if (r.inputs?.length > 0) for (const o of r.outputs ?? []) fromInputs.add(o.item);
-    const products = new Map();
-    for (const [id, it] of items) if (it.base_value > 0 && !it.floor_piece && fromInputs.has(id)) products.set(id, it);
-    const byName = [...products.values()].sort((a, b) => String(a.name).localeCompare(String(b.name)));
-    ix = { items, recipes, buildings, products, byName };
-    ixCache.set(catalog, ix);
-    return ix;
-  }
-  const pname = (ix, id) => ix.items.get(id)?.name ?? 'item ' + id;
-  const focusName = (c) => FOCUS[c] ?? 'focus ' + c;
-  const tierLabel = (t) => 'Tier ' + (TIERS[t]?.name ?? t);
-  // Project time left: remaining is in ticks, 2 per second.
-  function fmtLeft(ticks) {
-    const m = Math.ceil(ticks / 120);
-    if (!(m >= 1)) return '<1m';
-    return m >= 60 ? Math.floor(m / 60) + 'h' + (m % 60 ? ' ' + (m % 60) + 'm' : '') : m + 'm';
-  }
-  function rewardText(rw) {
-    if (rw == null || rw === '') return '';
-    let s = '';
-    try { s = typeof rw === 'string' ? rw : JSON.stringify(rw); } catch { return ''; }
-    return s.length > 80 ? s.slice(0, 79) + '…' : s;
-  }
-
-  // Region ids the state mentions, ascending.
-  function regionIds(st) {
-    const ids = new Set(Object.keys(st.building_pool ?? {}).map(Number));
-    for (const g of Object.values(st.groups ?? {})) ids.add(g.region ?? 0);
-    return [...ids].filter(Number.isInteger).sort((a, b) => a - b);
-  }
-  // Labs in a region: the unassigned pool plus every Lab group there.
-  function labsIn(st, region) {
-    let n = st.building_pool?.[region]?.[LAB] ?? 0;
-    for (const g of Object.values(st.groups ?? {})) if (g.building === LAB && (g.region ?? 0) === region) n += g.count ?? 0;
-    return n;
-  }
-  // The project holding a region's Lab slot, or null. Construction research ({ building, remaining }) is a different slot.
-  function slotOf(st, region) {
-    const m = st.mfg_research?.[String(region)];
-    if (m != null) return m;
-    if (region === 0 && st.research?.product != null) return st.research;   // old saves keep a Heartland project in the construction slot
-    return (st.research_queue ?? []).find((q) => q?.product != null && q.region === region) ?? null;
-  }
-  // Insightful module quirks installed in Lab groups: +pct each.
-  function insightful(st) {
-    let pct = 0;
-    for (const g of Object.values(st.groups ?? {})) {
-      if (g.building !== LAB) continue;
-      for (const m of Object.values(g.modules ?? {})) {
-        const def = st.module_defs?.[m && typeof m === 'object' ? m.id : m];
-        for (const q of def?.quirks ?? []) if (q?.kind === 'Insightful') pct += Number(q.pct) || 0;
-      }
+  (() => {
+    const W = typeof window !== 'undefined' ? window : globalThis;
+    const core = W.idleCore;
+    if (!core) throw new Error('the shared core did not load');
+    const HAS_DOM = typeof document !== 'undefined' && !!document.body;
+    const store = (() => { try { return W.localStorage ?? null; } catch { return null; } })();
+    const KEY = 'labRunner.v1';
+    const TAG = 'LAB';
+    if (W.labRunner) {
+      // Replace a previous copy without letting it overwrite the saved state.
+      if (W.labRunner._unload) W.labRunner._unload();
+      else { W.labRunner.stop(); W.labRunner.panel(false); }
     }
-    return pct;
-  }
-  const successPct = (tier, focus, bonus) => Math.min(95, Math.floor((TIERS[tier].base - 5 * focus) * (100 + bonus) / 100));
 
-  // Items the unpaused groups make now (output of each group's current recipe) that the Lab accepts, with what that output is
-  // worth per tick at base value (cents): item -> value.
-  function produced(st, ix) {
-    const out = new Map();
-    for (const g of Object.values(st.groups ?? {})) {
-      if (g.recipe == null || !(g.count > 0) || g.paused) continue;
-      const rc = ix.recipes.get(g.recipe);
-      for (const o of rc?.outputs ?? []) {
-        if (ix.products.has(o.item)) out.set(o.item, (out.get(o.item) ?? 0) + (ix.products.get(o.item).base_value || 0) * (o.amount || 0) * g.count / Math.max(1, rc.ticks || 1));
-      }
+    // ---- game facts (read from the live client) -----------------------------------------------
+    const LAB = 14;                          // Manufacturing Lab (building id)
+    const MD = 25, RD = 26;                  // Manufacturing Data, Research Data: global, st.items
+    const CATALYST = 63;                     // Research Catalyst: regional, st.stock[region]
+    // Wire tier 0..2 = Tier I..III. md / rd are paid from st.items, cat from the project's region.
+    const TIERS = [
+      { name: 'I', base: 90, md: 1000, rd: 0, cat: 0 },
+      { name: 'II', base: 70, md: 10000, rd: 5, cat: 0 },
+      { name: 'III', base: 50, md: 100000, rd: 0, cat: 1 },
+    ];
+    const FOCUS = ['Process study', 'Module fabrication', 'Quality engineering'];   // StartResearch.context
+    const REGION_NAMES = ['Heartland', 'Industrial Basin', 'Coastal Cities', 'Frontier'];
+    const regionName = (r) => REGION_NAMES[r] ?? 'Region ' + r;
+    const LIST_MAX = 50;
+    const MAX_FAILS = 5;                     // sends (or errors) in a row before the run stops itself
+
+    // ---- settings -----------------------------------------------------------------------------
+    const MODE_IDS = ['process', 'modules', 'list'];
+    const cfg = {
+      mode: 'process',       // 'process' (focus 0) | 'modules' (focus 1) | 'list' (your own list)
+      tierMode: 'best',      // 'best' (Tier I; a higher tier only out of surplus MD, see richOk) | 1 | 2 | 3 (that tier only: waits, never falls back)
+      mdReserve: 5000,       // MD never spent below this
+      autoClaim: true,       // claim finished results
+      keepLive: true,       // a Live run that was still running when the page reloaded starts Live again (off: it stays stopped)
+      dryRun: false,         // log "would send ..." instead of sending (session-only: never remembered or imported)
+      list: [],              // [{ product, focus: 0 | 1 | 2, tier: 'default' | 1 | 2 | 3 }], cycled in order
+      intervalMs: 10000,     // look this often
+      delayMs: 500,          // look again this soon after sending something
+      jitterMinMs: 150,      // random extra wait before each command (min)
+      jitterMaxMs: 900,      // random extra wait before each command (max)
+      timeoutMs: 8000,       // max wait for the server to confirm a command
+    };
+    const clone = (v) => JSON.parse(JSON.stringify(v));
+    const DEFAULTS = clone(cfg);
+    const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
+    const validEntry = (e) => !!e && typeof e === 'object' && Number.isInteger(e.product) && e.product >= 0
+      && [0, 1, 2].includes(e.focus) && (e.tier === 'default' || [1, 2, 3].includes(e.tier));
+    const VALID = {
+      mode: (v) => MODE_IDS.includes(v),
+      tierMode: (v) => v === 'best' || v === 1 || v === 2 || v === 3,
+      mdReserve: (v) => isNum(v) && v >= 0,
+      autoClaim: (v) => typeof v === 'boolean',
+      keepLive: (v) => typeof v === 'boolean',
+      list: (v) => Array.isArray(v) && v.length <= LIST_MAX && v.every(validEntry),
+      intervalMs: (v) => isNum(v) && v >= 500 && v <= 600000,
+      delayMs: (v) => isNum(v) && v >= 0 && v <= 60000,
+      jitterMinMs: (v) => isNum(v) && v >= 0 && v <= 60000,
+      jitterMaxMs: (v) => isNum(v) && v >= 0 && v <= 60000,
+      timeoutMs: (v) => isNum(v) && v >= 500 && v <= 120000,
+    };
+    const entryOf = (e) => ({ product: e.product, focus: e.focus, tier: e.tier });
+    const take = (k, v) => (k === 'list' ? v.map(entryOf) : clone(v));   // a validated value, kept as a private copy (list entries: known fields only)
+
+    // ---- persistence: settings, and what this runner has already done -------------------------------
+    const SESSION_ONLY = ['dryRun'];
+    const persistable = () => clone(Object.fromEntries(Object.entries(cfg).filter(([k]) => !SESSION_ONLY.includes(k))));
+    let saved = {};
+    try { saved = JSON.parse(store?.getItem(KEY) || '{}') ?? {}; } catch { }
+    for (const [k, v] of Object.entries(saved.cfg || {})) if (k in cfg && !SESSION_ONLY.includes(k) && VALID[k]?.(v)) cfg[k] = take(k, v);
+    // counts: projects started per product (what the Process / Modules pick rotates on); next: the next custom-list entry.
+    const mem = { counts: {}, next: 0 };
+    for (const [k, v] of Object.entries(saved.mem?.counts || {})) if (Number.isInteger(+k) && isNum(v) && v > 0) mem.counts[k] = v;
+    if (Number.isInteger(saved.mem?.next) && saved.mem.next >= 0) mem.next = saved.mem.next;
+
+    let unloaded = false;
+    function save() {
+      if (unloaded) return;
+      // live: a Live run is going (cleared when it stops; a reload does not stop it), for cfg.keepLive.
+      try { store?.setItem(KEY, JSON.stringify({ cfg: persistable(), mem, live: running && !cfg.dryRun })); } catch { }
     }
-    return out;
-  }
-  // Project hours for a product: clamp(4 x its fastest input-using recipe, 1 h, 12 h) (wiki research.md, Duration).
-  function projectHours(ix, id) {
-    let t = Infinity;
-    for (const r of ix.recipes.values()) if (r.inputs?.length && (r.outputs ?? []).some((o) => o.item === id) && r.ticks > 0) t = Math.min(t, r.ticks);
-    return Math.min(12, Math.max(1, Number.isFinite(t) ? 4 * t / 7200 : 1));
-  }
-  // Which project comes next: { product, focus, tier: 'default' | 1 | 2 | 3, index? } or { wait }.
-  function pick(st, ix, c, counts, next) {
-    if (c.mode === 'list') {
-      const n = c.list.length;
-      if (!n) return { wait: 'the custom list is empty' };
-      const from = Number.isInteger(next) && next >= 0 ? next % n : 0;
-      for (let k = 0; k < n; k++) {
-        const i = (from + k) % n, e = c.list[i];
-        if (e && ix.products.has(e.product) && FOCUS[e.focus] && (e.tier === 'default' || TIERS[e.tier - 1])) return { product: e.product, focus: e.focus, tier: e.tier, index: i };
-      }
-      return { wait: 'no list entry is a qualifying product' };
+
+    // ---- the Lab, as the game state shows it ---------------------------------------------------
+    const fmt = (x) => Number(x).toLocaleString('en-US', { maximumFractionDigits: 2 });
+    const asMap = (x) => (Array.isArray(x) ? new Map(x.map((o) => [o.id, o])) : new Map(Object.entries(x ?? {}).map(([k, o]) => [+k, o])));
+    const ixCache = new WeakMap();
+    // Catalog lookups, built once per catalog object. products = what the Lab's picker lists: base value above 0,
+    // not a floor piece, and some recipe makes it from inputs (extraction doesn't count).
+    function index(catalog) {
+      let ix = ixCache.get(catalog);
+      if (ix) return ix;
+      const items = asMap(catalog.items), recipes = asMap(catalog.recipes), buildings = asMap(catalog.buildings);
+      const fromInputs = new Set();
+      for (const r of recipes.values()) if (r.inputs?.length > 0) for (const o of r.outputs ?? []) fromInputs.add(o.item);
+      const products = new Map();
+      for (const [id, it] of items) if (it.base_value > 0 && !it.floor_piece && fromInputs.has(id)) products.set(id, it);
+      const byName = [...products.values()].sort((a, b) => String(a.name).localeCompare(String(b.name)));
+      ix = { items, recipes, buildings, products, byName };
+      ixCache.set(catalog, ix);
+      return ix;
     }
-    const focus = c.mode === 'modules' ? 1 : 0;
-    const made = produced(st, ix), pool = [...made.keys()];
-    if (!pool.length) {
-      // Module fabrication doesn't care which product; Process study needs one the corp actually makes.
-      const top = focus === 1 ? [...ix.products.values()].sort((a, b) => b.base_value - a.base_value || a.id - b.id)[0] : null;
-      return top ? { product: top.id, focus, tier: 'default' } : { wait: 'no produced product qualifies' };
+    const pname = (ix, id) => ix.items.get(id)?.name ?? 'item ' + id;
+    const focusName = (c) => FOCUS[c] ?? 'focus ' + c;
+    const tierLabel = (t) => 'Tier ' + (TIERS[t]?.name ?? t);
+    // Project time left: remaining is in ticks, 2 per second.
+    function fmtLeft(ticks) {
+      const m = Math.ceil(ticks / 120);
+      if (!(m >= 1)) return '<1m';
+      return m >= 60 ? Math.floor(m / 60) + 'h' + (m % 60 ? ' ' + (m % 60) + 'm' : '') : m + 'm';
     }
-    // The most output value the corp makes per project hour; each project already started on a product divides its score
-    // (1 / (1 + started)), so the pick still rotates instead of studying one product forever.
-    const score = (id) => (made.get(id) || 0) / projectHours(ix, id) / (1 + (counts[id] ?? 0));
-    pool.sort((a, b) => score(b) - score(a) || a - b);
-    return { product: pool[0], focus, tier: 'default' };
-  }
-  // Why tier t (0-2) can't be paid now ('' = it can): its cost against what is left, with the reserve kept back.
-  function shortfall(t, have, region, reserve) {
-    const k = TIERS[t];
-    if (k.cat && have.cat < k.cat) return `Tier ${k.name} needs a Catalyst in ${regionName(region)}`;
-    if (k.rd && have.rd < k.rd) return `Tier ${k.name} needs ${k.rd} Research Data (have ${fmt(have.rd)})`;
-    if (have.md - k.md < reserve) return `MD ${fmt(have.md)} < ${fmt(k.md)} + reserve ${fmt(reserve)}`;
-    return '';
-  }
-  // 'best' tier: success per MD is 0.09% for Tier I, 0.007% for II, 0.0005% for III (90/1,000, 70/10,000, 50/100,000), so Tier I
-  // gives the most results per MD. A higher tier (rarer results) is taken only when the MD left above the reserve after paying is at
-  // least RICH x its cost, and it can pay its RD / Catalyst (the Catalyst has no other use).
-  const RICH = 10;
-  const richOk = (t, have, region, reserve) => t === 0 || (!shortfall(t, have, region, reserve) && have.md - TIERS[t].md >= reserve + RICH * TIERS[t].md);
-
-  // The next step, from state alone: no I/O, no side effects (the test seam, also what the panel shows).
-  // Returns { msg, kind, reason, ... } for the first thing to send, or { wait } when there is nothing to do,
-  // and in both cases actions (everything that would be sent, in order, each region counting what the
-  // ones before it will have used), regions (one row per region with a Lab) and the totals the panel shows.
-  // Order: claim the oldest finished result, then one StartResearch per region whose slot is free.
-  function decide(st, catalog, cfgIn = cfg, memIn = mem) {
-    const c = { ...DEFAULTS, ...cfgIn };
-    if (!Array.isArray(c.list)) c.list = [];
-    const ix = index(catalog);
-    const ids = regionIds(st);
-    const labs = {};
-    let owned = 0;
-    for (const r of ids) { labs[r] = labsIn(st, r); owned += labs[r]; }
-    const insight = insightful(st);
-    const bonus = owned + insight;
-    const md = st.items?.[MD] ?? 0, rd = st.items?.[RD] ?? 0;
-    const left = { md, rd, cat: {} };
-    const counts = { ...(memIn?.counts ?? {}) };
-    let next = memIn?.next ?? 0;
-    const pending = (st.pending_results ?? []).filter((p) => Number.isFinite(p?.tick)).sort((a, b) => a.tick - b.tick);
-    const actions = [], regions = [];
-
-    if (c.autoClaim && pending.length) {
-      const p = pending[0];
-      const label = `${pname(ix, p.product)} · ${focusName(p.context)} · ${tierLabel(p.tier)}`, reward = rewardText(p.reward);
-      actions.push({ kind: 'claim', key: 'claim:' + p.tick, tick: p.tick, label, reward,
-        msg: { type: 'ClaimResearch', tick: p.tick }, reason: 'claim ' + label + (reward ? ' (' + reward + ')' : '') });
+    function rewardText(rw) {
+      if (rw == null || rw === '') return '';
+      let s = '';
+      try { s = typeof rw === 'string' ? rw : JSON.stringify(rw); } catch { return ''; }
+      return s.length > 80 ? s.slice(0, 79) + '…' : s;
     }
-    for (const r of ids) {
-      if (!labs[r]) continue;
-      const slot = slotOf(st, r);
-      const row = { region: r, name: regionName(r), labs: labs[r], slot, wait: '', start: null, catalyst: st.stock?.[r]?.[CATALYST] ?? 0 };
-      regions.push(row);
-      if (slot) {
-        row.wait = `slot busy: ${pname(ix, slot.product)} ${focusName(slot.context)}, ` + (slot.remaining != null ? fmtLeft(slot.remaining) + ' left' : 'queued');
-        continue;
-      }
-      const p = pick(st, ix, c, counts, next);
-      if (p.wait) { row.wait = p.wait; continue; }
-      const have = { md: left.md, rd: left.rd, cat: left.cat[r] ?? row.catalyst };
-      const setting = p.tier === 'default' ? c.tierMode : p.tier;
-      const best = setting === 'best' || !TIERS[setting - 1];
-      const ladder = best ? [2, 1, 0] : [setting - 1];
-      const tier = ladder.find((t) => !shortfall(t, have, r, c.mdReserve) && (!best || richOk(t, have, r, c.mdReserve)));
-      if (tier === undefined) { row.wait = shortfall(ladder[ladder.length - 1], have, r, c.mdReserve); continue; }
-      const k = TIERS[tier], pct = successPct(tier, p.focus, bonus);
-      const label = `${pname(ix, p.product)} · ${focusName(p.focus)} · Tier ${k.name}`;
-      const a = { kind: 'start', key: 'start:' + r, region: r, regionName: row.name, product: p.product, focus: p.focus, tier, index: p.index, pct, label,
-        msg: { type: 'StartResearch', product: p.product, context: p.focus, tier, region: r },
-        reason: `start ${label} in ${row.name} (${pct}% success)` };
-      row.start = a;
-      actions.push(a);
-      // The next region sees what this one will have used.
-      left.md -= k.md; left.rd -= k.rd; left.cat[r] = have.cat - k.cat;
-      counts[p.product] = (counts[p.product] ?? 0) + 1;
-      if (p.index != null) next = (p.index + 1) % c.list.length;
+
+    // Region ids the state mentions, ascending.
+    function regionIds(st) {
+      const ids = new Set(Object.keys(st.building_pool ?? {}).map(Number));
+      for (const g of Object.values(st.groups ?? {})) ids.add(g.region ?? 0);
+      return [...ids].filter(Number.isInteger).sort((a, b) => a - b);
     }
-    const info = { actions, regions, pending: pending.length, md, rd, labs: owned, insight, bonus };
-    if (actions.length) return { ...actions[0], ...info };
-    const wait = regions.length ? regions.map((x) => (regions.length > 1 ? x.name + ': ' : '') + x.wait).join(' | ') : 'no Manufacturing Lab built yet';
-    return { wait, ...info };
-  }
-
-  // Does the game still look like what this script was written against? Live mode needs it.
-  function checkGame(st, catalog) {
-    const bad = [];
-    const miss = core.missingFields(st, ['groups', 'stock', 'ssi', 'items']);
-    if (miss.length) bad.push('state is missing ' + miss.join(', '));
-    const ix = index(catalog);
-    if (!ix.items.size) bad.push('catalog.items is empty');
-    if (!ix.recipes.size) bad.push('catalog.recipes is empty');
-    if (!/lab/i.test(ix.buildings.get(LAB)?.name ?? '')) bad.push(`building ${LAB} is not the Manufacturing Lab`);
-    for (const [id, word] of [[MD, 'Manufacturing Data'], [RD, 'Research Data'], [CATALYST, 'Catalyst']]) {
-      if (!String(ix.items.get(id)?.name ?? '').includes(word)) bad.push(`item ${id} is not ${word}`);
+    // Labs in a region: the unassigned pool plus every Lab group there.
+    function labsIn(st, region) {
+      let n = st.building_pool?.[region]?.[LAB] ?? 0;
+      for (const g of Object.values(st.groups ?? {})) if (g.building === LAB && (g.region ?? 0) === region) n += g.count ?? 0;
+      return n;
     }
-    if (!ix.products.size) bad.push('no product qualifies for research');
-    return bad;
-  }
-
-// continues the lab closure from lab-1.js (same try / IIFE)
-  // ---- state access -----------------------------------------------------------------------------
-  class ConnError extends Error {}
-
-  function read(fresh = false) {
-    const { ws, st, catalog } = core.walk(fresh);
-    if (!st || !catalog) return null;
-    return { st, catalog, mutTick: st.ssi?.last_user_mutation_tick ?? 0, wsOpen: ws?.readyState === 1, ws };
-  }
-  function mustRead(fresh = false) {
-    const r = read(fresh);
-    if (!r) throw new ConnError('game state not found');
-    return r;
-  }
-  // Why Live must not run right now ('' = fine). Dry runs and the offline tests (no DOM) are never blocked.
-  function liveBlocked() {
-    if (!HAS_DOM || cfg.dryRun) return '';
-    const r = read(true);
-    if (!r) return 'the game state was not found';
-    const bad = checkGame(r.st, r.catalog);
-    return bad.length ? 'the game data no longer looks like what this script expects (' + bad.join('; ') + ')' : '';
-  }
-
-  // ---- sending -----------------------------------------------------------------------------------
-  const sleep = core.sleep;
-  const jitter = () => {
-    const lo = Math.max(0, cfg.jitterMinMs || 0), hi = Math.max(lo, cfg.jitterMaxMs || 0);
-    return sleep(lo + Math.random() * (hi - lo));
-  };
-  // Sleep that stop() (or unload) ends at once.
-  let kick = null;
-  const nap = (ms) => new Promise((res) => {
-    function done() { if (kick === done) kick = null; res(); }
-    kick = done;
-    sleep(ms).then(done);   // core.sleep: socket messages end it on time in a hidden tab
-  });
-  // Sends a command; returns the mutation-Diff count at send time.
-  function send(msg) {
-    const r = mustRead(true);
-    if (!r.wsOpen) throw new ConnError('socket not open');
-    const d = core.markSend(r.mutTick);   // only a later mutation confirms this command
-    r.ws.send(JSON.stringify(msg));
-    return d;
-  }
-  // Waits until the server has applied a player command after this one was sent AND the state shows it.
-  const waitConfirm = (pred, d0) => core.waitConfirm({ read, pred, d0, timeoutMs: cfg.timeoutMs, closed: () => { throw new ConnError('socket closed while waiting'); } });
-  const confirmed = (a) => (a.kind === 'claim'
-    ? (r) => !(r.st.pending_results ?? []).some((p) => p.tick === a.tick)
-    : (r) => slotOf(r.st, a.region) != null);
-
-  // ---- run loop ----------------------------------------------------------------------------------
-  let running = false, active = false, stopReason = '', stopFailed = false, fails = 0, lastNote = '', wouldSig = '';
-  const cool = new Map();   // action key → { n, until }: an action the server didn't apply waits before it is tried again
-  const cooling = (key) => (cool.get(key)?.until ?? 0) > Date.now();
-  const sess = { started: 0, claimed: 0 };
-  const note = (line) => { if (line !== lastNote) { lastNote = line; console.log('[labRunner] ' + line); } };
-
-  const doneText = (a) => (a.kind === 'claim' ? 'claimed ' + a.label + (a.reward ? ': ' + a.reward : '') : `started ${a.label} in ${a.regionName} (${a.pct}% success)`);
-
-  // Dry run: say what would be sent, once per change.
-  function wouldSend(d) {
-    const sig = d.actions.map((a) => JSON.stringify(a.msg)).join('|');
-    if (sig === wouldSig) return;
-    wouldSig = sig;
-    for (const a of d.actions) {
-      const line = 'would send ' + JSON.stringify(a.msg) + ' — ' + a.reason;
-      console.log('[labRunner] ' + line);
-      core.ledger.add(TAG, 'info', line);
+    // The project holding a region's Lab slot, or null. Construction research ({ building, remaining }) is a different slot.
+    function slotOf(st, region) {
+      const m = st.mfg_research?.[String(region)];
+      if (m != null) return m;
+      if (region === 0 && st.research?.product != null) return st.research;   // old saves keep a Heartland project in the construction slot
+      return (st.research_queue ?? []).find((q) => q?.product != null && q.region === region) ?? null;
     }
-  }
-
-  // One look at the game: send the first thing that is due. Returns 'sent' (something went out, confirmed or not) or 'idle'.
-  async function pass() {
-    const r = mustRead();
-    if (!r.wsOpen) throw new ConnError('socket not open');
-    const d = decide(r.st, r.catalog);
-    if (cfg.dryRun) { wouldSend(d); return 'idle'; }
-    if (!d.actions.some((x) => !cooling(x.key))) return 'idle';
-    await jitter();
-    if (!running) return 'idle';
-    // The state may have moved during the wait: decide again on fresh state and send only what is still due.
-    const r2 = mustRead(true);
-    const a = decide(r2.st, r2.catalog).actions.find((x) => !cooling(x.key));
-    if (!a) return 'idle';
-    const d0 = send(a.msg);
-    if (await waitConfirm(confirmed(a), d0)) {
-      fails = 0;
-      cool.delete(a.key);
-      if (a.kind === 'claim') sess.claimed++;
-      else {
-        sess.started++;
-        mem.counts[a.product] = (mem.counts[a.product] ?? 0) + 1;
-        if (a.index != null) mem.next = (a.index + 1) % cfg.list.length;
-      }
-      save();
-      console.log('[labRunner] ' + doneText(a));
-      core.ledger.add(TAG, 'action', doneText(a));
-      return 'sent';
-    }
-    // Not applied: back off on this action (30 s, doubling to 10 min) so it can't hold up the others.
-    const c = cool.get(a.key) ?? { n: 0 };
-    c.n++; c.until = Date.now() + Math.min(600000, 30000 * 2 ** (c.n - 1));
-    cool.set(a.key, c);
-    core.ledger.add(TAG, 'fail', `not confirmed: ${a.reason}; trying again in ${Math.round((c.until - Date.now()) / 1000)} s`);
-    if (++fails >= MAX_FAILS) { stopReason = `${MAX_FAILS} commands in a row were not confirmed`; stopFailed = true; running = false; }
-    return 'sent';
-  }
-
-  async function loop() {
-    active = true;
-    let errors = 0;
-    while (running) {
-      let pause = cfg.intervalMs;
-      try {
-        if ((await pass()) === 'sent') pause = cfg.delayMs;
-        errors = 0;
-      } catch (e) {
-        if (e instanceof ConnError) { note(e.message + ': waiting for the game connection'); pause = 2000; }
-        else {
-          console.warn('[labRunner]', e);
-          core.ledger.add(TAG, 'fail', 'error: ' + e.message);
-          if (++errors >= MAX_FAILS) { stopReason = 'error: ' + e.message; stopFailed = true; running = false; break; }
+    // Insightful module quirks installed in Lab groups: +pct each.
+    function insightful(st) {
+      let pct = 0;
+      for (const g of Object.values(st.groups ?? {})) {
+        if (g.building !== LAB) continue;
+        for (const m of Object.values(g.modules ?? {})) {
+          const def = st.module_defs?.[m && typeof m === 'object' ? m.id : m];
+          for (const q of def?.quirks ?? []) if (q?.kind === 'Insightful') pct += Number(q.pct) || 0;
         }
       }
-      if (running) await nap(pause);
+      return pct;
     }
-    running = false; active = false;
-    if (unloaded) return;
-    save();
-    console.log(`[labRunner] stopped: ${stopReason}`);
-    core.ledger.add(TAG, stopFailed ? 'fail' : 'info', `stopped: ${stopReason}`);
-    if (stopFailed) core.notify(TAG, 'Lab runner stopped', stopReason);
-    render();
-  }
+    const successPct = (tier, focus, bonus) => Math.min(95, Math.floor((TIERS[tier].base - 5 * focus) * (100 + bonus) / 100));
 
-  // ---- control -----------------------------------------------------------------------------------
-  function start(opts = {}) {
-    if (running) return console.warn('[labRunner] already running');
-    if (active) return console.warn('[labRunner] the previous run is still finishing its step; try again in a moment');
-    for (const [k, v] of Object.entries(opts)) {
-      const ok = k === 'dryRun' ? typeof v === 'boolean' : k in cfg && !!VALID[k]?.(v);
-      if (ok) cfg[k] = take(k, v); else console.warn(`[labRunner] ignored ${k}: not a setting, or not a valid value for it`);
+    // Items the unpaused groups make now (output of each group's current recipe) that the Lab accepts, with what that output is
+    // worth per tick at base value (cents): item -> value.
+    function produced(st, ix) {
+      const out = new Map();
+      for (const g of Object.values(st.groups ?? {})) {
+        if (g.recipe == null || !(g.count > 0) || g.paused) continue;
+        const rc = ix.recipes.get(g.recipe);
+        for (const o of rc?.outputs ?? []) {
+          if (ix.products.has(o.item)) out.set(o.item, (out.get(o.item) ?? 0) + (ix.products.get(o.item).base_value || 0) * (o.amount || 0) * g.count / Math.max(1, rc.ticks || 1));
+        }
+      }
+      return out;
     }
-    if (!cfg.dryRun) {
-      const why = liveBlocked();
-      if (why) {
-        cfg.dryRun = true;
-        console.warn('[labRunner] Live refused: ' + why + '. Starting as a dry run.');
-        core.toast('Live refused: the game data changed. Started as a dry run (see the console).', 'error');
-        core.ledger.add(TAG, 'fail', 'Live refused: ' + why);
+    // Project hours for a product: clamp(4 x its fastest input-using recipe, 1 h, 12 h) (wiki research.md, Duration).
+    function projectHours(ix, id) {
+      let t = Infinity;
+      for (const r of ix.recipes.values()) if (r.inputs?.length && (r.outputs ?? []).some((o) => o.item === id) && r.ticks > 0) t = Math.min(t, r.ticks);
+      return Math.min(12, Math.max(1, Number.isFinite(t) ? 4 * t / 7200 : 1));
+    }
+    // Which project comes next: { product, focus, tier: 'default' | 1 | 2 | 3, index? } or { wait }.
+    function pick(st, ix, c, counts, next) {
+      if (c.mode === 'list') {
+        const n = c.list.length;
+        if (!n) return { wait: 'the custom list is empty' };
+        const from = Number.isInteger(next) && next >= 0 ? next % n : 0;
+        for (let k = 0; k < n; k++) {
+          const i = (from + k) % n, e = c.list[i];
+          if (e && ix.products.has(e.product) && FOCUS[e.focus] && (e.tier === 'default' || TIERS[e.tier - 1])) return { product: e.product, focus: e.focus, tier: e.tier, index: i };
+        }
+        return { wait: 'no list entry is a qualifying product' };
+      }
+      const focus = c.mode === 'modules' ? 1 : 0;
+      const made = produced(st, ix), pool = [...made.keys()];
+      if (!pool.length) {
+        // Module fabrication doesn't care which product; Process study needs one the corp actually makes.
+        const top = focus === 1 ? [...ix.products.values()].sort((a, b) => b.base_value - a.base_value || a.id - b.id)[0] : null;
+        return top ? { product: top.id, focus, tier: 'default' } : { wait: 'no produced product qualifies' };
+      }
+      // The most output value the corp makes per project hour; each project already started on a product divides its score
+      // (1 / (1 + started)), so the pick still rotates instead of studying one product forever.
+      const score = (id) => (made.get(id) || 0) / projectHours(ix, id) / (1 + (counts[id] ?? 0));
+      pool.sort((a, b) => score(b) - score(a) || a - b);
+      return { product: pool[0], focus, tier: 'default' };
+    }
+    // Why tier t (0-2) can't be paid now ('' = it can): its cost against what is left, with the reserve kept back.
+    function shortfall(t, have, region, reserve) {
+      const k = TIERS[t];
+      if (k.cat && have.cat < k.cat) return `Tier ${k.name} needs a Catalyst in ${regionName(region)}`;
+      if (k.rd && have.rd < k.rd) return `Tier ${k.name} needs ${k.rd} Research Data (have ${fmt(have.rd)})`;
+      if (have.md - k.md < reserve) return `MD ${fmt(have.md)} < ${fmt(k.md)} + reserve ${fmt(reserve)}`;
+      return '';
+    }
+    // 'best' tier: success per MD is 0.09% for Tier I, 0.007% for II, 0.0005% for III (90/1,000, 70/10,000, 50/100,000), so Tier I
+    // gives the most results per MD. A higher tier (rarer results) is taken only when the MD left above the reserve after paying is at
+    // least RICH x its cost, and it can pay its RD / Catalyst (the Catalyst has no other use).
+    const RICH = 10;
+    const richOk = (t, have, region, reserve) => t === 0 || (!shortfall(t, have, region, reserve) && have.md - TIERS[t].md >= reserve + RICH * TIERS[t].md);
+
+    // The next step, from state alone: no I/O, no side effects (the test seam, also what the panel shows).
+    // Returns { msg, kind, reason, ... } for the first thing to send, or { wait } when there is nothing to do,
+    // and in both cases actions (everything that would be sent, in order, each region counting what the
+    // ones before it will have used), regions (one row per region with a Lab) and the totals the panel shows.
+    // Order: claim the oldest finished result, then one StartResearch per region whose slot is free.
+    function decide(st, catalog, cfgIn = cfg, memIn = mem) {
+      const c = { ...DEFAULTS, ...cfgIn };
+      if (!Array.isArray(c.list)) c.list = [];
+      const ix = index(catalog);
+      const ids = regionIds(st);
+      const labs = {};
+      let owned = 0;
+      for (const r of ids) { labs[r] = labsIn(st, r); owned += labs[r]; }
+      const insight = insightful(st);
+      const bonus = owned + insight;
+      const md = st.items?.[MD] ?? 0, rd = st.items?.[RD] ?? 0;
+      const left = { md, rd, cat: {} };
+      const counts = { ...(memIn?.counts ?? {}) };
+      let next = memIn?.next ?? 0;
+      const pending = (st.pending_results ?? []).filter((p) => Number.isFinite(p?.tick)).sort((a, b) => a.tick - b.tick);
+      const actions = [], regions = [];
+
+      if (c.autoClaim && pending.length) {
+        const p = pending[0];
+        const label = `${pname(ix, p.product)} · ${focusName(p.context)} · ${tierLabel(p.tier)}`, reward = rewardText(p.reward);
+        actions.push({
+          kind: 'claim', key: 'claim:' + p.tick, tick: p.tick, label, reward,
+          msg: { type: 'ClaimResearch', tick: p.tick }, reason: 'claim ' + label + (reward ? ' (' + reward + ')' : '')
+        });
+      }
+      for (const r of ids) {
+        if (!labs[r]) continue;
+        const slot = slotOf(st, r);
+        const row = { region: r, name: regionName(r), labs: labs[r], slot, wait: '', start: null, catalyst: st.stock?.[r]?.[CATALYST] ?? 0 };
+        regions.push(row);
+        if (slot) {
+          row.wait = `slot busy: ${pname(ix, slot.product)} ${focusName(slot.context)}, ` + (slot.remaining != null ? fmtLeft(slot.remaining) + ' left' : 'queued');
+          continue;
+        }
+        const p = pick(st, ix, c, counts, next);
+        if (p.wait) { row.wait = p.wait; continue; }
+        const have = { md: left.md, rd: left.rd, cat: left.cat[r] ?? row.catalyst };
+        const setting = p.tier === 'default' ? c.tierMode : p.tier;
+        const best = setting === 'best' || !TIERS[setting - 1];
+        const ladder = best ? [2, 1, 0] : [setting - 1];
+        const tier = ladder.find((t) => !shortfall(t, have, r, c.mdReserve) && (!best || richOk(t, have, r, c.mdReserve)));
+        if (tier === undefined) { row.wait = shortfall(ladder[ladder.length - 1], have, r, c.mdReserve); continue; }
+        const k = TIERS[tier], pct = successPct(tier, p.focus, bonus);
+        const label = `${pname(ix, p.product)} · ${focusName(p.focus)} · Tier ${k.name}`;
+        const a = {
+          kind: 'start', key: 'start:' + r, region: r, regionName: row.name, product: p.product, focus: p.focus, tier, index: p.index, pct, label,
+          msg: { type: 'StartResearch', product: p.product, context: p.focus, tier, region: r },
+          reason: `start ${label} in ${row.name} (${pct}% success)`
+        };
+        row.start = a;
+        actions.push(a);
+        // The next region sees what this one will have used.
+        left.md -= k.md; left.rd -= k.rd; left.cat[r] = have.cat - k.cat;
+        counts[p.product] = (counts[p.product] ?? 0) + 1;
+        if (p.index != null) next = (p.index + 1) % c.list.length;
+      }
+      const info = { actions, regions, pending: pending.length, md, rd, labs: owned, insight, bonus };
+      if (actions.length) return { ...actions[0], ...info };
+      const wait = regions.length ? regions.map((x) => (regions.length > 1 ? x.name + ': ' : '') + x.wait).join(' | ') : 'no Manufacturing Lab built yet';
+      return { wait, ...info };
+    }
+
+    // Does the game still look like what this script was written against? Live mode needs it.
+    function checkGame(st, catalog) {
+      const bad = [];
+      const miss = core.missingFields(st, ['groups', 'stock', 'ssi', 'items']);
+      if (miss.length) bad.push('state is missing ' + miss.join(', '));
+      const ix = index(catalog);
+      if (!ix.items.size) bad.push('catalog.items is empty');
+      if (!ix.recipes.size) bad.push('catalog.recipes is empty');
+      if (!/lab/i.test(ix.buildings.get(LAB)?.name ?? '')) bad.push(`building ${LAB} is not the Manufacturing Lab`);
+      for (const [id, word] of [[MD, 'Manufacturing Data'], [RD, 'Research Data'], [CATALYST, 'Catalyst']]) {
+        if (!String(ix.items.get(id)?.name ?? '').includes(word)) bad.push(`item ${id} is not ${word}`);
+      }
+      if (!ix.products.size) bad.push('no product qualifies for research');
+      return bad;
+    }
+
+// continues the lab closure from lab-1.js (same try / IIFE)
+// ---- state access -----------------------------------------------------------------------------
+class ConnError extends Error { }
+
+function read(fresh = false) {
+  const { ws, st, catalog } = core.walk(fresh);
+  if (!st || !catalog) return null;
+  return { st, catalog, mutTick: st.ssi?.last_user_mutation_tick ?? 0, wsOpen: ws?.readyState === 1, ws };
+}
+function mustRead(fresh = false) {
+  const r = read(fresh);
+  if (!r) throw new ConnError('game state not found');
+  return r;
+}
+// Why Live must not run right now ('' = fine). Dry runs and the offline tests (no DOM) are never blocked.
+function liveBlocked() {
+  if (!HAS_DOM || cfg.dryRun) return '';
+  const r = read(true);
+  if (!r) return 'the game state was not found';
+  const bad = checkGame(r.st, r.catalog);
+  return bad.length ? 'the game data no longer looks like what this script expects (' + bad.join('; ') + ')' : '';
+}
+
+// ---- sending -----------------------------------------------------------------------------------
+const sleep = core.sleep;
+const jitter = () => {
+  const lo = Math.max(0, cfg.jitterMinMs || 0), hi = Math.max(lo, cfg.jitterMaxMs || 0);
+  return sleep(lo + Math.random() * (hi - lo));
+};
+// Sleep that stop() (or unload) ends at once.
+let kick = null;
+const nap = (ms) => new Promise((res) => {
+  function done() { if (kick === done) kick = null; res(); }
+  kick = done;
+  sleep(ms).then(done);   // core.sleep: socket messages end it on time in a hidden tab
+});
+// Sends a command; returns the mutation-Diff count at send time.
+function send(msg) {
+  const r = mustRead(true);
+  if (!r.wsOpen) throw new ConnError('socket not open');
+  const d = core.markSend(r.mutTick);   // only a later mutation confirms this command
+  r.ws.send(JSON.stringify(msg));
+  return d;
+}
+// Waits until the server has applied a player command after this one was sent AND the state shows it.
+const waitConfirm = (pred, d0) => core.waitConfirm({ read, pred, d0, timeoutMs: cfg.timeoutMs, closed: () => { throw new ConnError('socket closed while waiting'); } });
+const confirmed = (a) => (a.kind === 'claim'
+  ? (r) => !(r.st.pending_results ?? []).some((p) => p.tick === a.tick)
+  : (r) => slotOf(r.st, a.region) != null);
+
+// ---- run loop ----------------------------------------------------------------------------------
+let running = false, active = false, stopReason = '', stopFailed = false, fails = 0, lastNote = '', wouldSig = '';
+const cool = new Map();   // action key → { n, until }: an action the server didn't apply waits before it is tried again
+const cooling = (key) => (cool.get(key)?.until ?? 0) > Date.now();
+const sess = { started: 0, claimed: 0 };
+const note = (line) => { if (line !== lastNote) { lastNote = line; console.log('[labRunner] ' + line); } };
+
+const doneText = (a) => (a.kind === 'claim' ? 'claimed ' + a.label + (a.reward ? ': ' + a.reward : '') : `started ${a.label} in ${a.regionName} (${a.pct}% success)`);
+
+// Dry run: say what would be sent, once per change.
+function wouldSend(d) {
+  const sig = d.actions.map((a) => JSON.stringify(a.msg)).join('|');
+  if (sig === wouldSig) return;
+  wouldSig = sig;
+  for (const a of d.actions) {
+    const line = 'would send ' + JSON.stringify(a.msg) + ' — ' + a.reason;
+    console.log('[labRunner] ' + line);
+    core.ledger.add(TAG, 'info', line);
+  }
+}
+
+// One look at the game: send the first thing that is due. Returns 'sent' (something went out, confirmed or not) or 'idle'.
+async function pass() {
+  const r = mustRead();
+  if (!r.wsOpen) throw new ConnError('socket not open');
+  const d = decide(r.st, r.catalog);
+  if (cfg.dryRun) { wouldSend(d); return 'idle'; }
+  if (!d.actions.some((x) => !cooling(x.key))) return 'idle';
+  await jitter();
+  if (!running) return 'idle';
+  // The state may have moved during the wait: decide again on fresh state and send only what is still due.
+  const r2 = mustRead(true);
+  const a = decide(r2.st, r2.catalog).actions.find((x) => !cooling(x.key));
+  if (!a) return 'idle';
+  const d0 = send(a.msg);
+  if (await waitConfirm(confirmed(a), d0)) {
+    fails = 0;
+    cool.delete(a.key);
+    if (a.kind === 'claim') sess.claimed++;
+    else {
+      sess.started++;
+      mem.counts[a.product] = (mem.counts[a.product] ?? 0) + 1;
+      if (a.index != null) mem.next = (a.index + 1) % cfg.list.length;
+    }
+    save();
+    console.log('[labRunner] ' + doneText(a));
+    core.ledger.add(TAG, 'action', doneText(a));
+    return 'sent';
+  }
+  // Not applied: back off on this action (30 s, doubling to 10 min) so it can't hold up the others.
+  const c = cool.get(a.key) ?? { n: 0 };
+  c.n++; c.until = Date.now() + Math.min(600000, 30000 * 2 ** (c.n - 1));
+  cool.set(a.key, c);
+  core.ledger.add(TAG, 'fail', `not confirmed: ${a.reason}; trying again in ${Math.round((c.until - Date.now()) / 1000)} s`);
+  if (core.link().state === 'open' && ++fails >= MAX_FAILS) { fails = 0; core.ledger.add(TAG, 'fail', `${MAX_FAILS} commands in a row were not confirmed: the run goes on, each command on its own backoff`); }
+  return 'sent';
+}
+
+async function loop() {
+  active = true;
+  let errors = 0;
+  while (running) {
+    let pause = cfg.intervalMs;
+    try {
+      if ((await pass()) === 'sent') pause = cfg.delayMs;
+      errors = 0;
+    } catch (e) {
+      if (e instanceof ConnError) { note(e.message + ': waiting for the game connection'); pause = 2000; }
+      else {
+        console.warn('[labRunner]', e);
+        core.ledger.add(TAG, 'fail', 'error: ' + e.message);
+        if (++errors >= MAX_FAILS) { errors = 0; pause = 600000; core.ledger.add(TAG, 'fail', `${MAX_FAILS} errors in a row: the run pauses 10 min, then goes on`); }
       }
     }
-    running = true; stopReason = ''; stopFailed = false; fails = 0; lastNote = ''; wouldSig = '';
-    cool.clear(); sess.started = sess.claimed = 0;
-    save();
-    console.log(`[labRunner] start (${cfg.dryRun ? 'DRY RUN: start({ dryRun: false }) to send' : 'LIVE'})`);
-    core.ledger.add(TAG, 'info', `started (${cfg.dryRun ? 'dry run' : 'live'}): ${cfg.mode === 'list' ? 'custom list' : cfg.mode === 'modules' ? 'module fabrication' : 'process study'}, ${cfg.tierMode === 'best' ? 'best value tier' : 'Tier ' + TIERS[cfg.tierMode - 1].name}, keeps ${fmt(cfg.mdReserve)} MD`);
-    loop();
-    render();
+    if (running) await nap(pause);
   }
+  running = false; active = false;
+  if (unloaded) return;
+  save();
+  console.log(`[labRunner] stopped: ${stopReason}`);
+  core.ledger.add(TAG, stopFailed ? 'fail' : 'info', `stopped: ${stopReason}`);
+  if (stopFailed) core.notify(TAG, 'Lab runner stopped', stopReason);
+  render();
+}
 
-  function stop() {
-    if (running) { stopReason = 'stopped by you'; console.log('[labRunner] stopping'); }
-    running = false;
-    kick?.();
-    render();
+// ---- control -----------------------------------------------------------------------------------
+function start(opts = {}) {
+  if (running) return console.warn('[labRunner] already running');
+  if (active) return console.warn('[labRunner] the previous run is still finishing its step; try again in a moment');
+  for (const [k, v] of Object.entries(opts)) {
+    const ok = k === 'dryRun' ? typeof v === 'boolean' : k in cfg && !!VALID[k]?.(v);
+    if (ok) cfg[k] = take(k, v); else console.warn(`[labRunner] ignored ${k}: not a setting, or not a valid value for it`);
   }
-
-  // Settings out and in (the toolkit's Export / Import). dryRun is never exported or imported.
-  function exportCfg() { return { cfg: persistable() }; }
-  function importCfg(o) {
-    if (running && !cfg.dryRun) throw new Error('stop the live run first');
-    const applied = [], skipped = [];
-    for (const [k, v] of Object.entries(o?.cfg ?? {})) {
-      if (k in cfg && !SESSION_ONLY.includes(k) && VALID[k]?.(v)) { cfg[k] = take(k, v); applied.push(k); } else skipped.push(k);
+  if (!cfg.dryRun) {
+    const why = liveBlocked();
+    if (why) {
+      cfg.dryRun = true;
+      console.warn('[labRunner] Live refused: ' + why + '. Starting as a dry run.');
+      core.toast('Live refused: the game data changed. Started as a dry run (see the console).', 'error');
+      core.ledger.add(TAG, 'fail', 'Live refused: ' + why);
     }
-    save(); render();
-    return { applied, skipped };
   }
-  function resetCfg() {
-    if (running && !cfg.dryRun) throw new Error('stop the live run first');
-    for (const k of Object.keys(DEFAULTS)) if (!SESSION_ONLY.includes(k)) cfg[k] = clone(DEFAULTS[k]);
-    save(); render();
-  }
+  running = true; stopReason = ''; stopFailed = false; fails = 0; lastNote = ''; wouldSig = '';
+  cool.clear(); sess.started = sess.claimed = 0;
+  save();
+  console.log(`[labRunner] start (${cfg.dryRun ? 'DRY RUN: start({ dryRun: false }) to send' : 'LIVE'})`);
+  core.ledger.add(TAG, 'info', `started (${cfg.dryRun ? 'dry run' : 'live'}): ${cfg.mode === 'list' ? 'custom list' : cfg.mode === 'modules' ? 'module fabrication' : 'process study'}, ${cfg.tierMode === 'best' ? 'best value tier' : 'Tier ' + TIERS[cfg.tierMode - 1].name}, keeps ${fmt(cfg.mdReserve)} MD`);
+  loop();
+  render();
+}
 
-  // ---- what the panel and status() show -------------------------------------------------------------
-  const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
-  const slotLine = (ix, p) => `${pname(ix, p.product)} · ${focusName(p.context)} · ${tierLabel(p.tier)} · ` + (p.remaining != null ? fmtLeft(p.remaining) + ' left' : 'queued');
+function stop() {
+  if (running) { stopReason = 'stopped by you'; console.log('[labRunner] stopping'); }
+  running = false;
+  kick?.();
+  render();
+}
 
-  function summary(r) {
-    const d = decide(r.st, r.catalog);
-    const ix = index(r.catalog);
-    const rows = d.regions.map((x) => ({ name: x.name, busy: !!x.slot, catalyst: x.catalyst, text: x.slot ? slotLine(ix, x.slot) : x.start ? 'ready: ' + x.start.label : x.wait }));
-    return { d, ix, rows, busy: rows.filter((x) => x.busy).length, total: rows.length };
+// Settings out and in (the toolkit's Export / Import). dryRun is never exported or imported.
+function exportCfg() { return { cfg: persistable() }; }
+function importCfg(o) {
+  if (running && !cfg.dryRun) throw new Error('stop the live run first');
+  const applied = [], skipped = [];
+  for (const [k, v] of Object.entries(o?.cfg ?? {})) {
+    if (k in cfg && !SESSION_ONLY.includes(k) && VALID[k]?.(v)) { cfg[k] = take(k, v); applied.push(k); } else skipped.push(k);
   }
-  // Success chance for the current setting, as the client works it out (no Research Database bonus: the state doesn't say).
-  function successInfo(r, sum) {
-    const d = sum.d;
-    const p = cfg.mode === 'list' ? pick(r.st, sum.ix, cfg, mem.counts, mem.next) : null;
-    const focus = p && !p.wait ? p.focus : cfg.mode === 'modules' ? 1 : 0;
-    const setting = p && !p.wait && p.tier !== 'default' ? p.tier : cfg.tierMode;
-    const pct = (t) => successPct(t, focus, d.bonus);
-    const fixed = TIERS[setting - 1];
-    return {
-      text: fixed ? `${pct(setting - 1)}% (Tier ${fixed.name})` : 'Tier ' + TIERS.map((k, t) => `${k.name} ${pct(t)}%`).join(' · '),
-      note: `${focusName(focus)}; bonus +${d.bonus}% (${d.labs} Lab${d.labs === 1 ? '' : 's'}${d.insight ? ` + ${d.insight}% Insightful` : ''}). Leaves out the Research Database megaproject bonus (+10).`,
-    };
-  }
-  // 'run' | 'wait' | 'err' | '' for the status dot.
-  function tone() {
-    if (running) return cfg.dryRun ? 'wait' : 'run';
-    return stopFailed ? 'err' : '';
-  }
-  function stateText(sum) {
-    if (running) {
-      const d = sum?.d;
-      const next = !d ? 'running' : d.actions.length ? 'next: ' + d.actions[0].reason : 'waiting: ' + d.wait;
-      return (cfg.dryRun ? 'Dry run. ' : '') + cap(next);
-    }
-    return stopReason ? 'Stopped: ' + stopReason : 'Idle. Press Start.';
-  }
+  save(); render();
+  return { applied, skipped };
+}
+function resetCfg() {
+  if (running && !cfg.dryRun) throw new Error('stop the live run first');
+  for (const k of Object.keys(DEFAULTS)) if (!SESSION_ONLY.includes(k)) cfg[k] = clone(DEFAULTS[k]);
+  save(); render();
+}
 
-  function status() {
-    const r = read();
-    if (!r) return console.error('[labRunner] game state not found');
-    const sum = summary(r), info = successInfo(r, sum), t = {};
-    if (sum.total) for (const x of sum.rows) t[x.name] = x.text; else t.Labs = 'none built yet';
-    t['Results waiting'] = sum.d.pending + (cfg.autoClaim ? '' : ' (auto-claim off)');
-    t.MD = `${fmt(sum.d.md)} (keeps ${fmt(cfg.mdReserve)})`;
-    t.RD = fmt(sum.d.rd);
-    t.Catalyst = sum.rows.map((x) => `${x.name} ${fmt(x.catalyst)}`).join(', ') || '-';
-    t.Success = info.text + ' · ' + info.note;
-    t.State = stateText(sum);
-    console.table(t);
+// ---- what the panel and status() show -------------------------------------------------------------
+const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+const slotLine = (ix, p) => `${pname(ix, p.product)} · ${focusName(p.context)} · ${tierLabel(p.tier)} · ` + (p.remaining != null ? fmtLeft(p.remaining) + ' left' : 'queued');
+
+function summary(r) {
+  const d = decide(r.st, r.catalog);
+  const ix = index(r.catalog);
+  const rows = d.regions.map((x) => ({ name: x.name, busy: !!x.slot, catalyst: x.catalyst, text: x.slot ? slotLine(ix, x.slot) : x.start ? 'ready: ' + x.start.label : x.wait }));
+  return { d, ix, rows, busy: rows.filter((x) => x.busy).length, total: rows.length };
+}
+// Success chance for the current setting, as the client works it out (no Research Database bonus: the state doesn't say).
+function successInfo(r, sum) {
+  const d = sum.d;
+  const p = cfg.mode === 'list' ? pick(r.st, sum.ix, cfg, mem.counts, mem.next) : null;
+  const focus = p && !p.wait ? p.focus : cfg.mode === 'modules' ? 1 : 0;
+  const setting = p && !p.wait && p.tier !== 'default' ? p.tier : cfg.tierMode;
+  const pct = (t) => successPct(t, focus, d.bonus);
+  const fixed = TIERS[setting - 1];
+  return {
+    text: fixed ? `${pct(setting - 1)}% (Tier ${fixed.name})` : 'Tier ' + TIERS.map((k, t) => `${k.name} ${pct(t)}%`).join(' · '),
+    note: `${focusName(focus)}; bonus +${d.bonus}% (${d.labs} Lab${d.labs === 1 ? '' : 's'}${d.insight ? ` + ${d.insight}% Insightful` : ''}). Leaves out the Research Database megaproject bonus (+10).`,
+  };
+}
+// 'run' | 'wait' | 'err' | '' for the status dot.
+function tone() {
+  if (running) return cfg.dryRun ? 'wait' : 'run';
+  return stopFailed ? 'err' : '';
+}
+function stateText(sum) {
+  if (running) {
+    const d = sum?.d;
+    const next = !d ? 'running' : d.actions.length ? 'next: ' + d.actions[0].reason : 'waiting: ' + d.wait;
+    return (cfg.dryRun ? 'Dry run. ' : '') + cap(next);
   }
+  return stopReason ? 'Stopped: ' + stopReason : 'Idle. Press Start.';
+}
+
+function status() {
+  const r = read();
+  if (!r) return console.error('[labRunner] game state not found');
+  const sum = summary(r), info = successInfo(r, sum), t = {};
+  if (sum.total) for (const x of sum.rows) t[x.name] = x.text; else t.Labs = 'none built yet';
+  t['Results waiting'] = sum.d.pending + (cfg.autoClaim ? '' : ' (auto-claim off)');
+  t.MD = `${fmt(sum.d.md)} (keeps ${fmt(cfg.mdReserve)})`;
+  t.RD = fmt(sum.d.rd);
+  t.Catalyst = sum.rows.map((x) => `${x.name} ${fmt(x.catalyst)}`).join(', ') || '-';
+  t.Success = info.text + ' · ' + info.note;
+  t.State = stateText(sum);
+  console.table(t);
+}
 
 // continues the lab closure from lab-2.js (same try / IIFE)
   // ---- game UI -------------------------------------------------------------------------------------
@@ -4210,31 +4221,31 @@ try {
     removeEventListener('resize', onResize);
   }
 // continues the lab closure from lab-3.js (same try / IIFE)
-  // ---- load ----------------------------------------------------------------------------------------
+// ---- load ----------------------------------------------------------------------------------------
 
-  W.labRunner = {
-    start, stop, status, panel, read, cfg, exportCfg, importCfg, resetCfg,
-    get running() { return running; },
-    get active() { return active; },        // a run is still executing (maybe finishing a step after stop())
-    get stopReason() { return stopReason; },
-    get mem() { return mem; },
-    // Pure decision for the tests: no I/O, no side effects.
-    _decide: decide,
-    _unload: () => { unloaded = true; running = false; kick?.(); if (HAS_DOM) unmountUi(); },
-  };
+W.labRunner = {
+  start, stop, status, panel, read, cfg, exportCfg, importCfg, resetCfg,
+  get running() { return running; },
+  get active() { return active; },        // a run is still executing (maybe finishing a step after stop())
+  get stopReason() { return stopReason; },
+  get mem() { return mem; },
+  // Pure decision for the tests: no I/O, no side effects.
+  _decide: decide,
+  _unload: () => { unloaded = true; running = false; kick?.(); if (HAS_DOM) unmountUi(); },
+};
 
-  // Wait for the game to render and connect before mounting.
-  if (HAS_DOM) (async () => {
-    while (!document.querySelector('.primary-navigation') || !read()) {
-      if (unloaded) return;
-      await sleep(500);
-    }
+// Wait for the game to render and connect before mounting.
+if (HAS_DOM) (async () => {
+  while (!document.querySelector('.primary-navigation') || !read()) {
     if (unloaded) return;
-    mountUi();
-    if (cfg.keepLive && saved.live === true && !running) start({ dryRun: false });   // start() still refuses Live when the game data changed
-    console.log('[labRunner] ready (dry run by default). Open "Lab" in the sidebar, or labRunner.status() / labRunner.start()');
-  })();
+    await sleep(500);
+  }
+  if (unloaded) return;
+  mountUi();
+  if (cfg.keepLive && saved.live === true && !running) start({ dryRun: false });   // start() still refuses Live when the game data changed
+  console.log('[labRunner] ready (live by default). Open "Lab" in the sidebar, or labRunner.status() / labRunner.start() (live) / labRunner.start({ dryRun: true })');
 })();
+}) ();
 } catch (e) { console.error('[IdleCorp] Lab runner failed to load:', e); }
 // @@END lab
 
@@ -4269,274 +4280,275 @@ try {
 // sells the same item, pick "Keep in stock" so both leave enough. Alt+Shift+X stops every job.
 // @@MODULE autosell
 try {
-(() => {
-  const W = typeof window !== 'undefined' ? window : globalThis;
-  const core = W.idleCore;
-  if (!core) throw new Error('the shared core did not load');
-  const HAS_DOM = typeof document !== 'undefined' && !!document.body;
-  const store = (() => { try { return W.localStorage ?? null; } catch { return null; } })();
-  const KEY = 'autoSell.v1';
-  const TAG = 'AS';
-  if (W.autoSell?._unload) W.autoSell._unload();
-  let unloaded = false;
-  const sleep = core.sleep;
+  (() => {
+    const W = typeof window !== 'undefined' ? window : globalThis;
+    const core = W.idleCore;
+    if (!core) throw new Error('the shared core did not load');
+    const HAS_DOM = typeof document !== 'undefined' && !!document.body;
+    const store = (() => { try { return W.localStorage ?? null; } catch { return null; } })();
+    const KEY = 'autoSell.v1';
+    const TAG = 'AS';
+    if (W.autoSell?._unload) W.autoSell._unload();
+    let unloaded = false;
+    const sleep = core.sleep;
 
-  // ---- game facts ------------------------------------------------------------------------------
-  const REGION_NAMES = ['Heartland', 'Industrial Basin', 'Coastal Cities', 'Frontier'];
-  const regionName = (r) => REGION_NAMES[r] ?? 'Region ' + r;
-  const MAX_FAILS = 5;
-  const cfg = { cycleMs: 1000, confirmMs: 10000, jitterMs: 450, backoffMs: 5000, bidWaitMs: 24 * 3600 * 1000, switchFloorPct: 90 };   // timings (the tests shorten them); switchFloorPct: a moved job never takes a bid below this % of the bid you picked
-  const usd = (c) => '$' + (c / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  const num = (n) => Math.round(n).toLocaleString('en-US');
-  const profitTxt = (c) => (c < 0 ? '−' : '') + usd(Math.abs(c));
+    // ---- game facts ------------------------------------------------------------------------------
+    const REGION_NAMES = ['Heartland', 'Industrial Basin', 'Coastal Cities', 'Frontier'];
+    const regionName = (r) => REGION_NAMES[r] ?? 'Region ' + r;
+    const MAX_FAILS = 5;
+    const cfg = { cycleMs: 1000, confirmMs: 10000, jitterMs: 450, backoffMs: 5000, bidWaitMs: 24 * 3600 * 1000, switchFloorPct: 90 };   // timings (the tests shorten them); switchFloorPct: a moved job never takes a bid below this % of the bid you picked
+    const usd = (c) => '$' + (c / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const num = (n) => Math.round(n).toLocaleString('en-US');
+    const profitTxt = (c) => (c < 0 ? '−' : '') + usd(Math.abs(c));
 
-  let catRef = null, itemMap = null;
-  function itemOf(catalog, id) {
-    if (catalog !== catRef) { catRef = catalog; itemMap = new Map((catalog?.items ?? []).map((i) => [i.id, i])); }
-    return itemMap.get(id);
-  }
-  // One free courier run, with the capacity upgrades in st.courier_levels.
-  const loadOf = (it, st) => Math.floor((core.courierCU?.(st) ?? 10000) / Math.max(1, it?.cargo_weight || 1));
-  // What one courier run on a bid is worth (cents), the way jobs and replacement bids are ranked: a cheaper bid with a big lot
-  // can beat a dearer one that takes only a few units.
-  const runValue = (d, job, r) => (d.price / d.amount) * Math.min(loadOf(itemOf(r.catalog, d.item), r.st), d.amount, job.left ?? Infinity);
-
-  // Estimated cost of one unit, in cents: the inputs of the recipe that makes it, at catalog base value (the cheapest recipe
-  // when several make it). A recipe with several outputs shares its inputs by the outputs' base value. Raw materials have no
-  // inputs, so they cost 0 (pure profit); so does an item no catalog recipe makes.
-  let recRef = null, costMap = null;
-  function unitCost(catalog, id) {
-    catalog = catalog ?? recRef;                 // game state briefly unreadable: keep using the last catalog, never read "no catalog" as "free"
-    if (!catalog) return 0;
-    if (catalog !== recRef) { recRef = catalog; costMap = new Map(); }
-    if (costMap.has(id)) return costMap.get(id);
-    const base = (i) => itemOf(catalog, i)?.base_value ?? 0;
-    let best = null;
-    for (const rc of catalog.recipes ?? []) {
-      const out = (rc.outputs ?? []).find((o) => o.item === id);
-      if (!out || !(out.amount > 0)) continue;
-      const inCost = (rc.inputs ?? []).reduce((s, x) => s + x.amount * base(x.item), 0);
-      const outValue = (rc.outputs ?? []).reduce((s, o) => s + o.amount * base(o.item), 0);
-      const c = outValue > 0 ? inCost * base(id) / outValue : inCost / out.amount;
-      if (best == null || c < best) best = c;
+    let catRef = null, itemMap = null;
+    function itemOf(catalog, id) {
+      if (catalog !== catRef) { catRef = catalog; itemMap = new Map((catalog?.items ?? []).map((i) => [i.id, i])); }
+      return itemMap.get(id);
     }
-    costMap.set(id, best ?? 0);
-    return best ?? 0;
-  }
+    // One free courier run, with the capacity upgrades in st.courier_levels.
+    const loadOf = (it, st) => Math.floor((core.courierCU?.(st) ?? 10000) / Math.max(1, it?.cargo_weight || 1));
+    // What one courier run on a bid is worth (cents), the way jobs and replacement bids are ranked: a cheaper bid with a big lot
+    // can beat a dearer one that takes only a few units.
+    const runValue = (d, job, r) => (d.price / d.amount) * Math.min(loadOf(itemOf(r.catalog, d.item), r.st), d.amount, job.left ?? Infinity);
 
-  // ---- jobs --------------------------------------------------------------------------------------
-  // job: { deal, item, region, unit (cents per unit), left (units still to sell, null = until stopped),
-  //        sold, revenue + cogs (cents: what the sent units are worth, what they cost), lot (units the bid still wants, last seen),
-  //        keep, fullLoads, expiresAt (tick), fails, retryAt, status, tone, last (ms of the last send),
-//        from (the bid it moved from, or null), waitSince (ms since no bid qualified, 0 = not waiting for one) }
-  const jobs = new Map();
-  const toInt = (v, min, max, dflt) => { const n = Math.floor(Number(v)); return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : dflt; };
-  function clean(j) {
-    if (!j || !Number.isFinite(+j.deal) || !Number.isFinite(+j.item)) return null;
-    return {
-      deal: +j.deal, item: +j.item, region: toInt(j.region, 0, 99, 0), unit: Math.max(0, Number(j.unit) || 0),
-      unit0: Math.max(0, Number(j.unit0 ?? j.unit) || 0),   // unit price of the bid you picked: the floor for a move, kept through every move
-      left: j.left == null ? null : toInt(j.left, 1, 1e9, null), sold: toInt(j.sold, 0, 1e12, 0), keep: toInt(j.keep, 0, 1e12, 0),
-      fullLoads: !!j.fullLoads, expiresAt: Number.isFinite(+j.expiresAt) ? +j.expiresAt : 0,
-      revenue: toInt(j.revenue, 0, 1e15, 0), cogs: toInt(j.cogs, 0, 1e15, 0), lot: toInt(j.lot, 0, 1e12, 0),
-      from: Number.isFinite(j.from) ? j.from : null, waitSince: toInt(j.waitSince, 0, 1e15, 0),
-      fails: 0, retryAt: 0, status: 'Starting', tone: '', last: 0,
-    };
-  }
-  function save() {
-    try { store?.setItem(KEY, JSON.stringify({ jobs: [...jobs.values()].map(({ deal, item, region, unit, unit0, left, sold, revenue, cogs, lot, keep, fullLoads, expiresAt, from, waitSince }) => ({ deal, item, region, unit, unit0, left, sold, revenue, cogs, lot, keep, fullLoads, expiresAt, from, waitSince })) })); } catch {}
-  }
-  function restore() {
-    try {
-      const o = JSON.parse(store?.getItem(KEY) || 'null');
-      for (const j of Array.isArray(o?.jobs) ? o.jobs : []) { const c = clean(j); if (c && jobs.size < 50) jobs.set(c.deal, c); }
-    } catch {}
-  }
-
-  // ---- reading the game ---------------------------------------------------------------------------
-  function read(fresh = false) {
-    const { ws, st, catalog, deals } = core.walk(fresh);
-    if (!st || !catalog) return null;
-    core.seeTick(st.ssi?.last_user_mutation_tick);
-    return { st, catalog, deals, ws, wsOpen: ws?.readyState === 1, tick: core.nowTick(), shipId: st.next_shipment_id ?? 0, mutTick: st.ssi?.last_user_mutation_tick ?? 0 };
-  }
-
-  // ---- profit (cents) ---------------------------------------------------------------------------------------------------------
-  const profitOf = (job) => job.revenue - job.cogs;                                       // actual, for what was sent so far
-  // What the job makes in the end: the actual profit so far plus the margin on what it will still send (the target, or the
-  // part of the bid that is still open when it runs until stopped).
-  function estProfitOf(job, r) {
-    const togo = Math.min(job.left ?? Infinity, job.lot || (job.left ?? 0));
-    return Math.round(profitOf(job) + (job.unit - unitCost(r?.catalog, job.item)) * togo);
-  }
-
-  // ---- the decision (pure: no I/O) -------------------------------------------------------------------
-  // r: { st, catalog, deals (array | null = board not loaded), tick, now }. Returns
-  //   { kind: 'send', n, deal } | { kind: 'switch', deal } | { kind: 'wait', why, tone?, noBid? } | { kind: 'end', why }
-  // r.taken (optional): ids of the bids other jobs hold. A 'switch' deal is the bid the job moves to.
-  function decide(job, r) {
-    if (job.left != null && job.left < 1) return { kind: 'end', why: 'target reached' };
-    const tick = r.tick || 0;
-    // A move never goes below cfg.switchFloorPct of the bid you picked (unit cost alone is 0 for raw goods).
-    const floor = Math.max(unitCost(r.catalog, job.item), (job.unit0 ?? job.unit ?? 0) * cfg.switchFloorPct / 100), name = nameOf(r, job.item);
-    // No qualifying bid: wait, and give up once the job has waited cfg.bidWaitMs (cycle() keeps job.waitSince).
-    const noBid = (why) => job.waitSince && r.now != null && r.now - job.waitSince >= cfg.bidWaitMs
-      ? { kind: 'end', why: 'no ' + name + ' bid at ≥ ' + usd(floor) + ' for 24 h' }
-      : { kind: 'wait', why, tone: 'muted', noBid: true };
-    if (!Array.isArray(r.deals)) {
-      if (tick && job.expiresAt && tick > job.expiresAt + 4) return noBid('bid expired: open the Market page so it can pick another bid');
-      return { kind: 'wait', why: 'Market board not loaded (open the Market page once)' };
-    }
-    const deal = r.deals.find((d) => d.id === job.deal);
-    if (!deal || deal.side !== 'Sell') {
+    // Estimated cost of one unit, in cents: the inputs of the recipe that makes it, at catalog base value (the cheapest recipe
+    // when several make it). A recipe with several outputs shares its inputs by the outputs' base value. Raw materials have no
+    // inputs, so they cost 0 (pure profit); so does an item no catalog recipe makes.
+    let recRef = null, costMap = null;
+    function unitCost(catalog, id) {
+      catalog = catalog ?? recRef;                 // game state briefly unreadable: keep using the last catalog, never read "no catalog" as "free"
+      if (!catalog) return 0;
+      if (catalog !== recRef) { recRef = catalog; costMap = new Map(); }
+      if (costMap.has(id)) return costMap.get(id);
+      const base = (i) => itemOf(catalog, i)?.base_value ?? 0;
       let best = null;
-      for (const d of r.deals) {
-        if (d.side !== 'Sell' || d.item !== job.item || d.region !== job.region || r.taken?.has(d.id) || r.st.standing_fills?.[d.id]) continue;
-        if (!(d.amount > 0) || (tick && d.expires_at && d.expires_at <= tick) || d.price / d.amount < floor) continue;
-        const v = runValue(d, job, r), bv = best && runValue(best, job, r);
-        if (!best || v > bv || (v === bv && d.price / d.amount > best.price / best.amount)) best = d;
+      for (const rc of catalog.recipes ?? []) {
+        const out = (rc.outputs ?? []).find((o) => o.item === id);
+        if (!out || !(out.amount > 0)) continue;
+        const inCost = (rc.inputs ?? []).reduce((s, x) => s + x.amount * base(x.item), 0);
+        const outValue = (rc.outputs ?? []).reduce((s, o) => s + o.amount * base(o.item), 0);
+        const c = outValue > 0 ? inCost * base(id) / outValue : inCost / out.amount;
+        if (best == null || c < best) best = c;
       }
-      return best ? { kind: 'switch', deal: best } : noBid('waiting for a ' + name + ' bid at ≥ ' + usd(floor) + ' in ' + regionName(job.region));
+      costMap.set(id, best ?? 0);
+      return best ?? 0;
     }
-    if (r.st.standing_fills?.[job.deal]) return { kind: 'wait', why: "the game's own auto-ship is running on this bid" };
-    const it = itemOf(r.catalog, deal.item);
-    const load = loadOf(it, r.st);
-    const stock = r.st.stock?.[deal.region]?.[deal.item] ?? 0;
-    // r.reserved: core.reserves.merged().items (cycle() reads it): what Autopilot / Core plan keep of each item is never sold.
-    // Those reserves are Heartland stock: a bid in another region ships that region's stock and keeps only job.keep.
-    const keep = Math.max(job.keep, deal.region === 0 ? Number(r.reserved?.[deal.item]) || 0 : 0);
-    const spare = Math.floor(stock - keep);
-    const want = Math.min(load, job.left ?? Infinity, deal.amount);
-    const n = Math.min(want, spare);
-    if (n < 1) return { kind: 'wait', why: 'waiting for ' + (it?.name ?? 'stock') + (keep ? ' above ' + num(keep) + (keep > job.keep ? ' (reserved)' : '') : '') + ' in stock', tone: 'muted' };
-    if (job.fullLoads && n < want) return { kind: 'wait', why: 'waiting for a full load (' + num(n) + ' of ' + num(want) + ')', tone: 'muted' };
-    const ready = r.st.courier_ready_at ?? 0;
-    if (tick && tick < ready) return { kind: 'wait', why: 'courier ready in ' + Math.max(1, Math.ceil((ready - tick) / 2)) + ' s', tone: 'good' };
-    if (r.now != null && r.now < job.retryAt) return { kind: 'wait', why: 'retrying in ' + Math.ceil((job.retryAt - r.now) / 1000) + ' s', tone: 'warn' };
-    return { kind: 'send', n, deal };
-  }
 
-  // ---- the engine --------------------------------------------------------------------------------------
-  let loopOn = false, wake = null;
-  class ConnError extends Error {}
-  const nameOf = (r, id) => itemOf(r?.catalog, id)?.name ?? 'item ' + id;
-
-  function endJob(job, why, kind = 'info') {
-    if (!jobs.delete(job.deal)) return;
-    save();
-    const name = nameOf(read(), job.item);
-    core.ledger.add(TAG, kind, 'auto ship ' + name + ' ended: ' + why + ' (' + num(job.sold) + ' sold)' + (job.sold ? ', profit ' + profitTxt(profitOf(job)) : ''));
-    core.toast('Auto ship ' + name + ' ended: ' + why, kind === 'fail' ? 'error' : 'info');
-    renderAll();
-  }
-
-  // The job's bid is gone: the same job (sold, left, profit carry over) continues on bid d.
-  function moveJob(job, d, r) {
-    const old = job.deal, oldUnit = job.unit, name = nameOf(r, job.item);
-    jobs.delete(old);
-    Object.assign(job, { from: old, deal: d.id, unit: d.price / d.amount, lot: d.amount, expiresAt: d.expires_at, region: d.region, fails: 0, retryAt: 0, waitSince: 0 });
-    jobs.set(d.id, job);
-    save();
-    core.ledger.add(TAG, 'info', 'auto ship ' + name + ' moved: bid #' + old + ' @ ' + usd(oldUnit) + ' → #' + d.id + ' @ ' + usd(job.unit));
-    core.toast('Auto ship ' + name + ': moved to a bid at ' + usd(job.unit), 'info');
-    if (modal && (modal.deal === old || modal.deal === d.id)) closeMenu(false);   // its Update / Stop / Start would act on the wrong job
-    renderAll();
-  }
-
-  async function send(job, d, n) {
-    const r = read(true);
-    if (!r) throw new ConnError('game state not found');
-    if (!r.wsOpen) throw new ConnError('socket not open');
-    const id0 = r.shipId;
-    const d0 = core.markSend(r.mutTick);
-    const unit = d.price / d.amount;
-    r.ws.send(JSON.stringify({ type: 'FillDeal', deal: d.id, amount: n >= d.amount ? null : n, hire: null, region: d.region, courier: true }));
-    const ok = await core.waitConfirm({
-      read, d0, timeoutMs: cfg.confirmMs,
-      pred: (x) => x.shipId > id0,
-      closed: () => { throw new ConnError('socket closed while waiting'); },
-    });
-    if (!ok) {
-      // Lost the courier to someone else (Autopilot, the game's auto-ship, a click): not a failure, it goes again.
-      const after = read();
-      if (after && after.st.courier_ready_at > after.tick) { job.status = 'courier was taken: waiting'; job.tone = 'muted'; return false; }
-      job.fails++;
-      job.retryAt = Date.now() + Math.min(60000, cfg.backoffMs * 2 ** job.fails);
-      core.ledger.add(TAG, 'fail', 'not confirmed: sell ' + num(n) + ' ' + nameOf(r, job.item) + ' (' + job.fails + '/' + MAX_FAILS + ')');
-      if (job.fails >= MAX_FAILS) endJob(job, 'the server did not apply ' + MAX_FAILS + ' sends in a row', 'fail');
-      return false;
+    // ---- jobs --------------------------------------------------------------------------------------
+    // job: { deal, item, region, unit (cents per unit), left (units still to sell, null = until stopped),
+    //        sold, revenue + cogs (cents: what the sent units are worth, what they cost), lot (units the bid still wants, last seen),
+    //        keep, fullLoads, expiresAt (tick), fails, retryAt, status, tone, last (ms of the last send),
+    //        from (the bid it moved from, or null), waitSince (ms since no bid qualified, 0 = not waiting for one) }
+    const jobs = new Map();
+    const toInt = (v, min, max, dflt) => { const n = Math.floor(Number(v)); return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : dflt; };
+    function clean(j) {
+      if (!j || !Number.isFinite(+j.deal) || !Number.isFinite(+j.item)) return null;
+      return {
+        deal: +j.deal, item: +j.item, region: toInt(j.region, 0, 99, 0), unit: Math.max(0, Number(j.unit) || 0),
+        unit0: Math.max(0, Number(j.unit0 ?? j.unit) || 0),   // unit price of the bid you picked: the floor for a move, kept through every move
+        left: j.left == null ? null : toInt(j.left, 1, 1e9, null), sold: toInt(j.sold, 0, 1e12, 0), keep: toInt(j.keep, 0, 1e12, 0),
+        fullLoads: !!j.fullLoads, expiresAt: Number.isFinite(+j.expiresAt) ? +j.expiresAt : 0,
+        revenue: toInt(j.revenue, 0, 1e15, 0), cogs: toInt(j.cogs, 0, 1e15, 0), lot: toInt(j.lot, 0, 1e12, 0),
+        from: Number.isFinite(j.from) ? j.from : null, waitSince: toInt(j.waitSince, 0, 1e15, 0),
+        fails: 0, retryAt: 0, status: 'Starting', tone: '', last: 0,
+      };
     }
-    job.fails = 0; job.retryAt = 0; job.last = Date.now();
-    job.sold += n;
-    if (job.left != null) job.left -= n;
-    job.lot = Math.max(0, job.lot - n);       // what the bid still wants; the next cycle re-reads it
-    const cost = unitCost(r.catalog, job.item) * n;
-    job.revenue += Math.round(unit * n); job.cogs += Math.round(cost);
-    save();
-    core.ledger.add(TAG, 'action', 'auto ship ' + num(n) + ' ' + nameOf(r, job.item) + ' @ ' + usd(unit) + ' = ' + usd(unit * n) + (cost ? ', profit ' + profitTxt(unit * n - cost) : ''), { dMoney: Math.round(unit * n / 100) });
-    return true;
-  }
-
-  // [[job, runValue]] -> jobs in send order: runs within 10% of the best first, least recently served (job.last) first among them.
-  function jobOrder(runs) {
-    const top = Math.max(0, ...runs.map(([, v]) => v)), band = (v) => top > 0 && v >= top * 0.9;
-    return runs.sort((a, z) => band(z[1]) - band(a[1]) || (band(a[1]) ? a[0].last - z[0].last : z[1] - a[1]) || a[0].last - z[0].last).map(([j]) => j);
-  }
-  async function cycle() {
-    const r = read();
-    if (!r) { for (const j of jobs.values()) { j.status = 'Waiting for the game'; j.tone = 'muted'; } return; }
-    r.now = Date.now();
-    r.reserved = core.reserves?.merged?.()?.items ?? {};
-    // The run worth most goes first (unit price x what one run carries); runs within 10% of the best: least recently served first,
-    // so a job that can always ship does not starve the others.
-    const runOf = (j) => {
-      const d = Array.isArray(r.deals) ? r.deals.find((x) => x.id === j.deal) : null;
-      return d?.side === 'Sell' && d.amount > 0 ? runValue(d, j, r) : 0;
-    };
-    const order = jobOrder([...jobs.values()].map((j) => [j, runOf(j)]));
-    let sent = false;
-    for (const job of order) {
-      if (unloaded || !jobs.has(job.deal)) continue;
-      const live = Array.isArray(r.deals) ? r.deals.find((d) => d.id === job.deal) : null;
-      if (live?.side === 'Sell') job.lot = live.amount;
-      r.taken = new Set([...jobs.keys()].filter((id) => id !== job.deal));
-      const v = decide(job, r);
-      const was = job.waitSince;
-      job.waitSince = v.noBid ? (job.waitSince || r.now) : 0;
-      if (!was !== !job.waitSince) save();   // so a reload does not restart the give-up clock
-      if (v.kind === 'switch') { moveJob(job, v.deal, r); continue; }
-      if (v.kind === 'end') { endJob(job, v.why); continue; }
-      if (v.kind === 'wait') { job.status = v.why.charAt(0).toUpperCase() + v.why.slice(1); job.tone = v.tone || 'muted'; continue; }
-      if (sent) { job.status = 'Waiting for the courier'; job.tone = 'good'; continue; }
-      if (cfg.jitterMs) await sleep(150 + Math.random() * cfg.jitterMs);   // not the same millisecond every time
-      if (unloaded || !jobs.has(job.deal)) continue;
-      job.status = 'Shipping'; job.tone = 'good';
-      renderAll();
-      await send(job, v.deal, v.n);
-      sent = true;
-      const x = read(true);
-      if (x) { r.st = x.st; r.tick = x.tick; r.deals = x.deals ?? r.deals; }
+    function save() {
+      try { store?.setItem(KEY, JSON.stringify({ jobs: [...jobs.values()].map(({ deal, item, region, unit, unit0, left, sold, revenue, cogs, lot, keep, fullLoads, expiresAt, from, waitSince }) => ({ deal, item, region, unit, unit0, left, sold, revenue, cogs, lot, keep, fullLoads, expiresAt, from, waitSince })) })); } catch { }
     }
-  }
+    function restore() {
+      try {
+        const o = JSON.parse(store?.getItem(KEY) || 'null');
+        for (const j of Array.isArray(o?.jobs) ? o.jobs : []) { const c = clean(j); if (c && jobs.size < 50) jobs.set(c.deal, c); }
+      } catch { }
+    }
 
-  async function loop() {
-    if (loopOn) return;
-    loopOn = true;
-    try {
-      while (!unloaded && jobs.size) {
-        try { await cycle(); }
-        catch (e) {
-          if (!(e instanceof ConnError)) console.error('[autoSell]', e);
-          for (const j of jobs.values()) { j.status = 'Connection lost: ' + (e.message || e); j.tone = 'warn'; }
-          renderAll();
-          await sleep(5000);
+    // ---- reading the game ---------------------------------------------------------------------------
+    function read(fresh = false) {
+      const { ws, st, catalog, deals } = core.walk(fresh);
+      if (!st || !catalog) return null;
+      core.seeTick(st.ssi?.last_user_mutation_tick);
+      return { st, catalog, deals, ws, wsOpen: ws?.readyState === 1, tick: core.nowTick(), shipId: st.next_shipment_id ?? 0, mutTick: st.ssi?.last_user_mutation_tick ?? 0 };
+    }
+
+    // ---- profit (cents) ---------------------------------------------------------------------------------------------------------
+    const profitOf = (job) => job.revenue - job.cogs;                                       // actual, for what was sent so far
+    // What the job makes in the end: the actual profit so far plus the margin on what it will still send (the target, or the
+    // part of the bid that is still open when it runs until stopped).
+    function estProfitOf(job, r) {
+      const togo = Math.min(job.left ?? Infinity, job.lot || (job.left ?? 0));
+      return Math.round(profitOf(job) + (job.unit - unitCost(r?.catalog, job.item)) * togo);
+    }
+
+    // ---- the decision (pure: no I/O) -------------------------------------------------------------------
+    // r: { st, catalog, deals (array | null = board not loaded), tick, now }. Returns
+    //   { kind: 'send', n, deal } | { kind: 'switch', deal } | { kind: 'wait', why, tone?, noBid? } | { kind: 'end', why }
+    // r.taken (optional): ids of the bids other jobs hold. A 'switch' deal is the bid the job moves to.
+    function decide(job, r) {
+      if (job.left != null && job.left < 1) return { kind: 'end', why: 'target reached' };
+      const tick = r.tick || 0;
+      // A move never goes below cfg.switchFloorPct of the bid you picked (unit cost alone is 0 for raw goods).
+      const floor = Math.max(unitCost(r.catalog, job.item), (job.unit0 ?? job.unit ?? 0) * cfg.switchFloorPct / 100), name = nameOf(r, job.item);
+      // No qualifying bid: wait, and give up once the job has waited cfg.bidWaitMs (cycle() keeps job.waitSince).
+      const noBid = (why) => job.waitSince && r.now != null && r.now - job.waitSince >= cfg.bidWaitMs
+        ? { kind: 'end', why: 'no ' + name + ' bid at ≥ ' + usd(floor) + ' for 24 h' }
+        : { kind: 'wait', why, tone: 'muted', noBid: true };
+      if (!Array.isArray(r.deals)) {
+        if (tick && job.expiresAt && tick > job.expiresAt + 4) return noBid('bid expired: open the Market page so it can pick another bid');
+        return { kind: 'wait', why: 'Market board not loaded (open the Market page once)' };
+      }
+      const deal = r.deals.find((d) => d.id === job.deal);
+      if (!deal || deal.side !== 'Sell') {
+        let best = null;
+        for (const d of r.deals) {
+          if (d.side !== 'Sell' || d.item !== job.item || d.region !== job.region || r.taken?.has(d.id) || r.st.standing_fills?.[d.id]) continue;
+          if (!(d.amount > 0) || (tick && d.expires_at && d.expires_at <= tick) || d.price / d.amount < floor) continue;
+          const v = runValue(d, job, r), bv = best && runValue(best, job, r);
+          if (!best || v > bv || (v === bv && d.price / d.amount > best.price / best.amount)) best = d;
         }
-        renderAll();
-        await new Promise((res) => { wake = res; core.sleepWake(cfg.cycleMs).then(res); });
-        wake = null;
+        return best ? { kind: 'switch', deal: best } : noBid('waiting for a ' + name + ' bid at ≥ ' + usd(floor) + ' in ' + regionName(job.region));
       }
-    } finally { loopOn = false; renderAll(); }
-  }
+      if (r.st.standing_fills?.[job.deal]) return { kind: 'wait', why: "the game's own auto-ship is running on this bid" };
+      const it = itemOf(r.catalog, deal.item);
+      const load = loadOf(it, r.st);
+      const stock = r.st.stock?.[deal.region]?.[deal.item] ?? 0;
+      // r.reserved: core.reserves.merged().items (cycle() reads it): what Autopilot / Core plan keep of each item is never sold.
+      // Those reserves are Heartland stock: a bid in another region ships that region's stock and keeps only job.keep.
+      const keep = Math.max(job.keep, deal.region === 0 ? Number(r.reserved?.[deal.item]) || 0 : 0);
+      const spare = Math.floor(stock - keep);
+      const want = Math.min(load, job.left ?? Infinity, deal.amount);
+      const n = Math.min(want, spare);
+      if (n < 1) return { kind: 'wait', why: 'waiting for ' + (it?.name ?? 'stock') + (keep ? ' above ' + num(keep) + (keep > job.keep ? ' (reserved)' : '') : '') + ' in stock', tone: 'muted' };
+      if (job.fullLoads && n < want) return { kind: 'wait', why: 'waiting for a full load (' + num(n) + ' of ' + num(want) + ')', tone: 'muted' };
+      const ready = r.st.courier_ready_at ?? 0;
+      if (tick && tick < ready) return { kind: 'wait', why: 'courier ready in ' + Math.max(1, Math.ceil((ready - tick) / 2)) + ' s', tone: 'good' };
+      if (r.now != null && r.now < job.retryAt) return { kind: 'wait', why: 'retrying in ' + Math.ceil((job.retryAt - r.now) / 1000) + ' s', tone: 'warn' };
+      return { kind: 'send', n, deal };
+    }
+
+    // ---- the engine --------------------------------------------------------------------------------------
+    let loopOn = false, wake = null;
+    class ConnError extends Error { }
+    const nameOf = (r, id) => itemOf(r?.catalog, id)?.name ?? 'item ' + id;
+
+    function endJob(job, why, kind = 'info') {
+      if (!jobs.delete(job.deal)) return;
+      save();
+      const name = nameOf(read(), job.item);
+      core.ledger.add(TAG, kind, 'auto ship ' + name + ' ended: ' + why + ' (' + num(job.sold) + ' sold)' + (job.sold ? ', profit ' + profitTxt(profitOf(job)) : ''));
+      core.toast('Auto ship ' + name + ' ended: ' + why, kind === 'fail' ? 'error' : 'info');
+      renderAll();
+    }
+
+    // The job's bid is gone: the same job (sold, left, profit carry over) continues on bid d.
+    function moveJob(job, d, r) {
+      const old = job.deal, oldUnit = job.unit, name = nameOf(r, job.item);
+      jobs.delete(old);
+      Object.assign(job, { from: old, deal: d.id, unit: d.price / d.amount, lot: d.amount, expiresAt: d.expires_at, region: d.region, fails: 0, retryAt: 0, waitSince: 0 });
+      jobs.set(d.id, job);
+      save();
+      core.ledger.add(TAG, 'info', 'auto ship ' + name + ' moved: bid #' + old + ' @ ' + usd(oldUnit) + ' → #' + d.id + ' @ ' + usd(job.unit));
+      core.toast('Auto ship ' + name + ': moved to a bid at ' + usd(job.unit), 'info');
+      if (modal && (modal.deal === old || modal.deal === d.id)) closeMenu(false);   // its Update / Stop / Start would act on the wrong job
+      renderAll();
+    }
+
+    async function send(job, d, n) {
+      const r = read(true);
+      if (!r) throw new ConnError('game state not found');
+      if (!r.wsOpen) throw new ConnError('socket not open');
+      const id0 = r.shipId;
+      const d0 = core.markSend(r.mutTick);
+      const unit = d.price / d.amount;
+      r.ws.send(JSON.stringify({ type: 'FillDeal', deal: d.id, amount: n >= d.amount ? null : n, hire: null, region: d.region, courier: true }));
+      const ok = await core.waitConfirm({
+        read, d0, timeoutMs: cfg.confirmMs,
+        pred: (x) => x.shipId > id0,
+        closed: () => { throw new ConnError('socket closed while waiting'); },
+      });
+      if (!ok) {
+        // Lost the courier to someone else (Autopilot, the game's auto-ship, a click): not a failure, it goes again.
+        const after = read();
+        if (after && after.st.courier_ready_at > after.tick) { job.status = 'courier was taken: waiting'; job.tone = 'muted'; return false; }
+        if (core.link().state !== 'open') { job.status = 'waiting for the game connection'; job.tone = 'muted'; return false; }
+        job.fails++;
+        job.retryAt = Date.now() + Math.min(60000, cfg.backoffMs * 2 ** job.fails);
+        core.ledger.add(TAG, 'fail', 'not confirmed: sell ' + num(n) + ' ' + nameOf(r, job.item) + ' (' + job.fails + '/' + MAX_FAILS + ')');
+        if (job.fails >= MAX_FAILS) { job.fails = 0; job.retryAt = Date.now() + 600000; core.ledger.add(TAG, 'fail', 'the server did not apply ' + MAX_FAILS + ' sends in a row: this job retries every 10 min'); }
+        return false;
+      }
+      job.fails = 0; job.retryAt = 0; job.last = Date.now();
+      job.sold += n;
+      if (job.left != null) job.left -= n;
+      job.lot = Math.max(0, job.lot - n);       // what the bid still wants; the next cycle re-reads it
+      const cost = unitCost(r.catalog, job.item) * n;
+      job.revenue += Math.round(unit * n); job.cogs += Math.round(cost);
+      save();
+      core.ledger.add(TAG, 'action', 'auto ship ' + num(n) + ' ' + nameOf(r, job.item) + ' @ ' + usd(unit) + ' = ' + usd(unit * n) + (cost ? ', profit ' + profitTxt(unit * n - cost) : ''), { dMoney: Math.round(unit * n / 100) });
+      return true;
+    }
+
+    // [[job, runValue]] -> jobs in send order: runs within 10% of the best first, least recently served (job.last) first among them.
+    function jobOrder(runs) {
+      const top = Math.max(0, ...runs.map(([, v]) => v)), band = (v) => top > 0 && v >= top * 0.9;
+      return runs.sort((a, z) => band(z[1]) - band(a[1]) || (band(a[1]) ? a[0].last - z[0].last : z[1] - a[1]) || a[0].last - z[0].last).map(([j]) => j);
+    }
+    async function cycle() {
+      const r = read();
+      if (!r) { for (const j of jobs.values()) { j.status = 'Waiting for the game'; j.tone = 'muted'; } return; }
+      r.now = Date.now();
+      r.reserved = core.reserves?.merged?.()?.items ?? {};
+      // The run worth most goes first (unit price x what one run carries); runs within 10% of the best: least recently served first,
+      // so a job that can always ship does not starve the others.
+      const runOf = (j) => {
+        const d = Array.isArray(r.deals) ? r.deals.find((x) => x.id === j.deal) : null;
+        return d?.side === 'Sell' && d.amount > 0 ? runValue(d, j, r) : 0;
+      };
+      const order = jobOrder([...jobs.values()].map((j) => [j, runOf(j)]));
+      let sent = false;
+      for (const job of order) {
+        if (unloaded || !jobs.has(job.deal)) continue;
+        const live = Array.isArray(r.deals) ? r.deals.find((d) => d.id === job.deal) : null;
+        if (live?.side === 'Sell') job.lot = live.amount;
+        r.taken = new Set([...jobs.keys()].filter((id) => id !== job.deal));
+        const v = decide(job, r);
+        const was = job.waitSince;
+        job.waitSince = v.noBid ? (job.waitSince || r.now) : 0;
+        if (!was !== !job.waitSince) save();   // so a reload does not restart the give-up clock
+        if (v.kind === 'switch') { moveJob(job, v.deal, r); continue; }
+        if (v.kind === 'end') { endJob(job, v.why); continue; }
+        if (v.kind === 'wait') { job.status = v.why.charAt(0).toUpperCase() + v.why.slice(1); job.tone = v.tone || 'muted'; continue; }
+        if (sent) { job.status = 'Waiting for the courier'; job.tone = 'good'; continue; }
+        if (cfg.jitterMs) await sleep(150 + Math.random() * cfg.jitterMs);   // not the same millisecond every time
+        if (unloaded || !jobs.has(job.deal)) continue;
+        job.status = 'Shipping'; job.tone = 'good';
+        renderAll();
+        await send(job, v.deal, v.n);
+        sent = true;
+        const x = read(true);
+        if (x) { r.st = x.st; r.tick = x.tick; r.deals = x.deals ?? r.deals; }
+      }
+    }
+
+    async function loop() {
+      if (loopOn) return;
+      loopOn = true;
+      try {
+        while (!unloaded && jobs.size) {
+          try { await cycle(); }
+          catch (e) {
+            if (!(e instanceof ConnError)) console.error('[autoSell]', e);
+            for (const j of jobs.values()) { j.status = 'Connection lost: ' + (e.message || e); j.tone = 'warn'; }
+            renderAll();
+            await sleep(5000);
+          }
+          renderAll();
+          await new Promise((res) => { wake = res; core.sleepWake(cfg.cycleMs).then(res); });
+          wake = null;
+        }
+      } finally { loopOn = false; renderAll(); }
+    }
 
 // continues the autosell closure from autosell-1.js (same try / IIFE)
   // ---- public control ----------------------------------------------------------------------------------------
@@ -4830,378 +4842,462 @@ try {
 // The switches are saved in this browser. Alt+Shift+X switches them off with everything else.
 // @@MODULE utilities
 try {
-(() => {
-  const W = typeof window !== 'undefined' ? window : globalThis;
-  const core = W.idleCore;
-  if (!core) throw new Error('the shared core did not load');
-  const HAS_DOM = typeof document !== 'undefined' && !!document.body;
-  const store = (() => { try { return W.localStorage ?? null; } catch { return null; } })();
-  const KEY = 'autoUtil.v1';
-  const TAG = 'AU';
-  if (W.autoUtil?._unload) W.autoUtil._unload();
-  let unloaded = false;
-  const h = core.h;
+  (() => {
+    const W = typeof window !== 'undefined' ? window : globalThis;
+    const core = W.idleCore;
+    if (!core) throw new Error('the shared core did not load');
+    const HAS_DOM = typeof document !== 'undefined' && !!document.body;
+    const store = (() => { try { return W.localStorage ?? null; } catch { return null; } })();
+    const KEY = 'autoUtil.v1';
+    const TAG = 'AU';
+    if (W.autoUtil?._unload) W.autoUtil._unload();
+    let unloaded = false;
+    const h = core.h;
 
-  // ---- game facts (from the game's own bundle) -----------------------------------------------------------------
-  // rate: cents per unit per 10-minute bill (power: times core.powerPriceMult() during an 'NPC power xN' event); tile: the label of
-  // the tile the switch sits on. max: the client's own caps (constants in its bundle, not in the game state).
-  const UTILS = {
-    power: { unit: 'MW', rate: 1000, max: 200, tile: 'Load', noun: 'grid service' },
-    water: { unit: 'kL', rate: 400, max: 500, tile: 'Supply', noun: 'waterworks' },
-  };
-  const NAMES = Object.keys(UTILS);
-  const RATES = { power: 1000, water: 400, bandwidth: 1500 };   // cents per unit per bill: what the game bills together (ISP: st.isp, 15 per Mbps)
-  const DAY = 28800, DAYLIGHT = 21600, NIGHT_PCT = 25;       // ticks; diurnal generators make 25% of their output at night
-  const BILL_TICKS = 1200;                                   // a bill every 10 minutes at 2 ticks a second
-  const INTANGIBLE = new Set([0, 24, 25, 26, 106, 107, 108, 109, 110, 111]);   // items held in st.items, not in stock
-  const MAX_FAILS = 3;
-  const cfg = { cycleMs: 2000, confirmMs: 10000, backoffMs: 5000, lowerWindowTicks: 120, raiseHoldTicks: 60 };   // timings; the tests shorten them. raiseHoldTicks: a raise only stalled groups need waits for the bill this close to it
-  const conf = { power: { on: false, spare: 0 }, water: { on: false, spare: 0 }, holdMin: 10 };
-  const REGION_NAMES = ['Heartland', 'Industrial Basin', 'Coastal Cities', 'Frontier'];
-  const regionName = (r) => REGION_NAMES[r] ?? 'Region ' + r;
-  const usd = (c) => '$' + (c / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  const toInt = (v, lo, hi, dflt) => { const n = Math.round(Number(v)); return Number.isFinite(n) && n >= lo && n <= hi ? n : dflt; };
+    // ---- game facts (from the game's own bundle) -----------------------------------------------------------------
+    // rate: cents per unit per 10-minute bill (power: times core.powerPriceMult() during an 'NPC power xN' event); tile: the label of
+    // the tile the switch sits on. max: the client's own caps (constants in its bundle, not in the game state).
+    const UTILS = {
+      power: { unit: 'MW', rate: 1000, max: 200, tile: 'Load', noun: 'grid service' },
+      water: { unit: 'kL', rate: 400, max: 500, tile: 'Supply', noun: 'waterworks' },
+    };
+    const NAMES = Object.keys(UTILS);
+    const RATES = { power: 1000, water: 400, bandwidth: 1500 };   // cents per unit per bill: what the game bills together (ISP: st.isp, 15 per Mbps)
+    const DAY = 28800, DAYLIGHT = 21600, NIGHT_PCT = 25;       // ticks; diurnal generators make 25% of their output at night
+    const BILL_TICKS = 1200;                                   // a bill every 10 minutes at 2 ticks a second
+    const INTANGIBLE = new Set([0, 24, 25, 26, 106, 107, 108, 109, 110, 111]);   // items held in st.items, not in stock
+    const MAX_FAILS = 3;
+    const cfg = { cycleMs: 2000, confirmMs: 10000, backoffMs: 5000, lowerWindowTicks: 120, raiseHoldTicks: 60 };   // timings; the tests shorten them. raiseHoldTicks: a raise only stalled groups need waits for the bill this close to it
+    const conf = { power: { on: false, spare: 0 }, water: { on: false, spare: 0 }, holdMin: 10 };
+    const REGION_NAMES = ['Heartland', 'Industrial Basin', 'Coastal Cities', 'Frontier'];
+    const regionName = (r) => REGION_NAMES[r] ?? 'Region ' + r;
+    const usd = (c) => '$' + (c / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const toInt = (v, lo, hi, dflt) => { const n = Math.round(Number(v)); return Number.isFinite(n) && n >= lo && n <= hi ? n : dflt; };
 
-  // ---- saved switches ------------------------------------------------------------------------------------------------
-  const persistable = () => ({ power: { ...conf.power }, water: { ...conf.water }, holdMin: conf.holdMin });
-  function apply(o) {
-    const applied = [], skipped = [];
-    if (!o || typeof o !== 'object') return { applied, skipped: ['not an object'] };
-    for (const u of NAMES) {
-      const x = o[u];
-      if (x == null) continue;
-      if (typeof x !== 'object') { skipped.push(u); continue; }
-      if (typeof x.on === 'boolean') { if (conf[u].on !== x.on) { conf[u].on = x.on; resetUtil(u); } applied.push(u + '.on'); } else if ('on' in x) skipped.push(u + '.on');
-      if ('spare' in x) { const n = toInt(x.spare, 0, UTILS[u].max, null); if (n == null) skipped.push(u + '.spare'); else { conf[u].spare = n; applied.push(u + '.spare'); } }
-    }
-    if ('holdMin' in o) { const n = toInt(o.holdMin, 1, 120, null); if (n == null) skipped.push('holdMin'); else { conf.holdMin = n; applied.push('holdMin'); } }
-    return { applied, skipped };
-  }
-  function save() { try { store?.setItem(KEY, JSON.stringify(persistable())); } catch {} }
-  function restore() { try { apply(JSON.parse(store?.getItem(KEY) || 'null')); } catch {} }
-
-  // ---- reading the game ----------------------------------------------------------------------------------------------
-  let lastContracts = null;    // contracts are a prop of the page router: unreadable while a Corporation profile is open, so keep the last look
-  function read(fresh = false) {
-    const { ws, st, catalog, contracts, engine } = core.walk(fresh);
-    if (!st || !catalog) return null;
-    core.seeTick(st.ssi?.last_user_mutation_tick);
-    if (Array.isArray(contracts)) lastContracts = contracts;
-    const tick = core.nowTick();
-    // Transmission lines: the client asks its engine for the flows (lineFlows, a BigInt tick) only when the state has lines.
-    let flows = [];
-    try { if ((st.lines ?? []).length && tick > 0 && typeof engine?.lineFlows === 'function') flows = JSON.parse(engine.lineFlows(BigInt(tick))) ?? []; } catch { flows = []; }
-    return { st, catalog, contracts: lastContracts, flows, ws, wsOpen: ws?.readyState === 1, tick, mutTick: st.ssi?.last_user_mutation_tick ?? 0, priceMult: core.powerPriceMult?.() ?? 1 };
-  }
-
-  const ixRef = new WeakMap();
-  function idx(catalog) {
-    let x = ixRef.get(catalog);
-    if (!x) { x = { b: new Map((catalog.buildings ?? []).map((b) => [b.id, b])), r: new Map((catalog.recipes ?? []).map((r) => [r.id, r])) }; ixRef.set(catalog, x); }
-    return x;
-  }
-  const diurnal = (p, tick) => (((tick % DAY) + DAY) % DAY < DAYLIGHT ? p : Math.floor(p * NIGHT_PCT / 100));
-
-  // ---- what is needed (pure: no I/O) -----------------------------------------------------------------------------------
-  // The page's numbers for one utility in one region. Returns what the groups draw, what is generated, stored or bought, what
-  // stalled groups wait for, and need: the subscription that covers all of it (can be negative: the Corporation has a surplus).
-  // flows: the engine's line flows [{ from, to, sent, delivered }] (power only): Lines in add supply, Lines out count as load, as on the page.
-  function measure(util, region, st, catalog, tick, contracts, flows = []) {
-    const R = String(region), ix = idx(catalog);
-    const have = st.subscriptions?.[R]?.[util] ?? 0;
-    const groups = Object.values(st.groups ?? {}).filter((g) => (g.region ?? 0) === region);
-    const stockOf = (item) => (INTANGIBLE.has(item) ? (st.items?.[item] ?? 0) : (st.stock?.[R]?.[item] ?? 0));
-    let load = 0, gen = 0;
-    for (const g of groups) {
-      const work = g.work ?? [];
-      if (work.length) load += (ix.b.get(g.building)?.draws?.[util] ?? 0) * g.count;
-      for (const w of work) {
-        const rc = ix.r.get(w.recipe);
-        if (!rc) continue;
-        load += (rc.draws?.[util] ?? 0) * w.runs;
-        const p = (rc.generates?.[util] ?? 0) * w.runs;
-        gen += rc.diurnal ? diurnal(p, tick) : p;
+    // ---- saved switches ------------------------------------------------------------------------------------------------
+    const persistable = () => ({ power: { ...conf.power }, water: { ...conf.water }, holdMin: conf.holdMin });
+    function apply(o) {
+      const applied = [], skipped = [];
+      if (!o || typeof o !== 'object') return { applied, skipped: ['not an object'] };
+      for (const u of NAMES) {
+        const x = o[u];
+        if (x == null) continue;
+        if (typeof x !== 'object') { skipped.push(u); continue; }
+        if (typeof x.on === 'boolean') { if (conf[u].on !== x.on) { conf[u].on = x.on; resetUtil(u); } applied.push(u + '.on'); } else if ('on' in x) skipped.push(u + '.on');
+        if ('spare' in x) { const n = toInt(x.spare, 0, UTILS[u].max, null); if (n == null) skipped.push(u + '.spare'); else { conf[u].spare = n; applied.push(u + '.spare'); } }
       }
+      if ('holdMin' in o) { const n = toInt(o.holdMin, 1, 120, null); if (n == null) skipped.push('holdMin'); else { conf.holdMin = n; applied.push('holdMin'); } }
+      return { applied, skipped };
     }
-    const owned = (id) => (st.building_pool?.[R]?.[id] ?? 0) + groups.filter((g) => g.building === id).reduce((a, g) => a + g.count, 0);
-    let dischargeCap = 0;
-    for (const b of catalog.buildings ?? []) { const s = b.storage?.[util]; if (s) dischargeCap += (s.discharge_limit ?? 0) * owned(b.id); }
-    // Stored is in MW-ticks (7,200 = 1 MWh): count only the rate it can keep up until the next bill, so a Battery Bank that would run
-    // dry mid-period does not cut the subscription. Right after a bill that is stored / 1,200, and the hold window keeps that sample.
-    const stored = st.stored?.[R]?.[util] ?? 0, toBill = tick > 0 ? BILL_TICKS - (tick % BILL_TICKS) : 0;
-    const discharge = Math.min(dischargeCap, stored, toBill ? stored / toBill : stored);
-    const lines = util === 'power' && Array.isArray(flows) ? flows : [];
-    const lineIn = lines.filter((f) => f.to === region).reduce((a, f) => a + (Number(f.delivered) || 0), 0);
-    const lineOut = lines.filter((f) => f.from === region && f.delivered > 0).reduce((a, f) => a + (Number(f.sent) || 0), 0);
-    const corp = st.ssi?.corp_id;
-    const deal = (who, field) => (contracts ?? []).filter((c) => c.utility === util && c.region === region && c.state === 'Active' && c[who] === corp).reduce((a, c) => a + (c[field] ?? 0), 0);
-    // A bought contract counts its whole capacity, less the part of what the buyer draws (up to the contract) that the seller is not
-    // delivering: in a shortfall during its grace period the grid covers that gap. What is promised to others is owed, whatever has got through.
-    const short = (c) => Math.max(0, Math.min(Math.max(c.drawn ?? 0, 0), c.amount ?? 0) - Math.max(c.delivered ?? 0, 0));
-    const bought = (contracts ?? []).filter((c) => c.utility === util && c.region === region && c.state === 'Active' && c.buyer === corp);
-    const imported = bought.reduce((a, c) => a + (c.amount ?? 0) - short(c), 0), sold = deal('seller', 'amount');
-    // A group that could start but whose draw is more than the free capacity is stalled; it starts once that much more is free.
-    // A group with no machines yet (equipped 0) cannot start whatever the power: the game calls it "unequipped", not stalled.
-    const free = Math.max(0, have + gen + discharge + imported + lineIn - load - sold - lineOut);
-    let waiting = 0;
-    for (const g of groups) {
-      if (g.paused || g.equipped === 0 || (g.work ?? []).length) continue;
-      const draw = (ix.b.get(g.building)?.draws?.[util] ?? 0) * g.count;
-      if (!(draw > 0) || draw <= free) continue;
-      const rc = (g.recipe != null && (st.recipes?.[String(g.recipe)] ?? ix.r.get(g.recipe))) || null;
-      if (!rc || !(rc.inputs ?? []).every((i) => stockOf(i.item) >= i.amount)) continue;
-      waiting += draw;
+    function save() { try { store?.setItem(KEY, JSON.stringify(persistable())); } catch { } }
+    function restore() { try { apply(JSON.parse(store?.getItem(KEY) || 'null')); } catch { } }
+
+    // ---- reading the game ----------------------------------------------------------------------------------------------
+    let lastContracts = null;    // contracts are a prop of the page router: unreadable while a Corporation profile is open, so keep the last look
+    function read(fresh = false) {
+      const { ws, st, catalog, contracts, engine } = core.walk(fresh);
+      if (!st || !catalog) return null;
+      core.seeTick(st.ssi?.last_user_mutation_tick);
+      if (Array.isArray(contracts)) lastContracts = contracts;
+      const tick = core.nowTick();
+      // Transmission lines: the client asks its engine for the flows (lineFlows, a BigInt tick) only when the state has lines.
+      let flows = [];
+      try { if ((st.lines ?? []).length && tick > 0 && typeof engine?.lineFlows === 'function') flows = JSON.parse(engine.lineFlows(BigInt(tick))) ?? []; } catch { flows = []; }
+      return { st, catalog, contracts: lastContracts, flows, ws, wsOpen: ws?.readyState === 1, tick, mutTick: st.ssi?.last_user_mutation_tick ?? 0, priceMult: core.powerPriceMult?.() ?? 1 };
     }
-    return { util, region, have, load, sold, gen, discharge, imported, lineIn, lineOut, waiting, need: load + sold + lineOut + waiting - gen - discharge - imported - lineIn };
-  }
 
-  // The level that covers a measurement: ceil(need) plus the spare (only when something needs it), over the cap flagged.
-  function wantOf(m, spare = 0) {
-    const u = UTILS[m.util];
-    const raw = m.need > 0 ? Math.ceil(m.need - 1e-9) + spare : 0;
-    return { want: Math.min(u.max, raw), over: raw > u.max ? raw : 0 };
-  }
-
-  // What the game bills at the next bill, all subscriptions together (cents).
-  // mult: the NPC power price multiplier (never below 1 here, so a misread can only make it more careful).
-  function billsOf(st, mult = 1) {
-    let t = (st.isp ?? 0) * RATES.bandwidth;
-    for (const o of Object.values(st.subscriptions ?? {})) for (const [k, l] of Object.entries(o ?? {})) t += (l ?? 0) * (RATES[k] ?? 0) * (k === 'power' ? Math.max(1, mult) : 1);
-    return t;
-  }
-
-  // What to do about one level. peak: the highest want over the hold window; observedMs: how long it has been watched;
-  // ticksToBill: ticks until the next bill (null: unknown); bills: what that bill is now. Returns { kind: 'ok' | 'raise' | 'lower' | 'hold' | 'broke', ... }.
-  // urgent: the want without what stalled groups wait for (null: all of it is urgent). mult: the NPC power price multiplier.
-  function decide({ util, have, want, peak, observedMs, holdMs, money, bills = 0, ticksToBill, canLower = true, lowerWindowTicks = cfg.lowerWindowTicks, urgent = null, mult = 1, raiseHoldTicks = cfg.raiseHoldTicks }) {
-    const rate = UTILS[util].rate * (util === 'power' ? Math.max(1, mult) : 1);
-    // A raise is charged up front for the period and the bill charges the level again: one only stalled groups need waits out the
-    // last raiseHoldTicks before the bill instead of paying twice for a few seconds.
-    if (want > have && urgent != null && urgent <= have && ticksToBill != null && ticksToBill < raiseHoldTicks) return { kind: 'hold', why: 'raising for stalled groups after the bill' };
-    if (want > have) {
-      // Each extra unit costs its rate now and again in the next bill: cash left after the bill as it is must pay both.
-      const afford = have + Math.floor(Math.max(0, money - bills) / (2 * rate));
-      const level = Math.min(want, afford);
-      if (level <= have) return { kind: 'broke', level: want };
-      return { kind: 'raise', level, partial: level < want };
+    const ixRef = new WeakMap();
+    function idx(catalog) {
+      let x = ixRef.get(catalog);
+      if (!x) { x = { b: new Map((catalog.buildings ?? []).map((b) => [b.id, b])), r: new Map((catalog.recipes ?? []).map((r) => [r.id, r])) }; ixRef.set(catalog, x); }
+      return x;
     }
-    if (peak < have) {
-      if (!canLower) return { kind: 'hold', why: 'contracts not readable' };
-      if (observedMs < holdMs) return { kind: 'hold', why: 'watching the load first' };
-      if (ticksToBill != null && ticksToBill > lowerWindowTicks) return { kind: 'hold', why: 'lowering just before the next bill', level: peak };
-      return { kind: 'lower', level: peak };
-    }
-    return { kind: 'ok' };
-  }
+    const diurnal = (p, tick) => (((tick % DAY) + DAY) % DAY < DAYLIGHT ? p : Math.floor(p * NIGHT_PCT / 100));
 
-  // ---- the engine --------------------------------------------------------------------------------------------------------
-  const ctl = new Map();                 // util:region -> { samples: [{t, want}], first, fails, retryAt }
-  const info = { power: [], water: [] }; // the last look, for the page
-  let loopTimer = null, busy = false;
-  const anyOn = () => NAMES.some((u) => conf[u].on);
-  const unit = (u) => UTILS[u].unit;
-
-  function resetUtil(util) { for (const k of [...ctl.keys()]) if (k.startsWith(util + ':')) ctl.delete(k); info[util] = []; }
-
-  function regionsOf(util, st) {
-    const s = new Set();
-    for (const g of Object.values(st.groups ?? {})) s.add(g.region ?? 0);
-    for (const [r, o] of Object.entries(st.subscriptions ?? {})) if ((o?.[util] ?? 0) > 0) s.add(Number(r));
-    return [...s].sort((a, b) => a - b);
-  }
-
-  async function setLevel(util, region, level) {
-    const r = read(true);
-    if (!r || !r.wsOpen) return 'down';                         // nothing was sent: not a failed change
-    const d0 = core.markSend(r.mutTick);
-    r.ws.send(JSON.stringify({ type: 'SetSubscription', region, utility: util, level }));
-    const ok = await core.waitConfirm({
-      read, d0, timeoutMs: cfg.confirmMs,
-      pred: (x) => (x.st.subscriptions?.[String(region)]?.[util] ?? 0) === level,
-      closed: () => { throw new Error('socket closed while waiting'); },
-    });
-    return !!ok;
-  }
-
-  async function step(now = Date.now()) {
-    if (busy || unloaded) return;
-    busy = true;
-    try {
-      let r = read(true);
-      for (const util of NAMES) {
-        if (!conf[util].on) { info[util] = []; continue; }
-        if (!r) { info[util] = [{ text: 'Waiting for the game', tone: 'muted' }]; continue; }
-        const out = [];
-        for (const region of regionsOf(util, r.st)) {
-          if (unloaded || !conf[util].on) break;                    // switched off while an earlier change was being confirmed
-          const row = await tend(util, region, r, now);
-          out.push(row);
-          if (row.sent) r = read(true) ?? r;                        // the cash and levels changed: the next one is decided on the new state
+    // ---- what is needed (pure: no I/O) -----------------------------------------------------------------------------------
+    // The page's numbers for one utility in one region. Returns what the groups draw, what is generated, stored or bought, what
+    // stalled groups wait for, and need: the subscription that covers all of it (can be negative: the Corporation has a surplus).
+    // flows: the engine's line flows [{ from, to, sent, delivered }] (power only): Lines in add supply, Lines out count as load, as on the page.
+    function measure(util, region, st, catalog, tick, contracts, flows = []) {
+      const R = String(region), ix = idx(catalog);
+      const have = st.subscriptions?.[R]?.[util] ?? 0;
+      const groups = Object.values(st.groups ?? {}).filter((g) => (g.region ?? 0) === region);
+      const stockOf = (item) => (INTANGIBLE.has(item) ? (st.items?.[item] ?? 0) : (st.stock?.[R]?.[item] ?? 0));
+      let load = 0, gen = 0;
+      for (const g of groups) {
+        const work = g.work ?? [];
+        if (work.length) load += (ix.b.get(g.building)?.draws?.[util] ?? 0) * g.count;
+        for (const w of work) {
+          const rc = ix.r.get(w.recipe);
+          if (!rc) continue;
+          load += (rc.draws?.[util] ?? 0) * w.runs;
+          const p = (rc.generates?.[util] ?? 0) * w.runs;
+          gen += rc.diurnal ? diurnal(p, tick) : p;
         }
-        info[util] = conf[util].on ? out : [];
       }
-      render();
-    } catch (e) { console.error('[autoUtil]', e); }
-    finally { busy = false; }
-  }
-
-  async function tend(util, region, r, now) {
-    const key = util + ':' + region, u = UTILS[util];
-    let c = ctl.get(key);
-    if (!c) ctl.set(key, c = { samples: [], first: now, fails: 0, retryAt: 0 });
-    const m = measure(util, region, r.st, r.catalog, r.tick, r.contracts, r.flows);
-    const { want, over } = wantOf(m, conf[util].spare);
-    const urgent = wantOf({ ...m, need: m.need - m.waiting }, conf[util].spare).want;
-    const mult = util === 'power' ? Math.max(1, r.priceMult ?? 1) : 1;
-    const holdMs = conf.holdMin * 60000;
-    c.samples.push({ t: now, want });
-    while (c.samples.length > 1 && c.samples[0].t < now - holdMs) c.samples.shift();
-    const peak = Math.max(...c.samples.map((s) => s.want));
-    const money = r.st.items?.[0] ?? 0, bills = billsOf(r.st, r.priceMult ?? 1);
-    const ticksToBill = r.tick > 0 ? BILL_TICKS - (r.tick % BILL_TICKS) : null;
-    const d = decide({ util, have: m.have, want, peak, observedMs: now - c.first, holdMs, money, bills, ticksToBill, canLower: Array.isArray(r.contracts), urgent, mult });
-    const where = regionName(region);
-    const row = { region, util, have: m.have, need: m.need, want, kind: d.kind };
-    if (d.kind === 'raise' || d.kind === 'lower') {
-      if (now < c.retryAt) return { ...row, text: 'Retrying in ' + Math.ceil((c.retryAt - now) / 1000) + ' s', tone: 'warn' };
-      const was = m.have;
-      const res = await setLevel(util, region, d.level);
-      if (res === 'down') return { ...row, text: 'Waiting for the game connection', tone: 'muted' };
-      if (res === true) {
-        c.fails = 0; c.retryAt = 0;
-        const why = d.kind === 'raise' ? 'need ' + Math.ceil(m.need) + (d.partial ? ', cash pays for ' + d.level + ' only' : '') : 'highest need in the last ' + conf.holdMin + ' min: ' + peak;
-        core.ledger.add(TAG, 'action', where + ' ' + util + ' ' + u.noun + ' ' + was + ' → ' + d.level + ' ' + unit(util) + ' (' + why + ')');
-        return { ...row, have: d.level, sent: true, text: (d.kind === 'raise' ? 'Raised to ' : 'Lowered to ') + d.level + ' ' + unit(util), tone: 'good' };
+      const owned = (id) => (st.building_pool?.[R]?.[id] ?? 0) + groups.filter((g) => g.building === id).reduce((a, g) => a + g.count, 0);
+      let dischargeCap = 0;
+      for (const b of catalog.buildings ?? []) { const s = b.storage?.[util]; if (s) dischargeCap += (s.discharge_limit ?? 0) * owned(b.id); }
+      // Stored is in MW-ticks (7,200 = 1 MWh): count only the rate it can keep up until the next bill, so a Battery Bank that would run
+      // dry mid-period does not cut the subscription. Right after a bill that is stored / 1,200, and the hold window keeps that sample.
+      const stored = st.stored?.[R]?.[util] ?? 0, toBill = tick > 0 ? BILL_TICKS - (tick % BILL_TICKS) : 0;
+      const discharge = Math.min(dischargeCap, stored, toBill ? stored / toBill : stored);
+      const lines = util === 'power' && Array.isArray(flows) ? flows : [];
+      const lineIn = lines.filter((f) => f.to === region).reduce((a, f) => a + (Number(f.delivered) || 0), 0);
+      const lineOut = lines.filter((f) => f.from === region && f.delivered > 0).reduce((a, f) => a + (Number(f.sent) || 0), 0);
+      const corp = st.ssi?.corp_id;
+      const deal = (who, field) => (contracts ?? []).filter((c) => c.utility === util && c.region === region && c.state === 'Active' && c[who] === corp).reduce((a, c) => a + (c[field] ?? 0), 0);
+      // A bought contract counts its whole capacity, less the part of what the buyer draws (up to the contract) that the seller is not
+      // delivering: in a shortfall during its grace period the grid covers that gap. What is promised to others is owed, whatever has got through.
+      const short = (c) => Math.max(0, Math.min(Math.max(c.drawn ?? 0, 0), c.amount ?? 0) - Math.max(c.delivered ?? 0, 0));
+      const bought = (contracts ?? []).filter((c) => c.utility === util && c.region === region && c.state === 'Active' && c.buyer === corp);
+      const imported = bought.reduce((a, c) => a + (c.amount ?? 0) - short(c), 0), sold = deal('seller', 'amount');
+      // A group that could start but whose draw is more than the free capacity is stalled; it starts once that much more is free.
+      // A group with no machines yet (equipped 0) cannot start whatever the power: the game calls it "unequipped", not stalled.
+      const free = Math.max(0, have + gen + discharge + imported + lineIn - load - sold - lineOut);
+      let waiting = 0;
+      for (const g of groups) {
+        if (g.paused || g.equipped === 0 || (g.work ?? []).length) continue;
+        const draw = (ix.b.get(g.building)?.draws?.[util] ?? 0) * g.count;
+        if (!(draw > 0) || draw <= free) continue;
+        const rc = (g.recipe != null && (st.recipes?.[String(g.recipe)] ?? ix.r.get(g.recipe))) || null;
+        if (!rc || !(rc.inputs ?? []).every((i) => stockOf(i.item) >= i.amount)) continue;
+        waiting += draw;
       }
-      c.fails++;
-      c.retryAt = now + Math.min(60000, cfg.backoffMs * 2 ** c.fails);
-      core.ledger.add(TAG, 'fail', 'not confirmed: ' + util + ' to ' + d.level + ' ' + unit(util) + ' (' + c.fails + '/' + MAX_FAILS + ')');
-      if (c.fails >= MAX_FAILS) {
-        conf[util].on = false; save(); ctl.delete(key);
-        core.ledger.add(TAG, 'fail', 'Auto ' + util + ' switched off: the server did not apply ' + MAX_FAILS + ' changes in a row');
-        core.toast('Auto ' + util + ' switched off: the game did not apply the change', 'error');
-        renderAll();
-      }
-      return { ...row, sent: true, text: 'Change not confirmed (' + c.fails + '/' + MAX_FAILS + ')', tone: 'warn' };
+      return { util, region, have, load, sold, gen, discharge, imported, lineIn, lineOut, waiting, need: load + sold + lineOut + waiting - gen - discharge - imported - lineIn };
     }
-    c.fails = 0; c.retryAt = 0;                                   // nothing to send: earlier failures are not "in a row" any more
-    const lowNote = m.need < 0 ? ' (surplus ' + Math.round(-m.need) + ')' : '';
-    if (d.kind === 'broke') return { ...row, text: 'Needs ' + want + ' ' + unit(util) + ' but cash cannot cover the upfront ' + usd((want - m.have) * u.rate * mult) + ' and the next bill' + (mult > 1 ? ' (NPC power x' + mult + ')' : ''), tone: 'warn' };
-    if (over) return { ...row, text: 'Needs ' + Math.ceil(over) + ' ' + unit(util) + ', the cap is ' + u.max, tone: 'warn' };
-    if (d.kind === 'hold') return { ...row, text: 'Holding ' + m.have + ' ' + unit(util) + ': ' + d.why, tone: 'muted' };
-    return { ...row, text: 'Following the load: ' + m.have + ' ' + unit(util) + ' for ' + Math.max(0, Math.ceil(m.need)) + ' needed' + lowNote, tone: 'muted' };
-  }
 
-  function ensureLoop() {
-    if (anyOn() && !loopTimer && !unloaded) { loopTimer = core.every(cfg.cycleMs, step); }
-    else if (!anyOn() && loopTimer) { loopTimer(); loopTimer = null; }
-  }
+    // The level that covers a measurement: ceil(need) plus the spare (only when something needs it), over the cap flagged.
+    function wantOf(m, spare = 0) {
+      const u = UTILS[m.util];
+      const raw = m.need > 0 ? Math.ceil(m.need - 1e-9) + spare : 0;
+      return { want: Math.min(u.max, raw), over: raw > u.max ? raw : 0 };
+    }
 
-  function set(util, on) {
-    if (!UTILS[util]) throw new Error('utility must be one of ' + NAMES.join(', '));
-    on = !!on;
-    if (conf[util].on === on) return on;
-    conf[util].on = on; save();
-    resetUtil(util);
-    core.ledger.add(TAG, 'info', 'Auto ' + util + (on ? ' on' : ' off'));
-    ensureLoop();
-    renderAll();
-    return on;
-  }
-  function stop() { for (const u of NAMES) set(u, false); }
-  function status() { return NAMES.map((u) => u + ': ' + (conf[u].on ? (info[u].map((x) => (x.region != null ? regionName(x.region) + ' ' : '') + x.text).join('; ') || 'on') : 'off')).join(' | '); }
+    // What the game bills at the next bill, all subscriptions together (cents).
+    // mult: the NPC power price multiplier (never below 1 here, so a misread can only make it more careful).
+    function billsOf(st, mult = 1) {
+      let t = (st.isp ?? 0) * RATES.bandwidth;
+      for (const o of Object.values(st.subscriptions ?? {})) for (const [k, l] of Object.entries(o ?? {})) t += (l ?? 0) * (RATES[k] ?? 0) * (k === 'power' ? Math.max(1, mult) : 1);
+      return t;
+    }
 
-  // ---- the page ------------------------------------------------------------------------------------------------------
-  const CSS = '.au-host{position:relative}' +
-    '.au-sw{position:absolute;top:8px;right:10px;display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--ink-2,#b6b6ba);cursor:pointer;user-select:none}' +
-    '.au-sw input{position:absolute;opacity:0;width:0;height:0}' +
-    '.au-track{width:26px;height:14px;border-radius:7px;background:var(--surface-3,#27272a);border:1px solid var(--border,rgba(255,255,255,.18));position:relative;transition:background .15s}' +
-    '.au-track::after{content:"";position:absolute;top:1px;left:1px;width:10px;height:10px;border-radius:50%;background:var(--ink-2,#b6b6ba);transition:transform .15s}' +
-    '.au-sw input:checked+.au-track{background:var(--status-good,#22b573);border-color:transparent}' +
-    '.au-sw input:checked+.au-track::after{transform:translateX(12px);background:#fff}' +
-    '.au-sw input:focus-visible+.au-track{outline:2px solid var(--accent,#5b8def);outline-offset:2px}' +
-    '.au-note{margin-top:6px;font-size:11px;line-height:1.4;color:var(--muted,#808086)}.au-note.warn{color:var(--status-warn,#f2a93b)}.au-note.good{color:var(--status-good,#22b573)}' +
-    '@media (prefers-reduced-motion:reduce){.au-track,.au-track::after{transition:none}}';
-
-  let styleEl = null, obs = null, tickTimer = 0, passTimer = 0, mounted = false;
-  const tileOf = (util) => [...document.querySelectorAll('.stat-grid > .tile')].find((t) => t.querySelector(':scope > .label')?.textContent.trim() === UTILS[util].tile);
-
-  function inject() {
-    if (!HAS_DOM || unloaded || !mounted) return;
-    for (const util of NAMES) {
-      const tile = tileOf(util);
-      for (const el of document.querySelectorAll('[data-au="' + util + '"],[data-au-note="' + util + '"]')) if (el.parentElement !== tile) el.remove();
-      if (!tile) continue;
-      tile.classList.add('au-host');
-      let sw = tile.querySelector(':scope > [data-au="' + util + '"]'), note = tile.querySelector(':scope > [data-au-note="' + util + '"]');
-      if (!sw) {
-        const box = h('input', { type: 'checkbox', role: 'switch', 'aria-label': 'Auto ' + UTILS[util].noun + ' (' + util + ')', onchange: (e) => set(util, e.target.checked) });
-        sw = h('label', { class: 'au-sw', 'data-au': util, title: 'Keep the ' + UTILS[util].noun + ' subscription at what the groups need: up at once, down when the load has stayed low' },
-          box, h('span', { class: 'au-track' }), h('span', {}, 'Auto'));
-        tile.append(sw);
+    // What to do about one level. peak: the highest want over the hold window; observedMs: how long it has been watched;
+    // ticksToBill: ticks until the next bill (null: unknown); bills: what that bill is now. Returns { kind: 'ok' | 'raise' | 'lower' | 'hold' | 'broke', ... }.
+    // urgent: the want without what stalled groups wait for (null: all of it is urgent). mult: the NPC power price multiplier.
+    function decide({ util, have, want, peak, observedMs, holdMs, money, bills = 0, ticksToBill, canLower = true, lowerWindowTicks = cfg.lowerWindowTicks, urgent = null, mult = 1, raiseHoldTicks = cfg.raiseHoldTicks }) {
+      const rate = UTILS[util].rate * (util === 'power' ? Math.max(1, mult) : 1);
+      // A raise is charged up front for the period and the bill charges the level again: one only stalled groups need waits out the
+      // last raiseHoldTicks before the bill instead of paying twice for a few seconds.
+      if (want > have && urgent != null && urgent <= have && ticksToBill != null && ticksToBill < raiseHoldTicks) return { kind: 'hold', why: 'raising for stalled groups after the bill' };
+      if (want > have) {
+        // Each extra unit costs its rate now and again in the next bill: cash left after the bill as it is must pay both.
+        const afford = have + Math.floor(Math.max(0, money - bills) / (2 * rate));
+        const level = Math.min(want, afford);
+        if (level <= have) return { kind: 'broke', level: want };
+        return { kind: 'raise', level, partial: level < want };
       }
-      if (!note) { note = h('div', { class: 'au-note', 'data-au-note': util }); tile.append(note); }
-      const box = sw.querySelector('input');
-      if (box.checked !== conf[util].on) box.checked = conf[util].on;
-      const rows = info[util];
-      const text = !conf[util].on ? '' : (rows.length ? rows.map((x) => (rows.length > 1 && x.region != null ? regionName(x.region) + ': ' : '') + x.text).join(' · ') : 'Auto is on');
-      const tone = rows.find((x) => x.tone === 'warn') ? 'warn' : rows.find((x) => x.tone === 'good') ? 'good' : '';
-      if (note.textContent !== text) note.textContent = text;
-      note.className = 'au-note' + (tone ? ' ' + tone : '');
-      note.hidden = !text;
+      if (peak < have) {
+        if (!canLower) return { kind: 'hold', why: 'contracts not readable' };
+        if (observedMs < holdMs) return { kind: 'hold', why: 'watching the load first' };
+        if (ticksToBill != null && ticksToBill > lowerWindowTicks) return { kind: 'hold', why: 'lowering just before the next bill', level: peak };
+        return { kind: 'lower', level: peak };
+      }
+      return { kind: 'ok' };
     }
-  }
-  const render = () => { if (mounted && !unloaded) inject(); };
-  const renderAll = () => { if (mounted && !unloaded) { clearTimeout(passTimer); passTimer = setTimeout(inject, 60); } };
 
-  function mountUi() {
-    mounted = true;
-    styleEl = h('style', { id: 'au-style' }, CSS);
-    document.head.append(styleEl);
-    obs = core.ui.onDom(renderAll);
-    tickTimer = setInterval(inject, 1000);
-    inject();
-  }
-  function unmountUi() {
-    mounted = false;
-    obs?.(); obs = null;
-    clearInterval(tickTimer); clearTimeout(passTimer);
-    styleEl?.remove(); styleEl = null;
-    document.querySelectorAll('[data-au],[data-au-note]').forEach((e) => e.remove());
-    document.querySelectorAll('.au-host').forEach((e) => e.classList.remove('au-host'));
-  }
+    // ---- the engine --------------------------------------------------------------------------------------------------------
+    const ctl = new Map();                 // util:region -> { samples: [{t, want}], first, fails, retryAt }
+    const info = { power: [], water: [] }; // the last look, for the page
+    let loopTimer = null, busy = false;
+    const anyOn = () => NAMES.some((u) => conf[u].on);
+    const unit = (u) => UTILS[u].unit;
 
-  // ---- load --------------------------------------------------------------------------------------------------------------
-  W.autoUtil = {
-    set, stop, status, cfg, conf,
-    get running() { return anyOn(); },
-    exportCfg: () => ({ cfg: persistable() }),
-    importCfg(o) { const r = apply(o?.cfg ?? o); save(); ensureLoop(); renderAll(); return r; },
-    _measure: measure, _want: wantOf, _decide: decide, _step: step, _info: info,
-    _unload() { unloaded = true; loopTimer?.(); loopTimer = null; if (mounted) unmountUi(); },
-  };
+    function resetUtil(util) { for (const k of [...ctl.keys()]) if (k.startsWith(util + ':')) ctl.delete(k); info[util] = []; }
 
-  restore();
-  if (anyOn()) ensureLoop();
-  if (HAS_DOM) (async () => {
-    for (;;) {
-      if (unloaded) return;
-      if (document.querySelector('.primary-navigation') && read()) break;
-      await core.sleep(500);
+    function regionsOf(util, st) {
+      const s = new Set();
+      for (const g of Object.values(st.groups ?? {})) s.add(g.region ?? 0);
+      for (const [r, o] of Object.entries(st.subscriptions ?? {})) if ((o?.[util] ?? 0) > 0) s.add(Number(r));
+      return [...s].sort((a, b) => a - b);
     }
-    mountUi();
-    if (anyOn()) core.ledger.add(TAG, 'info', 'resumed: Auto ' + NAMES.filter((u) => conf[u].on).join(' + ') + ' from the last session');
-    console.log('[autoUtil] ready: "Auto" switch on the Load tile (power) and the Supply tile (water) of the Utilities pages, or autoUtil.set("power", true)');
+
+    async function setLevel(util, region, level) {
+      const r = read(true);
+      if (!r || !r.wsOpen) return 'down';                         // nothing was sent: not a failed change
+      const d0 = core.markSend(r.mutTick);
+      r.ws.send(JSON.stringify({ type: 'SetSubscription', region, utility: util, level }));
+      const ok = await core.waitConfirm({
+        read, d0, timeoutMs: cfg.confirmMs,
+        pred: (x) => (x.st.subscriptions?.[String(region)]?.[util] ?? 0) === level,
+        closed: () => { throw new Error('socket closed while waiting'); },
+      });
+      return !!ok;
+    }
+
+    async function step(now = Date.now()) {
+      if (busy || unloaded) return;
+      busy = true;
+      try {
+        let r = read(true);
+        for (const util of NAMES) {
+          if (!conf[util].on) { info[util] = []; continue; }
+          if (!r) { info[util] = [{ text: 'Waiting for the game', tone: 'muted' }]; continue; }
+          const out = [];
+          for (const region of regionsOf(util, r.st)) {
+            if (unloaded || !conf[util].on) break;                    // switched off while an earlier change was being confirmed
+            const row = await tend(util, region, r, now);
+            out.push(row);
+            if (row.sent) r = read(true) ?? r;                        // the cash and levels changed: the next one is decided on the new state
+          }
+          info[util] = conf[util].on ? out : [];
+        }
+        render();
+      } catch (e) { console.error('[autoUtil]', e); }
+      finally { busy = false; }
+    }
+
+    async function tend(util, region, r, now) {
+      const key = util + ':' + region, u = UTILS[util];
+      let c = ctl.get(key);
+      if (!c) ctl.set(key, c = { samples: [], first: now, fails: 0, retryAt: 0 });
+      const m = measure(util, region, r.st, r.catalog, r.tick, r.contracts, r.flows);
+      const { want, over } = wantOf(m, conf[util].spare);
+      const urgent = wantOf({ ...m, need: m.need - m.waiting }, conf[util].spare).want;
+      const mult = util === 'power' ? Math.max(1, r.priceMult ?? 1) : 1;
+      const holdMs = conf.holdMin * 60000;
+      c.samples.push({ t: now, want });
+      while (c.samples.length > 1 && c.samples[0].t < now - holdMs) c.samples.shift();
+      const peak = Math.max(...c.samples.map((s) => s.want));
+      const money = r.st.items?.[0] ?? 0, bills = billsOf(r.st, r.priceMult ?? 1);
+      const ticksToBill = r.tick > 0 ? BILL_TICKS - (r.tick % BILL_TICKS) : null;
+      const d = decide({ util, have: m.have, want, peak, observedMs: now - c.first, holdMs, money, bills, ticksToBill, canLower: Array.isArray(r.contracts), urgent, mult });
+      const where = regionName(region);
+      const row = { region, util, have: m.have, need: m.need, want, kind: d.kind };
+      if (d.kind === 'raise' || d.kind === 'lower') {
+        if (now < c.retryAt) return { ...row, text: 'Retrying in ' + Math.ceil((c.retryAt - now) / 1000) + ' s', tone: 'warn' };
+        const was = m.have;
+        const res = await setLevel(util, region, d.level);
+        if (res === 'down') return { ...row, text: 'Waiting for the game connection', tone: 'muted' };
+        if (res === true) {
+          c.fails = 0; c.retryAt = 0;
+          const why = d.kind === 'raise' ? 'need ' + Math.ceil(m.need) + (d.partial ? ', cash pays for ' + d.level + ' only' : '') : 'highest need in the last ' + conf.holdMin + ' min: ' + peak;
+          core.ledger.add(TAG, 'action', where + ' ' + util + ' ' + u.noun + ' ' + was + ' → ' + d.level + ' ' + unit(util) + ' (' + why + ')');
+          return { ...row, have: d.level, sent: true, text: (d.kind === 'raise' ? 'Raised to ' : 'Lowered to ') + d.level + ' ' + unit(util), tone: 'good' };
+        }
+        if (core.link().state !== 'open') return { ...row, text: 'Waiting for the game connection', tone: 'muted' };
+        c.fails++;
+        c.retryAt = now + Math.min(60000, cfg.backoffMs * 2 ** c.fails);
+        core.ledger.add(TAG, 'fail', 'not confirmed: ' + util + ' to ' + d.level + ' ' + unit(util) + ' (' + c.fails + '/' + MAX_FAILS + ')');
+        if (c.fails >= MAX_FAILS) {
+          c.fails = 0; c.retryAt = now + 600000;
+          core.ledger.add(TAG, 'fail', 'Auto ' + util + ': the server did not apply ' + MAX_FAILS + ' changes in a row; it retries every 10 min');
+          renderAll();
+        }
+        return { ...row, sent: true, text: 'Change not confirmed (' + c.fails + '/' + MAX_FAILS + ')', tone: 'warn' };
+      }
+      c.fails = 0; c.retryAt = 0;                                   // nothing to send: earlier failures are not "in a row" any more
+      const lowNote = m.need < 0 ? ' (surplus ' + Math.round(-m.need) + ')' : '';
+      if (d.kind === 'broke') return { ...row, text: 'Needs ' + want + ' ' + unit(util) + ' but cash cannot cover the upfront ' + usd((want - m.have) * u.rate * mult) + ' and the next bill' + (mult > 1 ? ' (NPC power x' + mult + ')' : ''), tone: 'warn' };
+      if (over) return { ...row, text: 'Needs ' + Math.ceil(over) + ' ' + unit(util) + ', the cap is ' + u.max, tone: 'warn' };
+      if (d.kind === 'hold') return { ...row, text: 'Holding ' + m.have + ' ' + unit(util) + ': ' + d.why, tone: 'muted' };
+      return { ...row, text: 'Following the load: ' + m.have + ' ' + unit(util) + ' for ' + Math.max(0, Math.ceil(m.need)) + ' needed' + lowNote, tone: 'muted' };
+    }
+
+    function ensureLoop() {
+      if (anyOn() && !loopTimer && !unloaded) { loopTimer = core.every(cfg.cycleMs, step); }
+      else if (!anyOn() && loopTimer) { loopTimer(); loopTimer = null; }
+    }
+
+    function set(util, on) {
+      if (!UTILS[util]) throw new Error('utility must be one of ' + NAMES.join(', '));
+      on = !!on;
+      if (conf[util].on === on) return on;
+      conf[util].on = on; save();
+      resetUtil(util);
+      core.ledger.add(TAG, 'info', 'Auto ' + util + (on ? ' on' : ' off'));
+      ensureLoop();
+      renderAll();
+      return on;
+    }
+    function stop() { for (const u of NAMES) set(u, false); }
+    function status() { return NAMES.map((u) => u + ': ' + (conf[u].on ? (info[u].map((x) => (x.region != null ? regionName(x.region) + ' ' : '') + x.text).join('; ') || 'on') : 'off')).join(' | '); }
+
+    // ---- the page ------------------------------------------------------------------------------------------------------
+    const CSS = '.au-host{position:relative}' +
+      '.au-sw{position:absolute;top:8px;right:10px;display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--ink-2,#b6b6ba);cursor:pointer;user-select:none}' +
+      '.au-sw input{position:absolute;opacity:0;width:0;height:0}' +
+      '.au-track{width:26px;height:14px;border-radius:7px;background:var(--surface-3,#27272a);border:1px solid var(--border,rgba(255,255,255,.18));position:relative;transition:background .15s}' +
+      '.au-track::after{content:"";position:absolute;top:1px;left:1px;width:10px;height:10px;border-radius:50%;background:var(--ink-2,#b6b6ba);transition:transform .15s}' +
+      '.au-sw input:checked+.au-track{background:var(--status-good,#22b573);border-color:transparent}' +
+      '.au-sw input:checked+.au-track::after{transform:translateX(12px);background:#fff}' +
+      '.au-sw input:focus-visible+.au-track{outline:2px solid var(--accent,#5b8def);outline-offset:2px}' +
+      '.au-note{margin-top:6px;font-size:11px;line-height:1.4;color:var(--muted,#808086)}.au-note.warn{color:var(--status-warn,#f2a93b)}.au-note.good{color:var(--status-good,#22b573)}' +
+      '@media (prefers-reduced-motion:reduce){.au-track,.au-track::after{transition:none}}';
+
+    let styleEl = null, obs = null, tickTimer = 0, passTimer = 0, mounted = false;
+    const tileOf = (util) => [...document.querySelectorAll('.stat-grid > .tile')].find((t) => t.querySelector(':scope > .label')?.textContent.trim() === UTILS[util].tile);
+
+    function inject() {
+      if (!HAS_DOM || unloaded || !mounted) return;
+      for (const util of NAMES) {
+        const tile = tileOf(util);
+        for (const el of document.querySelectorAll('[data-au="' + util + '"],[data-au-note="' + util + '"]')) if (el.parentElement !== tile) el.remove();
+        if (!tile) continue;
+        tile.classList.add('au-host');
+        let sw = tile.querySelector(':scope > [data-au="' + util + '"]'), note = tile.querySelector(':scope > [data-au-note="' + util + '"]');
+        if (!sw) {
+          const box = h('input', { type: 'checkbox', role: 'switch', 'aria-label': 'Auto ' + UTILS[util].noun + ' (' + util + ')', onchange: (e) => set(util, e.target.checked) });
+          sw = h('label', { class: 'au-sw', 'data-au': util, title: 'Keep the ' + UTILS[util].noun + ' subscription at what the groups need: up at once, down when the load has stayed low' },
+            box, h('span', { class: 'au-track' }), h('span', {}, 'Auto'));
+          tile.append(sw);
+        }
+        if (!note) { note = h('div', { class: 'au-note', 'data-au-note': util }); tile.append(note); }
+        const box = sw.querySelector('input');
+        if (box.checked !== conf[util].on) box.checked = conf[util].on;
+        const rows = info[util];
+        const text = !conf[util].on ? '' : (rows.length ? rows.map((x) => (rows.length > 1 && x.region != null ? regionName(x.region) + ': ' : '') + x.text).join(' · ') : 'Auto is on');
+        const tone = rows.find((x) => x.tone === 'warn') ? 'warn' : rows.find((x) => x.tone === 'good') ? 'good' : '';
+        if (note.textContent !== text) note.textContent = text;
+        note.className = 'au-note' + (tone ? ' ' + tone : '');
+        note.hidden = !text;
+      }
+    }
+    const render = () => { if (mounted && !unloaded) inject(); };
+    const renderAll = () => { if (mounted && !unloaded) { clearTimeout(passTimer); passTimer = setTimeout(inject, 60); } };
+
+    function mountUi() {
+      mounted = true;
+      styleEl = h('style', { id: 'au-style' }, CSS);
+      document.head.append(styleEl);
+      obs = core.ui.onDom(renderAll);
+      tickTimer = setInterval(inject, 1000);
+      inject();
+    }
+    function unmountUi() {
+      mounted = false;
+      obs?.(); obs = null;
+      clearInterval(tickTimer); clearTimeout(passTimer);
+      styleEl?.remove(); styleEl = null;
+      document.querySelectorAll('[data-au],[data-au-note]').forEach((e) => e.remove());
+      document.querySelectorAll('.au-host').forEach((e) => e.classList.remove('au-host'));
+    }
+
+    // ---- load --------------------------------------------------------------------------------------------------------------
+    W.autoUtil = {
+      set, stop, status, cfg, conf,
+      get running() { return anyOn(); },
+      exportCfg: () => ({ cfg: persistable() }),
+      importCfg(o) { const r = apply(o?.cfg ?? o); save(); ensureLoop(); renderAll(); return r; },
+      _measure: measure, _want: wantOf, _decide: decide, _step: step, _info: info,
+      _unload() { unloaded = true; loopTimer?.(); loopTimer = null; if (mounted) unmountUi(); },
+    };
+
+    restore();
+    if (anyOn()) ensureLoop();
+    if (HAS_DOM) (async () => {
+      for (; ;) {
+        if (unloaded) return;
+        if (document.querySelector('.primary-navigation') && read()) break;
+        await core.sleep(500);
+      }
+      mountUi();
+      if (anyOn()) core.ledger.add(TAG, 'info', 'resumed: Auto ' + NAMES.filter((u) => conf[u].on).join(' + ') + ' from the last session');
+      console.log('[autoUtil] ready: "Auto" switch on the Load tile (power) and the Supply tile (water) of the Utilities pages, or autoUtil.set("power", true)');
+    })();
   })();
-})();
 } catch (e) { console.error('[IdleCorp] Auto utilities failed to load:', e); }
-// @@END utilities// ============================================================================
+// @@END utilities// @@MODULE keep-online
+// Keeps the game socket alive while the tab is hidden. The game's own dead-socket watchdog (every 2 s) and its new-build
+// check act only while document.visibilityState is "visible", so a hidden tab with a half-open socket stays offline until
+// you come back. This makes the page report "visible" to the game: document.hidden is false and visibilityState is
+// "visible" (own properties on the document; the native getters stay on Document.prototype).
+// visibilitychange is not blocked. After install, one bubbling visibilitychange is dispatched, so listeners that read the
+// state at startup (Supabase auto-refresh, which starts only when visible) check again.
+// Off: the own properties are removed and one visibilitychange is dispatched, so everything re-reads the real state.
+//   keepOnline.set(true | false)   keepOnline.status()   // the switch; the socket gap and reconnects seen while hidden
+// Saved in this browser (idc.keepOnline), on by default. Settings export/import carry it.
+try {
+  (() => {
+    const W = typeof window !== 'undefined' ? window : globalThis;
+    const core = W.idleCore;
+    if (!core) throw new Error('the shared core did not load');
+    const HAS_DOM = typeof document !== 'undefined' && !!document.body;
+    const store = (() => { try { return W.localStorage ?? null; } catch { return null; } })();
+    const KEY = 'idc.keepOnline';
+    const TAG = 'KO';
+    const GAP_LOG_MS = 30000;
+    if (W.keepOnline?._unload) W.keepOnline._unload();
+
+    let saved = null;
+    try { saved = JSON.parse(store?.getItem(KEY) || 'null'); } catch { }
+    let on = typeof saved?.on === 'boolean' ? saved.on : true;
+
+    // Socket watch: the longest stretch without a new text frame, and how often the game replaced its socket.
+    const watch = { count: -1, changedAt: Date.now(), longestGapMs: 0, ws: null, reconnects: 0, logged: false };
+    function check() {
+      const s = core.sock, now = Date.now();
+      if (s.textMsgs !== watch.count) { watch.count = s.textMsgs; watch.changedAt = now; watch.logged = false; }
+      else {
+        const gap = now - watch.changedAt;
+        if (gap > watch.longestGapMs) watch.longestGapMs = gap;
+        if (gap > GAP_LOG_MS && !watch.logged) { watch.logged = true; core.ledger.add(TAG, 'info', 'no game frame for ' + Math.round(gap / 1000) + ' s'); }
+      }
+      if (s.ws !== watch.ws) { if (watch.ws) watch.reconnects++; watch.ws = s.ws; }
+    }
+    const stopWatch = core.every(5000, check);
+
+    // The spoof. Off removes the own properties; either way one bubbling visibilitychange goes out, so listeners re-read the state.
+    function applySpoof(enable) {
+      if (!HAS_DOM) return;
+      if (enable) {
+        Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+        Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
+      } else {
+        delete document.hidden;
+        delete document.visibilityState;
+      }
+      document.dispatchEvent(new Event('visibilitychange', { bubbles: true }));
+    }
+
+    function set(v) {
+      on = !!v;
+      try { store?.setItem(KEY, JSON.stringify({ on })); } catch { }
+      applySpoof(on);
+      core.ledger.add(TAG, 'info', 'keep online ' + (on ? 'on: the game sees the tab as visible' : 'off: the tab reports its real visibility'));
+      return on;
+    }
+    function status() {
+      check();
+      return { on, realHidden: core.realHidden(), link: core.link().state, longestGapMs: watch.longestGapMs, reconnects: watch.reconnects };
+    }
+
+    if (on) applySpoof(true);
+    W.keepOnline = {
+      set, status,
+      get on() { return on; },
+      exportCfg: () => ({ on }),
+      importCfg(o) {
+        if (typeof o?.on !== 'boolean') return { applied: [], skipped: ['on'] };
+        set(o.on);
+        return { applied: ['on'], skipped: [] };
+      },
+      _unload() {
+        stopWatch();
+        if (HAS_DOM) { delete document.hidden; delete document.visibilityState; }
+      },
+    };
+    console.log('[keepOnline] ready: ' + (on ? 'on (the game sees the tab as visible)' : 'off') + '. keepOnline.set(true|false), keepOnline.status()');
+  })();
+} catch (e) { console.error('[IdleCorp] keep-online failed to load:', e); }
+// @@END keep-online
+// ============================================================================
 // 3d. CORE PLAN (window.corePlan)
 // ============================================================================
 // Coordinator for wiki/guides/core-game-plan.md: reads the game, says which stage (A-D) the Corporation is in and which of the start
 // conditions S1-S7 and end conditions E1-E5 hold (with the reason for each that does not), and sends the few purchases it owns.
 //   corePlan.status() / corePlan.plan()        // what it sees and would do now (nothing is sent)
-//   corePlan.start({ dryRun: false })          // dry run unless told otherwise; Live resumes after a page reload (60 s to cancel)
+//   corePlan.start({ dryRun: true })           // dry run; Live is the default, and Live resumes after a page reload (60 s to cancel)
 //   corePlan.stop() / hold(who) / release(who) // like earlyGame; CD Farm holds every registered module while it buys
 //   corePlan.duties()                          // what Autopilot still does that Core plan has not taken over
 // What it sends today (everything else is read-out only):
@@ -5216,137 +5312,137 @@ try {
 // The pure part (corePlan._view / _decide) has no DOM, sockets or timers; the tests drive it with saved boards.
 // @@MODULE core-plan
 try {
-(() => {
-  const W = typeof window !== 'undefined' ? window : globalThis;
-  const core = W.idleCore;
-  if (!core) throw new Error('the shared core did not load');
-  if (!core.planner || !core.coreMath) throw new Error('planner / core-math did not load');
-  const store = (() => { try { return W.localStorage ?? null; } catch { return null; } })();
-  const sstore = (() => { try { return W.sessionStorage ?? null; } catch { return null; } })();
-  const KEY = 'corePlan.v1', LIVE_KEY = KEY + '.live', LOCK_KEY = KEY + '.lock';
-  const TAG = 'CP';
-  const TAB = Math.random().toString(36).slice(2, 8);
-  if (W.corePlan?._unload) W.corePlan._unload();
-  let unloaded = false;
-  const P = core.planner, M = core.coreMath;
-  const REGION = 0, MONEY = 0, CD = 24, STARTER_ACRES = 25, FIRST_ACRE = 5000, ACRE_CAP = 360;   // FIRST_ACRE in cents
+  (() => {
+    const W = typeof window !== 'undefined' ? window : globalThis;
+    const core = W.idleCore;
+    if (!core) throw new Error('the shared core did not load');
+    if (!core.planner || !core.coreMath) throw new Error('planner / core-math did not load');
+    const store = (() => { try { return W.localStorage ?? null; } catch { return null; } })();
+    const sstore = (() => { try { return W.sessionStorage ?? null; } catch { return null; } })();
+    const KEY = 'corePlan.v1', LIVE_KEY = KEY + '.live', LOCK_KEY = KEY + '.lock';
+    const TAG = 'CP';
+    const TAB = Math.random().toString(36).slice(2, 8);
+    if (W.corePlan?._unload) W.corePlan._unload();
+    let unloaded = false;
+    const P = core.planner, M = core.coreMath;
+    const REGION = 0, MONEY = 0, CD = 24, STARTER_ACRES = 25, FIRST_ACRE = 5000, ACRE_CAP = 360;   // FIRST_ACRE in cents
 
-  const DEFAULTS = {
-    dryRun: true,
-    intervalMs: 5000, confirmMs: 8000, maxFails: 3, cmdsPerMin: 20,
-    landPaybackAB: 20,            // Stage A-B: buy an acre + Cotton Farm while payback <= this many hours (wiki 4.6)
-    cottonFarmHourly: 790,        // dollars per hour one Cotton Farm earns (wiki 4.6); fallback when no live Cotton bid prices it
-    landPaybackFraction: 1 / 3,   // Stage C-D: payback <= T_wall x this
-    cashReserve: 0,               // cents kept on top of the other modules' money floors
-    ifReserve: 44,                // upper cap on the Iron Frames kept back for the prototypes and first builds (ifNeed counts what is still needed)
-    bufferAcres: 2,               // acres kept free for the CD farm: one building being built + one waiting for demolition (my-plan.js cdBufferAcres)
-    cyclesPerHour: 600,           // the CD rate the land rule assumes until a measured one exists
-    handoff: true,                // at Plan done: engine items to Autopilot's neverSell, its CD booster off
-    handoffStopAutopilot: true,   // ... then stop Autopilot once (Core plan resumes bill-paused groups); a user restart is left alone
-    unlocks: true, land: true,    // the two directors that send
-    liveResume: true,             // after a reload Live resumes (60 s countdown); off = it comes back as a dry run
-    resumeSeconds: 60,
-  };
-  const SESSION_ONLY = ['dryRun'];
-  const cfg = { ...DEFAULTS };
-  const ENGINE_ITEMS = ['Wood', 'Planks', 'Iron Sheet', 'Concrete', 'Glass', 'Bookshelf', 'Table', 'Chair', 'Bench', 'Wooden Frame', 'Iron Frame',
-    'Iron Ore', 'Coal', 'Limestone', 'Sand', 'Copper Ore', 'Copper Wire', 'Wired Frame'];   // cp-cadence NEVER plus the ores the kits use
-  const UNLOCKS = ['Assembly Plant', 'Retail Store', 'Oil Rig'];   // in this order (wiki 9)
-  const S2_NEEDS = ['Mine', 'Quarry', 'Sawmill', 'Smelter', 'Workshop', 'Kiln', 'Manufacturing Lab'];   // Factory and Paper Mill are not on the plan's path
-  const REFINERY_CD = 500000;   // fallback when the tech tree lacks it (wiki data/tech-tree.md, 2026-11-24 patch); ladder and endgame share it
+    const DEFAULTS = {
+      dryRun: false,
+      intervalMs: 5000, confirmMs: 8000, maxFails: 3, cmdsPerMin: 20,
+      landPaybackAB: 20,            // Stage A-B: buy an acre + Cotton Farm while payback <= this many hours (wiki 4.6)
+      cottonFarmHourly: 790,        // dollars per hour one Cotton Farm earns (wiki 4.6); fallback when no live Cotton bid prices it
+      landPaybackFraction: 1 / 3,   // Stage C-D: payback <= T_wall x this
+      cashReserve: 0,               // cents kept on top of the other modules' money floors
+      ifReserve: 44,                // upper cap on the Iron Frames kept back for the prototypes and first builds (ifNeed counts what is still needed)
+      bufferAcres: 2,               // acres kept free for the CD farm: one building being built + one waiting for demolition (my-plan.js cdBufferAcres)
+      cyclesPerHour: 600,           // the CD rate the land rule assumes until a measured one exists
+      handoff: true,                // at Plan done: engine items to Autopilot's neverSell, its CD booster off
+      handoffStopAutopilot: true,   // ... then stop Autopilot once (Core plan resumes bill-paused groups); a user restart is left alone
+      unlocks: true, land: true,    // the two directors that send
+      liveResume: true,             // after a reload Live resumes (60 s countdown); off = it comes back as a dry run
+      resumeSeconds: 60,
+    };
+    const SESSION_ONLY = ['dryRun'];
+    const cfg = { ...DEFAULTS };
+    const ENGINE_ITEMS = ['Wood', 'Planks', 'Iron Sheet', 'Concrete', 'Glass', 'Bookshelf', 'Table', 'Chair', 'Bench', 'Wooden Frame', 'Iron Frame',
+      'Iron Ore', 'Coal', 'Limestone', 'Sand', 'Copper Ore', 'Copper Wire', 'Wired Frame'];   // cp-cadence NEVER plus the ores the kits use
+    const UNLOCKS = ['Assembly Plant', 'Retail Store', 'Oil Rig'];   // in this order (wiki 9)
+    const S2_NEEDS = ['Mine', 'Quarry', 'Sawmill', 'Smelter', 'Workshop', 'Kiln', 'Manufacturing Lab'];   // Factory and Paper Mill are not on the plan's path
+    const REFINERY_CD = 500000;   // fallback when the tech tree lacks it (wiki data/tech-tree.md, 2026-11-24 patch); ladder and endgame share it
 
-  // ---- ids by name (the client catalog array is not indexed by id) ------------------------------------------------------
-  const idxRef = new WeakMap();
-  function names(raw) {
-    let x = idxRef.get(raw);
-    if (!x) {
-      const C = P.normalize(raw);
-      const by = (m) => Object.fromEntries(Object.values(m ?? {}).map((e) => [e.name, e.id]));
-      const pieces = Object.fromEntries([...(raw.machines ?? []), ...(raw.belts ?? [])].map((p) => [p.item, p]));   // floor pieces, for parts lists
-      x = { C, techs: raw.techs ?? [], pieces, b: by(C.buildings), r: by(C.recipes), i: by(C.items) };   // planner.normalize drops the tech list
-      idxRef.set(raw, x);
+    // ---- ids by name (the client catalog array is not indexed by id) ------------------------------------------------------
+    const idxRef = new WeakMap();
+    function names(raw) {
+      let x = idxRef.get(raw);
+      if (!x) {
+        const C = P.normalize(raw);
+        const by = (m) => Object.fromEntries(Object.values(m ?? {}).map((e) => [e.name, e.id]));
+        const pieces = Object.fromEntries([...(raw.machines ?? []), ...(raw.belts ?? [])].map((p) => [p.item, p]));   // floor pieces, for parts lists
+        x = { C, techs: raw.techs ?? [], pieces, b: by(C.buildings), r: by(C.recipes), i: by(C.items) };   // planner.normalize drops the tech list
+        idxRef.set(raw, x);
+      }
+      return x;
     }
-    return x;
-  }
-  const acrePriceCents = (n) => { let p = FIRST_ACRE; for (let i = 0; i < n; i++) p = Math.floor(p * 41 / 40); return p; };
-  const usd = (c) => '$' + (c / 100).toLocaleString('en-US', { maximumFractionDigits: 0 });
-  // ---- purchase and floor pieces shared by the buildout, lab and endgame directors ----------------------------------------------------
-  // cents: $20 per new MW + 2 h of bills ($60/MW/h), times a world event's NPC power price multiplier
-  const billNeed = (v, newMW) => (newMW * 2000 + (v.st.subscriptions?.[REGION]?.power ?? 0) * 12000) * (core.powerPriceMult?.() ?? 1);
-  // One purchase: BuyLand (if acres), BuyBuilding, then the building into group g, else a new group of `amount` named `name`.
-  function buySteps(v, b, acres, g, name, amount = 1) {
-    const p0 = v.pool[b] ?? 0, l0 = v.landBought, steps = [];
-    if (acres) steps.push({ msg: { type: 'BuyLand', amount: acres, region: REGION }, until: (x) => x.landBought >= l0 + acres });
-    steps.push({ msg: { type: 'BuyBuilding', building: b, amount: 1, region: REGION }, until: (x) => (x.pool[b] ?? 0) >= p0 + 1 });
-    if (g) { const c0 = g.count; steps.push({ msg: { type: 'AssignBuildings', group: g.id, amount: 1 }, until: (x) => (x.groups.find((y) => y.id === g.id)?.count ?? 0) >= c0 + 1 }); }
-    else { const ids = new Set(v.groups.map((x) => x.id)); steps.push({ msg: { type: 'CreateGroup', building: b, amount, name, region: REGION }, until: (x) => x.groups.some((y) => !ids.has(y.id) && y.building === b) }); }
-    return steps;
-  }
-  const floorObj = (design) => {   // a floor design string from the core as EditLayout cells, or null when the core has none
-    const cells = W.idleCore?.floorDesigns?.[design];
-    return cells ? Object.fromEntries(cells.split(' ').map((t) => { const [x, y, item, rot] = t.split(/[,:]/).map(Number); return [x + ',' + y, { item, rot }]; })) : null;
-  };
-  // An EditLayout the server did not apply: floors under the same key wait cfg.floorRetryMin (endgame: the recipe id, so a failed floor never blocks
-  // another; buildout: one key for all). mem(memName).floorFail holds the time per key; the module copy covers no browser storage.
-  const floorFail = new Map();
-  function floorAction(ctx, memName, key, r, obj, waitPre, act) {
-    const mm = ctx.mem?.(memName), mk = memName + ':' + key, m = mm?.get?.() ?? {}, now = ctx.now ?? Date.now();
-    const failAt = m.floorFail?.[key] ?? floorFail.get(mk) ?? null, retryMs = Math.max(0, cfg.floorRetryMin ?? 10) * 60000;
-    if (failAt != null && now - failAt < retryMs) return { wait: waitPre + ': retry in ' + Math.ceil((retryMs - (now - failAt)) / 60000) + ' min' };
-    let marked = false;
-    const until = (x) => {   // the first look after the send marks the try; a confirm clears it
-      const ok = !!x.st.layouts?.[r.id];
-      if (ok || !marked) { const t = ok ? null : Date.now(); floorFail.set(mk, t); if (mm) mm.set({ floorFail: { ...mm.get().floorFail, [key]: t } }); }
-      marked = true;
-      return ok;
+    const acrePriceCents = (n) => { let p = FIRST_ACRE; for (let i = 0; i < n; i++) p = Math.floor(p * 41 / 40); return p; };
+    const usd = (c) => '$' + (c / 100).toLocaleString('en-US', { maximumFractionDigits: 0 });
+    // ---- purchase and floor pieces shared by the buildout, lab and endgame directors ----------------------------------------------------
+    // cents: $20 per new MW + 2 h of bills ($60/MW/h), times a world event's NPC power price multiplier
+    const billNeed = (v, newMW) => (newMW * 2000 + (v.st.subscriptions?.[REGION]?.power ?? 0) * 12000) * (core.powerPriceMult?.() ?? 1);
+    // One purchase: BuyLand (if acres), BuyBuilding, then the building into group g, else a new group of `amount` named `name`.
+    function buySteps(v, b, acres, g, name, amount = 1) {
+      const p0 = v.pool[b] ?? 0, l0 = v.landBought, steps = [];
+      if (acres) steps.push({ msg: { type: 'BuyLand', amount: acres, region: REGION }, until: (x) => x.landBought >= l0 + acres });
+      steps.push({ msg: { type: 'BuyBuilding', building: b, amount: 1, region: REGION }, until: (x) => (x.pool[b] ?? 0) >= p0 + 1 });
+      if (g) { const c0 = g.count; steps.push({ msg: { type: 'AssignBuildings', group: g.id, amount: 1 }, until: (x) => (x.groups.find((y) => y.id === g.id)?.count ?? 0) >= c0 + 1 }); }
+      else { const ids = new Set(v.groups.map((x) => x.id)); steps.push({ msg: { type: 'CreateGroup', building: b, amount, name, region: REGION }, until: (x) => x.groups.some((y) => !ids.has(y.id) && y.building === b) }); }
+      return steps;
+    }
+    const floorObj = (design) => {   // a floor design string from the core as EditLayout cells, or null when the core has none
+      const cells = W.idleCore?.floorDesigns?.[design];
+      return cells ? Object.fromEntries(cells.split(' ').map((t) => { const [x, y, item, rot] = t.split(/[,:]/).map(Number); return [x + ',' + y, { item, rot }]; })) : null;
     };
-    return { action: { ...act, steps: [{ msg: { type: 'EditLayout', recipe: r.id, cells: obj }, until }] } };
-  }
+    // An EditLayout the server did not apply: floors under the same key wait cfg.floorRetryMin (endgame: the recipe id, so a failed floor never blocks
+    // another; buildout: one key for all). mem(memName).floorFail holds the time per key; the module copy covers no browser storage.
+    const floorFail = new Map();
+    function floorAction(ctx, memName, key, r, obj, waitPre, act) {
+      const mm = ctx.mem?.(memName), mk = memName + ':' + key, m = mm?.get?.() ?? {}, now = ctx.now ?? Date.now();
+      const failAt = m.floorFail?.[key] ?? floorFail.get(mk) ?? null, retryMs = Math.max(0, cfg.floorRetryMin ?? 10) * 60000;
+      if (failAt != null && now - failAt < retryMs) return { wait: waitPre + ': retry in ' + Math.ceil((retryMs - (now - failAt)) / 60000) + ' min' };
+      let marked = false;
+      const until = (x) => {   // the first look after the send marks the try; a confirm clears it
+        const ok = !!x.st.layouts?.[r.id];
+        if (ok || !marked) { const t = ok ? null : Date.now(); floorFail.set(mk, t); if (mm) mm.set({ floorFail: { ...mm.get().floorFail, [key]: t } }); }
+        marked = true;
+        return ok;
+      };
+      return { action: { ...act, steps: [{ msg: { type: 'EditLayout', recipe: r.id, cells: obj }, until }] } };
+    }
 
-  // ---- a small pure view of the game state ---------------------------------------------------------------------------------
-  function view(st, raw, deals = []) {
-    const N = names(raw), C = N.C;
-    const groups = Object.entries(st.groups ?? {}).map(([id, g]) => ({ id: +id, ...g })).filter((g) => (g.region ?? REGION) === REGION);
-    const pool = st.building_pool?.[REGION] ?? {};
-    const stock = st.stock?.[REGION] ?? {}, items = st.items ?? {};
-    const bld = (b) => C.buildings[b] ?? { name: 'building ' + b, cost: 0, acres: 1, build_items: [] };
-    const idB = (n) => N.b[n], idI = (n) => N.i[n], idR = (n) => N.r[n];
-    const ownedId = (b) => groups.filter((g) => g.building === b).reduce((a, g) => a + g.count, 0) + (pool[b] ?? 0);
-    const owned = (n) => (N.b[n] == null ? 0 : ownedId(N.b[n]));
-    // Building prices count every region and the build / demolish queues (planner.queued): owned() is Heartland only.
-    const q = P.queued({ st, catalog: raw, region: REGION });
-    const ownedAll = (n) => {
-      const b = N.b[n];
-      if (b == null) return 0;
-      let c = q.owned[b] ?? 0;
-      for (const g of Object.values(st.groups ?? {})) if (g.building === b) c += g.count ?? 0;
-      for (const p of Object.values(st.building_pool ?? {})) c += p?.[b] ?? 0;
-      return c;
-    };
-    const landBought = st.land_bought?.[REGION] ?? 0;
-    let acresUsed = q.acres;   // a queued build or demolition holds its acres
-    for (const g of groups) acresUsed += bld(g.building).acres * g.count;
-    for (const [b, n] of Object.entries(pool)) acresUsed += bld(+b).acres * n;
-    const acresOwned = STARTER_ACRES + landBought;
-    const unlockedList = st.unlocked_buildings ?? [];
-    const unlocked = (n) => N.b[n] != null && (n === 'Lumber Camp' || n === 'Farm' || unlockedList.includes(N.b[n]));
-    const has = (n) => { const i = N.i[n]; return i == null ? 0 : (stock[i] ?? items[i] ?? 0); };
-    const running = (bn, rn) => groups.filter((g) => g.building === N.b[bn] && g.recipe === N.r[rn] && !g.paused && g.count > 0).reduce((a, g) => a + g.count, 0);
-    const cottonGroup = groups.find((g) => g.building === N.b.Farm && g.recipe === N.r['Grow Cotton'] && !g.paused);
-    const engineAcres = ['Lumber Camp', 'Farm', 'Sawmill', 'Workshop'].reduce((a, n) => a + owned(n) * (N.b[n] == null ? 0 : bld(N.b[n]).acres), 0);
-    const cottonBids = deals.filter((d) => d.side === 'Sell' && d.item === N.i.Cotton && (d.region ?? REGION) === REGION && d.amount > 0);
-    return {
-      catalog: raw,
-      N, C, st, groups, pool, bld, idB, idI, idR, owned, ownedAll, has, unlocked, running, cottonGroup,
-      cottonBid: cottonBids.length > 0, dealsLoaded: deals.length > 0,
-      cottonUnit: cottonBids.reduce((a, d) => Math.max(a, d.price / d.amount), 0) || null,   // cents per unit, best Heartland Cotton bid
-      money: items[MONEY] ?? 0, cd: items[CD] ?? 0,
-      landBought, acresUsed, acresOwned, freeAcres: Math.max(0, acresOwned - acresUsed), fixedAcres: Math.max(0, acresUsed - engineAcres),
-      nextAcreCents: acrePriceCents(landBought),
-      research: st.research ?? null, researchIdle: !st.research && !(st.research_queue ?? []).length,
-      mutTick: st.ssi?.last_user_mutation_tick ?? 0,
-    };
-  }
+    // ---- a small pure view of the game state ---------------------------------------------------------------------------------
+    function view(st, raw, deals = []) {
+      const N = names(raw), C = N.C;
+      const groups = Object.entries(st.groups ?? {}).map(([id, g]) => ({ id: +id, ...g })).filter((g) => (g.region ?? REGION) === REGION);
+      const pool = st.building_pool?.[REGION] ?? {};
+      const stock = st.stock?.[REGION] ?? {}, items = st.items ?? {};
+      const bld = (b) => C.buildings[b] ?? { name: 'building ' + b, cost: 0, acres: 1, build_items: [] };
+      const idB = (n) => N.b[n], idI = (n) => N.i[n], idR = (n) => N.r[n];
+      const ownedId = (b) => groups.filter((g) => g.building === b).reduce((a, g) => a + g.count, 0) + (pool[b] ?? 0);
+      const owned = (n) => (N.b[n] == null ? 0 : ownedId(N.b[n]));
+      // Building prices count every region and the build / demolish queues (planner.queued): owned() is Heartland only.
+      const q = P.queued({ st, catalog: raw, region: REGION });
+      const ownedAll = (n) => {
+        const b = N.b[n];
+        if (b == null) return 0;
+        let c = q.owned[b] ?? 0;
+        for (const g of Object.values(st.groups ?? {})) if (g.building === b) c += g.count ?? 0;
+        for (const p of Object.values(st.building_pool ?? {})) c += p?.[b] ?? 0;
+        return c;
+      };
+      const landBought = st.land_bought?.[REGION] ?? 0;
+      let acresUsed = q.acres;   // a queued build or demolition holds its acres
+      for (const g of groups) acresUsed += bld(g.building).acres * g.count;
+      for (const [b, n] of Object.entries(pool)) acresUsed += bld(+b).acres * n;
+      const acresOwned = STARTER_ACRES + landBought;
+      const unlockedList = st.unlocked_buildings ?? [];
+      const unlocked = (n) => N.b[n] != null && (n === 'Lumber Camp' || n === 'Farm' || unlockedList.includes(N.b[n]));
+      const has = (n) => { const i = N.i[n]; return i == null ? 0 : (stock[i] ?? items[i] ?? 0); };
+      const running = (bn, rn) => groups.filter((g) => g.building === N.b[bn] && g.recipe === N.r[rn] && !g.paused && g.count > 0).reduce((a, g) => a + g.count, 0);
+      const cottonGroup = groups.find((g) => g.building === N.b.Farm && g.recipe === N.r['Grow Cotton'] && !g.paused);
+      const engineAcres = ['Lumber Camp', 'Farm', 'Sawmill', 'Workshop'].reduce((a, n) => a + owned(n) * (N.b[n] == null ? 0 : bld(N.b[n]).acres), 0);
+      const cottonBids = deals.filter((d) => d.side === 'Sell' && d.item === N.i.Cotton && (d.region ?? REGION) === REGION && d.amount > 0);
+      return {
+        catalog: raw,
+        N, C, st, groups, pool, bld, idB, idI, idR, owned, ownedAll, has, unlocked, running, cottonGroup,
+        cottonBid: cottonBids.length > 0, dealsLoaded: deals.length > 0,
+        cottonUnit: cottonBids.reduce((a, d) => Math.max(a, d.price / d.amount), 0) || null,   // cents per unit, best Heartland Cotton bid
+        money: items[MONEY] ?? 0, cd: items[CD] ?? 0,
+        landBought, acresUsed, acresOwned, freeAcres: Math.max(0, acresOwned - acresUsed), fixedAcres: Math.max(0, acresUsed - engineAcres),
+        nextAcreCents: acrePriceCents(landBought),
+        research: st.research ?? null, researchIdle: !st.research && !(st.research_queue ?? []).length,
+        mutTick: st.ssi?.last_user_mutation_tick ?? 0,
+      };
+    }
 
 // continues the core-plan closure from core-plan-1.js (same try / IIFE)
   // ---- start and end conditions, stage ----------------------------------------------------------------------------------------
@@ -5747,124 +5843,124 @@ try {
   }
 
 // continues the core-plan closure from core-plan-3.js (same try / IIFE)
-  // ---- lifecycle -------------------------------------------------------------------------------------------------------------------------
-  const heartbeat = () => { try { sstore?.setItem(LIVE_KEY, JSON.stringify({ t: Date.now() })); } catch {} ; takeLock(); };
-  const clearLive = () => { try { sstore?.removeItem(LIVE_KEY); } catch {} };
-  const lockOwner = () => { try { const l = JSON.parse(store?.getItem(LOCK_KEY) || 'null'); return l && Date.now() - l.t < 15000 ? l.tab : null; } catch { return null; } };
-  const takeLock = () => { try { store?.setItem(LOCK_KEY, JSON.stringify({ tab: TAB, t: Date.now() })); } catch {} };
-  const dropLock = () => { try { if (lockOwner() === TAB) store?.removeItem(LOCK_KEY); } catch {} };
-  addEventListener?.('pagehide', dropLock);   // as the page goes: a reloaded tab may start Live at once, not after the 15 s lock expires
+// ---- lifecycle -------------------------------------------------------------------------------------------------------------------------
+const heartbeat = () => { try { sstore?.setItem(LIVE_KEY, JSON.stringify({ t: Date.now() })); } catch { }; takeLock(); };
+const clearLive = () => { try { sstore?.removeItem(LIVE_KEY); } catch { } };
+const lockOwner = () => { try { const l = JSON.parse(store?.getItem(LOCK_KEY) || 'null'); return l && Date.now() - l.t < 15000 ? l.tab : null; } catch { return null; } };
+const takeLock = () => { try { store?.setItem(LOCK_KEY, JSON.stringify({ tab: TAB, t: Date.now() })); } catch { } };
+const dropLock = () => { try { if (lockOwner() === TAB) store?.removeItem(LOCK_KEY); } catch { } };
+addEventListener?.('pagehide', dropLock);   // as the page goes: a reloaded tab may start Live at once, not after the 15 s lock expires
 
-  function start(o = {}) {
-    if (running && !(o.dryRun === false && cfg.dryRun)) return status();   // already running; a dry run may still be taken live
-    const dry = o.dryRun !== undefined ? !!o.dryRun : cfg.dryRun;
-    if (!dry) {
-      const owner = lockOwner();
-      if (owner && owner !== TAB) { ledgerNote('fail', 'Live refused: another tab is running Core plan'); return status(); }
-      const r = read(true);
-      if (r) { const miss = core.missingFields(r.st, ['groups', 'stock', 'ssi', 'items']); const bad = []; if (miss.length) bad.push('state is missing ' + miss.join(', ')); for (const n of [...UNLOCKS, 'Farm']) if (r.v.idB(n) == null) bad.push('no building named ' + n); if (bad.length) { cfg.dryRun = true; ledgerNote('fail', 'Live refused: the game data no longer looks right (' + bad.join('; ') + ')'); running = true; ensureLoop(); return status(); } }
-    }
-    if (!running) cash.length = 0;   // samples from before a stop span the gap
-    cfg.dryRun = dry; running = true; stopReason = ''; fails = 0; lastSig = ''; lastWait = '';
-    ledgerNote('info', 'started' + (dry ? ' (dry run)' : ' LIVE'));
-    if (!dry) heartbeat();
-    ensureLoop(); step();
-    return status();
+function start(o = {}) {
+  if (running && !(o.dryRun === false && cfg.dryRun)) return status();   // already running; a dry run may still be taken live
+  const dry = o.dryRun !== undefined ? !!o.dryRun : cfg.dryRun;
+  if (!dry) {
+    const owner = lockOwner();
+    if (owner && owner !== TAB) { ledgerNote('fail', 'Live refused: another tab is running Core plan'); return status(); }
+    const r = read(true);
+    if (r) { const miss = core.missingFields(r.st, ['groups', 'stock', 'ssi', 'items']); const bad = []; if (miss.length) bad.push('state is missing ' + miss.join(', ')); for (const n of [...UNLOCKS, 'Farm']) if (r.v.idB(n) == null) bad.push('no building named ' + n); if (bad.length) { cfg.dryRun = true; ledgerNote('fail', 'Live refused: the game data no longer looks right (' + bad.join('; ') + ')'); running = true; ensureLoop(); return status(); } }
   }
-  function stop() {
-    if (!running) return status();
-    running = false; loopTimer?.(); loopTimer = null; clearLive(); dropLock(); cancelResume();
-    ledgerNote('info', 'stopped');
-    return status();
-  }
-  function ensureLoop() { if (!loopTimer) loopTimer = core.every(cfg.intervalMs, () => { step(); }); }
-  async function hold(who) { holds.add(who); while (stepping) await core.sleep(25); }
-  function release(who) { holds.delete(who); }
+  if (!running) cash.length = 0;   // samples from before a stop span the gap
+  cfg.dryRun = dry; running = true; stopReason = ''; fails = 0; lastSig = ''; lastWait = '';
+  ledgerNote('info', 'started' + (dry ? ' (dry run)' : ' LIVE'));
+  if (!dry) heartbeat();
+  ensureLoop(); step();
+  return status();
+}
+function stop() {
+  if (!running) return status();
+  running = false; loopTimer?.(); loopTimer = null; clearLive(); dropLock(); cancelResume();
+  ledgerNote('info', 'stopped');
+  return status();
+}
+function ensureLoop() { if (!loopTimer) loopTimer = core.every(cfg.intervalMs, () => { step(); }); }
+async function hold(who) { holds.add(who); while (stepping) await core.sleep(25); }
+function release(who) { holds.delete(who); }
 
-  // After a page reload Live resumes by itself, after a countdown the user can cancel (stop(), cancelResume() or Alt+Shift+X).
-  let resumeTimer = 0, resumeLeft = 0;
-  function cancelResume() { if (resumeTimer) { clearInterval(resumeTimer); resumeTimer = 0; resumeLeft = 0; } }
-  function scheduleResume() {
-    resumeLeft = cfg.resumeSeconds;
-    ledgerNote('info', 'resuming Live after the reload in ' + resumeLeft + ' s (corePlan.cancelResume() or Alt+Shift+X cancels; it then runs as a dry run)');
-    resumeTimer = setInterval(() => {
-      if (unloaded) return cancelResume();
-      if (--resumeLeft > 0) return;
-      cancelResume(); start({ dryRun: false });
-    }, 1000);
-  }
+// After a page reload Live resumes by itself, after a countdown the user can cancel (stop(), cancelResume() or Alt+Shift+X).
+let resumeTimer = 0, resumeLeft = 0;
+function cancelResume() { if (resumeTimer) { clearInterval(resumeTimer); resumeTimer = 0; resumeLeft = 0; } }
+function scheduleResume() {
+  resumeLeft = cfg.resumeSeconds;
+  ledgerNote('info', 'resuming Live after the reload in ' + resumeLeft + ' s (corePlan.cancelResume() or Alt+Shift+X cancels; it then runs as a dry run)');
+  resumeTimer = setInterval(() => {
+    if (unloaded) return cancelResume();
+    if (--resumeLeft > 0) return;
+    cancelResume(); start({ dryRun: false });
+  }, 1000);
+}
 
-  function duties() {
-    return [
-      { duty: 'engine items kept off the shelf (neverSell, CD booster)', owner: 'Core plan', done: true },
-      { duty: 'unlocks: Assembly Plant, Retail Store, Oil Rig', owner: 'Core plan', done: true },
-      { duty: 'Stage A-B land and Cotton Farms', owner: 'Core plan', done: true },
-      ...directors.flatMap((d) => { try { return d.duties?.() ?? []; } catch { return []; } }),
-    ];
-  }
-  function status() {
-    const d = last;
-    return {
-      running, live: running && !cfg.dryRun, dryRun: cfg.dryRun, stage: d?.stage ?? null, stopReason,
-      start: d?.S?.map((c) => c.id + ' ' + (c.ok === null ? '?' : c.ok ? 'ok' : 'NO') + ': ' + c.why) ?? [],
-      end: d?.E?.map((c) => c.id + ' ' + (c.ok ? 'ok' : 'NO') + ': ' + c.why) ?? [],
-      next: d?.actions?.[0]?.text ?? null, waits: d?.waits ?? [], readouts: d?.readouts ?? {},
-      land: d?.rule ? { lastAcre: d.rule.lastAcre, acresToBuy: d.rule.acresToBuy, landCost: Math.round(d.rule.landCost), tWallHours: +d.rule.tWall.toFixed(1), tWallFrom: d.rule.tWallFrom, income: Math.round(d.rule.income) } : null,
-      holds: [...holds],
-      resumeIn: resumeLeft,   // seconds left of the Live resume countdown after a reload (0 = none)
-      handedOff: !!memOf('handoff').get().stopped,   // the hand-off has stopped (or recorded) Autopilot once
-    };
-  }
-
-  // ---- settings -----------------------------------------------------------------------------------------------------------------------------
-  function apply(o) {
-    const applied = [], skipped = [];
-    for (const [k, v] of Object.entries(o ?? {})) {
-      const ok = k in DEFAULTS && !SESSION_ONLY.includes(k) && typeof v === typeof DEFAULTS[k] && !(typeof v === 'number' && !Number.isFinite(v))
-        && !(typeof v === 'number' && v < 0);
-      if (ok) { cfg[k] = v; applied.push(k); } else skipped.push(k);
-    }
-    return { applied, skipped };
-  }
-  const save = () => { try { store?.setItem(KEY, JSON.stringify({ cfg: Object.fromEntries(Object.entries(cfg).filter(([k]) => !SESSION_ONLY.includes(k))) })); } catch {} };
-  function restore() { try { const o = JSON.parse(store?.getItem(KEY) || 'null'); if (o?.cfg) apply(o.cfg); } catch {} }
-
-  // What CD Farm and the other spenders see: the next unlock and the Iron Frames kept for the prototypes. Null while not running.
-  core.reserves.register('corePlan', {
-    reserve: () => {
-      if (!running || !last?.stage) return null;
-      // A director may set out.cdNeed: an object { b, name, cd, prereqsMet, note } replaces the next unlock as the CD need, false = no CD need now.
-      const v = last.cdNeed === false ? null : (last.cdNeed ?? last.nextUnlock), ifId = last._ifId;
-      // Before the store: Iron Frames for the prototypes. Once it is built: every Wooden Frame and Plank, so CD Farm's planner never
-      // burns them on Mines / Quarries (wiki 11.4, the $294-per-CD mistake).
-      const items = {};
-      // Retail fail path (plan A2): Wooden Frames only down to their keep line and Planks free, so CD Farm cycles the frames above it.
-      if (last.stage === 'D' || last.stage === 'END') {
-        if (last._failPath) { if (last._wfId != null) items[last._wfId] = last._wfKeep ?? Infinity; }
-        else for (const id of [last._wfId, last._plId]) if (id != null) items[id] = Infinity;
-      }
-      else if (ifId != null) { const k = Math.min(cfg.ifReserve, last._ifNeed ?? Infinity); if (k > 0) items[ifId] = k; }
-      return { moneyFloor: 0, items, nextTech: v ? { b: v.b, name: v.name, cd: v.cd, prereqsMet: v.prereqsMet, note: v.note } : null, phase: null };
-    },
-    busy: () => running && !cfg.dryRun,
-    hold: (w) => hold(w), release: (w) => release(w),
-  });
-
-  W.corePlan = {
-    cfg, DEFAULTS,
-    get running() { return running; }, get busy() { return running && !cfg.dryRun; }, get active() { return stepping; },
-    status, plan: () => last, start, stop, addDirector, ENGINE_ITEMS, directors: () => directors.map((d) => d.name), _usd: usd, _acrePriceCents: acrePriceCents, _billNeed: billNeed, _refineryCd: REFINERY_CD, _buySteps: buySteps, _floorObj: floorObj, _floorAction: floorAction, hold, release, duties, cancelResume,
-    importCfg(o) { const r = apply(o?.cfg ?? o); save(); return r; },
-    exportCfg() { return { cfg: Object.fromEntries(Object.entries(cfg).filter(([k]) => !SESSION_ONLY.includes(k))) }; },
-    resetCfg() { Object.assign(cfg, DEFAULTS); save(); },
-    _ifNeed: ifNeed, _view: view, _decide: decide, _step: step, _names: names, _startConditions: startConditions, _endConditions: endConditions, _nextUnlock: nextUnlock, _trackCash: trackCash, _cashTrend60: cashTrend60, _setPacer(p) { pacer = p; },
-    _unload() { unloaded = true; running = false; loopTimer?.(); cancelResume(); loopTimer = null; core.reserves?.unregister('corePlan'); dropLock(); removeEventListener?.('pagehide', dropLock); },
+function duties() {
+  return [
+    { duty: 'engine items kept off the shelf (neverSell, CD booster)', owner: 'Core plan', done: true },
+    { duty: 'unlocks: Assembly Plant, Retail Store, Oil Rig', owner: 'Core plan', done: true },
+    { duty: 'Stage A-B land and Cotton Farms', owner: 'Core plan', done: true },
+    ...directors.flatMap((d) => { try { return d.duties?.() ?? []; } catch { return []; } }),
+  ];
+}
+function status() {
+  const d = last;
+  return {
+    running, live: running && !cfg.dryRun, dryRun: cfg.dryRun, stage: d?.stage ?? null, stopReason,
+    start: d?.S?.map((c) => c.id + ' ' + (c.ok === null ? '?' : c.ok ? 'ok' : 'NO') + ': ' + c.why) ?? [],
+    end: d?.E?.map((c) => c.id + ' ' + (c.ok ? 'ok' : 'NO') + ': ' + c.why) ?? [],
+    next: d?.actions?.[0]?.text ?? null, waits: d?.waits ?? [], readouts: d?.readouts ?? {},
+    land: d?.rule ? { lastAcre: d.rule.lastAcre, acresToBuy: d.rule.acresToBuy, landCost: Math.round(d.rule.landCost), tWallHours: +d.rule.tWall.toFixed(1), tWallFrom: d.rule.tWallFrom, income: Math.round(d.rule.income) } : null,
+    holds: [...holds],
+    resumeIn: resumeLeft,   // seconds left of the Live resume countdown after a reload (0 = none)
+    handedOff: !!memOf('handoff').get().stopped,   // the hand-off has stopped (or recorded) Autopilot once
   };
+}
 
-  restore();
-  try { const f = JSON.parse(sstore?.getItem(LIVE_KEY) || 'null'); if (cfg.liveResume && f && Date.now() - f.t < 10 * 60000) { start({ dryRun: true }); cfg.dryRun = true; scheduleResume(); } } catch {}
-  console.log('[corePlan] ready: corePlan.status() reads the stage and conditions; corePlan.start() is a dry run, corePlan.start({ dryRun: false }) goes live');
-})();
+// ---- settings -----------------------------------------------------------------------------------------------------------------------------
+function apply(o) {
+  const applied = [], skipped = [];
+  for (const [k, v] of Object.entries(o ?? {})) {
+    const ok = k in DEFAULTS && !SESSION_ONLY.includes(k) && typeof v === typeof DEFAULTS[k] && !(typeof v === 'number' && !Number.isFinite(v))
+      && !(typeof v === 'number' && v < 0);
+    if (ok) { cfg[k] = v; applied.push(k); } else skipped.push(k);
+  }
+  return { applied, skipped };
+}
+const save = () => { try { store?.setItem(KEY, JSON.stringify({ cfg: Object.fromEntries(Object.entries(cfg).filter(([k]) => !SESSION_ONLY.includes(k))) })); } catch { } };
+function restore() { try { const o = JSON.parse(store?.getItem(KEY) || 'null'); if (o?.cfg) apply(o.cfg); } catch { } }
+
+// What CD Farm and the other spenders see: the next unlock and the Iron Frames kept for the prototypes. Null while not running.
+core.reserves.register('corePlan', {
+  reserve: () => {
+    if (!running || !last?.stage) return null;
+    // A director may set out.cdNeed: an object { b, name, cd, prereqsMet, note } replaces the next unlock as the CD need, false = no CD need now.
+    const v = last.cdNeed === false ? null : (last.cdNeed ?? last.nextUnlock), ifId = last._ifId;
+    // Before the store: Iron Frames for the prototypes. Once it is built: every Wooden Frame and Plank, so CD Farm's planner never
+    // burns them on Mines / Quarries (wiki 11.4, the $294-per-CD mistake).
+    const items = {};
+    // Retail fail path (plan A2): Wooden Frames only down to their keep line and Planks free, so CD Farm cycles the frames above it.
+    if (last.stage === 'D' || last.stage === 'END') {
+      if (last._failPath) { if (last._wfId != null) items[last._wfId] = last._wfKeep ?? Infinity; }
+      else for (const id of [last._wfId, last._plId]) if (id != null) items[id] = Infinity;
+    }
+    else if (ifId != null) { const k = Math.min(cfg.ifReserve, last._ifNeed ?? Infinity); if (k > 0) items[ifId] = k; }
+    return { moneyFloor: 0, items, nextTech: v ? { b: v.b, name: v.name, cd: v.cd, prereqsMet: v.prereqsMet, note: v.note } : null, phase: null };
+  },
+  busy: () => running && !cfg.dryRun,
+  hold: (w) => hold(w), release: (w) => release(w),
+});
+
+W.corePlan = {
+  cfg, DEFAULTS,
+  get running() { return running; }, get busy() { return running && !cfg.dryRun; }, get active() { return stepping; },
+  status, plan: () => last, start, stop, addDirector, ENGINE_ITEMS, directors: () => directors.map((d) => d.name), _usd: usd, _acrePriceCents: acrePriceCents, _billNeed: billNeed, _refineryCd: REFINERY_CD, _buySteps: buySteps, _floorObj: floorObj, _floorAction: floorAction, hold, release, duties, cancelResume,
+  importCfg(o) { const r = apply(o?.cfg ?? o); save(); return r; },
+  exportCfg() { return { cfg: Object.fromEntries(Object.entries(cfg).filter(([k]) => !SESSION_ONLY.includes(k))) }; },
+  resetCfg() { Object.assign(cfg, DEFAULTS); save(); },
+  _ifNeed: ifNeed, _view: view, _decide: decide, _step: step, _names: names, _startConditions: startConditions, _endConditions: endConditions, _nextUnlock: nextUnlock, _trackCash: trackCash, _cashTrend60: cashTrend60, _setPacer(p) { pacer = p; },
+  _unload() { unloaded = true; running = false; loopTimer?.(); cancelResume(); loopTimer = null; core.reserves?.unregister('corePlan'); dropLock(); removeEventListener?.('pagehide', dropLock); },
+};
+
+restore();
+try { const f = JSON.parse(sstore?.getItem(LIVE_KEY) || 'null'); if (cfg.liveResume && f && Date.now() - f.t < 10 * 60000) { start({ dryRun: true }); cfg.dryRun = true; scheduleResume(); } } catch { }
+console.log('[corePlan] ready: corePlan.status() reads the stage and conditions; corePlan.start() goes live, corePlan.start({ dryRun: true }) is a dry run');
+}) ();
 } catch (e) { console.error('[IdleCorp] Core plan failed to load:', e); }
 // @@END core-plan
 // ============================================================================
@@ -8369,8 +8465,8 @@ try {
 //
 //   earlyGame.status()              // current phase, plan checklist, blockers, starved groups
 //   earlyGame.plan()                 // the next action and why (sends nothing)
-//   earlyGame.start()                // DRY RUN by default: logs actions, sends nothing
-//   earlyGame.start({ dryRun: false })   // live
+//   earlyGame.start()                // live: sends the actions
+//   earlyGame.start({ dryRun: true })   // dry run: logs actions, sends nothing
 //   earlyGame.stop()
 //   earlyGame.offline(8)             // before going offline: keep 8 h of power bills, show checklist
 //   earlyGame.keepPaused(groupId)    // never auto-resume this group
@@ -8419,280 +8515,286 @@ try {
 
 
 try {
-(() => {
-  const core = typeof window !== 'undefined' ? window.idleCore : globalThis.idleCore;
-  if (!core) throw new Error('the shared core did not load');
-  const KEY = 'earlyGame.v2';
-  const W = typeof window !== 'undefined' ? window : globalThis;
-  const HAS_DOM = typeof document !== 'undefined' && !!document.body;
-  const store = (() => { try { return W.localStorage ?? null; } catch { return null; } })();
-  if (W.earlyGame) W.earlyGame._unload?.();
+  (() => {
+    const core = typeof window !== 'undefined' ? window.idleCore : globalThis.idleCore;
+    if (!core) throw new Error('the shared core did not load');
+    const KEY = 'earlyGame.v2';
+    const W = typeof window !== 'undefined' ? window : globalThis;
+    const HAS_DOM = typeof document !== 'undefined' && !!document.body;
+    const store = (() => { try { return W.localStorage ?? null; } catch { return null; } })();
+    if (W.earlyGame) W.earlyGame._unload?.();
 
-  const REGION = 0;                 // Heartland
-  // Ids are resolved by name from the catalog (resolveIds, once per catalog object); these numbers are the fallback.
-  let MONEY = 0, CD = 24, LD = 111, MD = 25, RD = 26;
-  let WOOD = 1, PLANKS = 9, COTTON = 76, WFRAME = 41, IFRAME = 42;
-  const STARTER_ACRES = 25;
-  const ACRE_CAP = 360;             // Heartland is always at the top charter level (wiki regions-and-land.md)
-  const FIRST_ACRE = 5000;          // cents; next = floor(prev * 41 / 40)
-  const COURIER_CU = 10000;
-  const courierCU = () => core.courierCU?.() ?? COURIER_CU;   // with courier capacity upgrades when the core knows them
-  const MAX_POWER = 200;
+    const REGION = 0;                 // Heartland
+    // Ids are resolved by name from the catalog (resolveIds, once per catalog object); these numbers are the fallback.
+    let MONEY = 0, CD = 24, LD = 111, MD = 25, RD = 26;
+    let WOOD = 1, PLANKS = 9, COTTON = 76, WFRAME = 41, IFRAME = 42;
+    const STARTER_ACRES = 25;
+    const ACRE_CAP = 360;             // Heartland is always at the top charter level (wiki regions-and-land.md)
+    const FIRST_ACRE = 5000;          // cents; next = floor(prev * 41 / 40)
+    const COURIER_CU = 10000;
+    const courierCU = () => core.courierCU?.() ?? COURIER_CU;   // with courier capacity upgrades when the core knows them
+    const MAX_POWER = 200;
 
-  const B = {
-    CAMP: 0, MINE: 1, QUARRY: 2, SAWMILL: 4, SMELTER: 5, KILN: 6, WORKSHOP: 8, FARM: 10,
-    LAB: 14, FACTORY: 15, PAPER_MILL: 23, DISPATCH: 36,
-  };
-  const R = {
-    FELL_WOOD: 0, MINE_IRON: 1, MINE_COAL: 2, LIMESTONE: 5, SAW_PLANKS: 8, IRON_SHEET: 9,
-    FRAME_TIMBER: 37, RIVET: 38, GROW_COTTON: 79, MINE_GOLD: 95, MIX_CONCRETE: 13,
-  };
-  const ID_NAMES = {
-    building: { CAMP: 'Lumber Camp', MINE: 'Mine', QUARRY: 'Quarry', SAWMILL: 'Sawmill', SMELTER: 'Smelter', KILN: 'Kiln', WORKSHOP: 'Workshop',
-      FARM: 'Farm', LAB: 'Manufacturing Lab', FACTORY: 'Factory', PAPER_MILL: 'Paper Mill', DISPATCH: 'Dispatch Office' },
-    recipe: { FELL_WOOD: 'Fell Wood', MINE_IRON: 'Mine Iron Ore', MINE_COAL: 'Mine Coal', LIMESTONE: 'Quarry Limestone', SAW_PLANKS: 'Saw Planks',
-      IRON_SHEET: 'Roll Iron Sheet', FRAME_TIMBER: 'Assemble Wooden Frame', RIVET: 'Assemble Iron Frame', GROW_COTTON: 'Grow Cotton', MINE_GOLD: 'Mine Gold Ore', MIX_CONCRETE: 'Mix Concrete' },
-    item: { MONEY: 'Money', CD: 'Construction Data', LD: 'Logistics Data', MD: 'Manufacturing Data', RD: 'Research Data', WOOD: 'Wood', PLANKS: 'Planks',
-      COTTON: 'Cotton', WFRAME: 'Wooden Frame', IFRAME: 'Iron Frame' },
-  };
-  const FALLBACK = { building: { ...B }, recipe: { ...R }, item: { MONEY, CD, LD, MD, RD, WOOD, PLANKS, COTTON, WFRAME, IFRAME } };
-  let TASK, NAMES, HOME_MADE, NEVER_SELL;
-  function tables() {
-    TASK = {
-      [B.CAMP]: R.FELL_WOOD, [B.FARM]: R.GROW_COTTON, [B.SAWMILL]: R.SAW_PLANKS,
-      [B.QUARRY]: R.LIMESTONE, [B.SMELTER]: R.IRON_SHEET,
+    const B = {
+      CAMP: 0, MINE: 1, QUARRY: 2, SAWMILL: 4, SMELTER: 5, KILN: 6, WORKSHOP: 8, FARM: 10,
+      LAB: 14, FACTORY: 15, PAPER_MILL: 23, DISPATCH: 36,
     };
-    NAMES = {
-      [R.FELL_WOOD]: 'Fell Wood', [R.GROW_COTTON]: 'Grow Cotton', [R.SAW_PLANKS]: 'Planks',
-      [R.FRAME_TIMBER]: 'Frame Timber', [R.RIVET]: 'Iron Frames', [R.MINE_IRON]: 'Iron', [R.MINE_COAL]: 'Coal',
-      [R.MINE_GOLD]: 'Gold', [R.LIMESTONE]: 'Limestone', [R.IRON_SHEET]: 'Iron Sheet',
-      [R.MIX_CONCRETE]: 'Concrete',
+    const R = {
+      FELL_WOOD: 0, MINE_IRON: 1, MINE_COAL: 2, LIMESTONE: 5, SAW_PLANKS: 8, IRON_SHEET: 9,
+      FRAME_TIMBER: 37, RIVET: 38, GROW_COTTON: 79, MINE_GOLD: 95, MIX_CONCRETE: 13,
     };
-    // Items the plan makes itself: never bought for prototypes, never sold.
-    HOME_MADE = [WOOD, PLANKS, WFRAME, IFRAME];
-    // Never sold: what the plan builds with, and corp-wide data.
-    NEVER_SELL = [PLANKS, WFRAME, IFRAME, MONEY, CD, MD, RD, LD];
-  }
-  tables();
-  // Names not found in the catalog (their fallback number is used); checkGame reports them.
-  const idMissing = [];
-  let idsOf = null;   // the catalog the ids were last resolved from
-  function resolveIds(c) {
-    if (idsOf === c) return;
-    idsOf = c;
-    idMissing.length = 0;
-    const find = (kind, list, key) => {
-      const name = ID_NAMES[kind][key];
-      const x = Object.values(list ?? {}).find((o) => o?.name === name);
-      if (!x) idMissing.push(`${kind} "${name}"`);
-      return x ? x.id : FALLBACK[kind][key];
+    const ID_NAMES = {
+      building: {
+        CAMP: 'Lumber Camp', MINE: 'Mine', QUARRY: 'Quarry', SAWMILL: 'Sawmill', SMELTER: 'Smelter', KILN: 'Kiln', WORKSHOP: 'Workshop',
+        FARM: 'Farm', LAB: 'Manufacturing Lab', FACTORY: 'Factory', PAPER_MILL: 'Paper Mill', DISPATCH: 'Dispatch Office'
+      },
+      recipe: {
+        FELL_WOOD: 'Fell Wood', MINE_IRON: 'Mine Iron Ore', MINE_COAL: 'Mine Coal', LIMESTONE: 'Quarry Limestone', SAW_PLANKS: 'Saw Planks',
+        IRON_SHEET: 'Roll Iron Sheet', FRAME_TIMBER: 'Assemble Wooden Frame', RIVET: 'Assemble Iron Frame', GROW_COTTON: 'Grow Cotton', MINE_GOLD: 'Mine Gold Ore', MIX_CONCRETE: 'Mix Concrete'
+      },
+      item: {
+        MONEY: 'Money', CD: 'Construction Data', LD: 'Logistics Data', MD: 'Manufacturing Data', RD: 'Research Data', WOOD: 'Wood', PLANKS: 'Planks',
+        COTTON: 'Cotton', WFRAME: 'Wooden Frame', IFRAME: 'Iron Frame'
+      },
     };
-    for (const k of Object.keys(B)) B[k] = find('building', c.buildings, k);
-    for (const k of Object.keys(R)) R[k] = find('recipe', c.recipes, k);
-    const it = {};
-    for (const k of Object.keys(ID_NAMES.item)) it[k] = find('item', c.items, k);
-    ({ MONEY, CD, LD, MD, RD, WOOD, PLANKS, COTTON, WFRAME, IFRAME } = it);
+    const FALLBACK = { building: { ...B }, recipe: { ...R }, item: { MONEY, CD, LD, MD, RD, WOOD, PLANKS, COTTON, WFRAME, IFRAME } };
+    let TASK, NAMES, HOME_MADE, NEVER_SELL;
+    function tables() {
+      TASK = {
+        [B.CAMP]: R.FELL_WOOD, [B.FARM]: R.GROW_COTTON, [B.SAWMILL]: R.SAW_PLANKS,
+        [B.QUARRY]: R.LIMESTONE, [B.SMELTER]: R.IRON_SHEET,
+      };
+      NAMES = {
+        [R.FELL_WOOD]: 'Fell Wood', [R.GROW_COTTON]: 'Grow Cotton', [R.SAW_PLANKS]: 'Planks',
+        [R.FRAME_TIMBER]: 'Frame Timber', [R.RIVET]: 'Iron Frames', [R.MINE_IRON]: 'Iron', [R.MINE_COAL]: 'Coal',
+        [R.MINE_GOLD]: 'Gold', [R.LIMESTONE]: 'Limestone', [R.IRON_SHEET]: 'Iron Sheet',
+        [R.MIX_CONCRETE]: 'Concrete',
+      };
+      // Items the plan makes itself: never bought for prototypes, never sold.
+      HOME_MADE = [WOOD, PLANKS, WFRAME, IFRAME];
+      // Never sold: what the plan builds with, and corp-wide data.
+      NEVER_SELL = [PLANKS, WFRAME, IFRAME, MONEY, CD, MD, RD, LD];
+    }
     tables();
-  }
-
-  const cfg = {
-    dryRun: true,            // log actions instead of sending them
-    autoResume: true,        // after a page reload, resume a run that was going
-    sawmills: 6,             // once the Workshop is unlocked (1 before, 3 from 50 buildings); at least 2 per Frame Timber Workshop
-    workshops: 2,            // on Frame Timber
-    ironFrameWorkshops: 1,   // Phase 5: on Rivet Iron Frame, once the Smelter runs
-    ironMines: 1, coalMines: 1, // at least; more as the Smelters' Iron Ore / Coal use needs at the current floor rates (4 / 2 at equal rates)
-    quarries: 1, smelters: 1, kilns: 1, labs: 1,
-    goldMines: Infinity,     // leftover frames → Gold Mines (+8 CD each; the CD source for Smelter and Phase 5). Infinity = auto: up to GOLD_AUTO while a plan unlock is open
-    dispatchOffice: false,   // Phase 5 optional unlock
-    workshopPlanks: 205,     // planks before unlocking the Workshop (100 prototype + 100 build + 5 kit)
-    landPaybackHours: 2,     // camps/farms/Gold Mines: land is also bought, above the walls below, while (acres + building) pay back from
-                             // the building's own live income within this many hours (payback alone ignores the CD they bring: slower in the sim)
-    maxAcrePrice: 500,       // $: land wall for camps/farms once the Workshop unlock has started, used when that income isn't known (no bid)
-    maxAcrePriceEarly: 3000, // $: camps/farms before that (the plan pushes land until 155 CD), same fallback
-    maxAcrePriceCritical: 5000, // $: land for plan buildings (Sawmill, Workshop, Mines, Smelter) ...
-    landCashShare: 0.02,     // ... or up to this share of cash per acre, whichever is higher (money sitting still is wasted)
-    // CD booster (the plan's "build-and-demolish CD"): once the Workshop is unlocked, when a plan
-    // unlock waits only on CD and cash is idle, build cheap camps/farms and demolish them
-    // (+1 CD each, 50% base refunded). Starts with a 1-building probe; disabled for good if the
-    // CD isn't kept or the refund doesn't arrive (e.g. patched).
-    cdBooster: true,
-    boosterBatch: 10,       // buildings per build+demolish cycle (limited by free acres)
-    boosterFarmGapMs: 30000, // via CD Farm: wait this long after it stops before starting it again
-    boosterMinCash: 20000,   // $: only above this much cash
-    boosterKeepCash: 10000,  // $: never spend below this
-    boosterAcres: 5,         // acres kept free for it (bought once, reused)
-    woodReserve: 60,         // never sell below this (plus 10 min of what groups eat, kits and upcoming builds)
-    sellAll: true,           // auto-sell every item's full courier loads above its reserve (like auto-ship)
-    sellKeepMinutes: 30,     // keep this many minutes of what your groups eat of an item
-    neverSell: [],           // extra item ids never sold (Planks, Wooden/Iron Frames, data are never sold anyway)
-    smallLoadsUntil: 25,     // sell part loads until this many camps+farms exist
-    minSmallLoad: 20,
-    autoShipCotton: true,
-    buyKits: true,           // buy kit / prototype parts the corp can't make yet
-    maxBuyPrice: 3,          // × base value: most paid per unit for those parts
-    postBuyOrders: true,     // no seller at all → post a player buy order for the part ...
-    buyOrderMult: 1.5,       // ... at this many × the item's base value per unit (money is escrowed; one open order per item)
-    orderHoldHours: 24,      // never post another buy order for the same item within this time
-    saveForCritical: true,   // stop buying camps/farms while saving for a ready plan building
-    maxUnequippedCamps: 3,   // camps/farms waiting for their Wood kit before buying more
-    resumePaused: true,      // resume powered groups paused by an unpaid bill
-    floorUpgrades: true,     // switch tasks to the best-scoring known floorplan
-    floorBuyMult: 1.5,       // missing floorplan parts: fill player sell orders at up to this many × base value per unit,
-                             // else post a buy order at this price (parts you don't make); 0 = never buy
-    billHours: 1,            // cash floor = this many hours of power bills (min $100 once powered)
-    maxActionsPerMin: 20,       // halved (down to a quarter) after an action the server doesn't apply
-    intervalMs: 3000,
-    maxIdleMs: 9000,         // while there is nothing to do the loop slows from intervalMs up to this
-    stallMinutes: 20,        // alert when the plan hasn't moved for this long while actions keep coming (0 = off)
-    liveResume: false,       // after a reload, resume Live (with a 60 s cancel) if this tab was running Live
-    jitterMinMs: 150, jitterMaxMs: 900,
-    timeoutMs: 8000,
-  };
-  const DEFAULTS = { ...cfg, neverSell: [...cfg.neverSell] };
-
-  // ---- persistence ----------------------------------------------------------
-
-  // dryRun and billHours are never remembered: every paste/reload starts as a dry run with 1 h of bills.
-  const SESSION_ONLY = ['dryRun', 'billHours'];
-  const persistable = () => Object.fromEntries(Object.entries(cfg).filter(([k]) => !SESSION_ONLY.includes(k)));
-  let saved = {};
-  try { saved = JSON.parse(store?.getItem(KEY) || '{}'); } catch {}
-  for (const [k, v] of Object.entries(saved.cfg || {})) if (!SESSION_ONLY.includes(k) && k in cfg) cfg[k] = v === null ? Infinity : v; // JSON has no Infinity
-  const userPaused = new Set(saved.userPaused || []);   // groups you paused: never resumed
-  const billPaused = new Set(saved.billPaused || []);   // groups paused by an unpaid bill: resumed when cash allows
-  const keptPaused = new Set(saved.keptPaused || []);   // earlyGame.keepPaused(id): never resumed, never cleared
-  const posted = { ...(saved.posted || {}) };           // item → when we last posted a buy order for it
-  const wasRunning = !!saved.running;
-  let running = false;
-  const save = () => {
-    try {
-      store?.setItem(KEY, JSON.stringify({ cfg: persistable(), userPaused: [...userPaused], billPaused: [...billPaused], keptPaused: [...keptPaused], posted, running, boosterLeft }));
-    } catch {}
-  };
-
-  // One running copy per browser: a heartbeat lock in localStorage (another browser can't be seen).
-  const TAB = Math.random().toString(36).slice(2);
-  const LOCK = KEY + '.lock';
-  function lockOwner() {
-    try { const l = JSON.parse(store?.getItem(LOCK) || 'null'); return l && Date.now() - l.t < 60000 ? l.id : null; } catch { return null; }
-  }
-  const takeLock = () => { try { store?.setItem(LOCK, JSON.stringify({ id: TAB, t: Date.now() })); } catch {} };
-  const dropLock = () => { try { if (lockOwner() === TAB) store?.removeItem(LOCK); } catch {} };
-  // A reload or a closed tab never reaches stop(): give the lock up as the page goes, or the reloaded tab is refused for up to a minute.
-  addEventListener?.('pagehide', dropLock);
-
-  // ---- clock, cooldowns -----------------------------------------------------
-
-  let nowMs = () => Date.now();
-  const cooldowns = new Map();      // action key → { until, n, why }
-  const successes = new Map();      // action key → confirmed count
-  const failures = new Map();       // action key → failed count (never reset)
-  function report(key, ok, why = '') {
-    if (!key) return;
-    if (ok) { cooldowns.delete(key); successes.set(key, (successes.get(key) ?? 0) + 1); return; }
-    failures.set(key, (failures.get(key) ?? 0) + 1);
-    const c = cooldowns.get(key) ?? { n: 0 };
-    c.n++;
-    c.until = nowMs() + Math.min(600000, 15000 * 2 ** (c.n - 1));
-    c.why = why;
-    cooldowns.set(key, c);
-  }
-  const cooling = (key) => (cooldowns.get(key)?.until ?? 0) > nowMs();
-
-  // ---- CD Farm coordination -------------------------------------------------
-  // CD Farm (the module above) builds and demolishes Lumber Camps or Farms (its Building setting); any unassigned one above its
-  // baseline is treated as its own. So: while it runs (or finishes a step) we send nothing;
-  // while it has an interrupted run, its leftover pool camps are never assigned and no new
-  // camps/farms are built (they would look like its camps). window.cdFarm is re-read every time,
-  // so either module can be reloaded (or be missing) at any time.
-  const holds = new Set();          // earlyGame.hold(who): pause after the current step
-  let inStep = false;               // an action is being sent / confirmed
-  function farmInfo() {
-    const f = W.cdFarm;
-    if (!f) return null;
-    return { busy: !!(f.running || f.active), resumable: !!f.resumable, baseline: f.stats?.baselinePool ?? 0, building: f.building ?? B.CAMP, units: f.farmUnits ?? null, f };
-  }
-  // Unassigned buildings (Lumber Camps or Farms, whichever the run cycles) that belong to a running or interrupted CD Farm run.
-  function farmCamps(s, b = B.CAMP) {
-    const fi = farmInfo();
-    if (!fi || !(fi.busy || fi.resumable)) return 0;
-    if (fi.units) return fi.units[b] ?? 0;   // CD Farm Auto: units of every type it holds above the baseline
-    return b === fi.building ? Math.max(0, (s.pool[b] ?? 0) - fi.baseline) : 0;
-  }
-  let farmSeenBusyAt = -Infinity;   // last time CD Farm was seen running (a gap before the booster restarts it)
-  function heldReason() {
-    if (farmInfo()?.busy) { farmSeenBusyAt = nowMs(); return 'CD Farm is running (it demolishes unassigned camps)'; }
-    if (holds.size) return `held by ${[...holds].join(', ')}`;
-    return '';
-  }
-
-  // CD booster leftovers: buildings a build-and-demolish left behind, cleaned up next loop.
-  const boosterLeft = { ...(saved.boosterLeft || {}) };
-
-  // Called every loop. A powered group that becomes paused while cash is under ~2 bills (or
-  // the power service dropped) was paused by an unpaid bill; any other pause is yours.
-  const lastPaused = new Map();
-  function observe(s) {
-    const needAll = s.groups.reduce((a, g) => a + s.drawOf(g.building) * g.count, 0);
-    // With Auto power on, the subscription follows the running load, so being under the unpaused draw is not a short bill.
-    const billShort = (!s.autoPower && s.powerHave < needAll) || s.money < Math.max(s.powerHave, needAll) * 1000 * 2;
-    let changed = false;
-    for (const g of s.groups) {
-      const prev = lastPaused.get(g.id);
-      if (g.paused && prev !== true && !billPaused.has(g.id) && !userPaused.has(g.id)) {
-        if (prev === false && billShort && s.drawOf(g.building) > 0) billPaused.add(g.id);
-        else userPaused.add(g.id); // paused by you, or already paused when first seen
-        changed = true;
-      }
-      if (!g.paused && (billPaused.delete(g.id) | userPaused.delete(g.id))) changed = true;
-      lastPaused.set(g.id, !!g.paused);
+    // Names not found in the catalog (their fallback number is used); checkGame reports them.
+    const idMissing = [];
+    let idsOf = null;   // the catalog the ids were last resolved from
+    function resolveIds(c) {
+      if (idsOf === c) return;
+      idsOf = c;
+      idMissing.length = 0;
+      const find = (kind, list, key) => {
+        const name = ID_NAMES[kind][key];
+        const x = Object.values(list ?? {}).find((o) => o?.name === name);
+        if (!x) idMissing.push(`${kind} "${name}"`);
+        return x ? x.id : FALLBACK[kind][key];
+      };
+      for (const k of Object.keys(B)) B[k] = find('building', c.buildings, k);
+      for (const k of Object.keys(R)) R[k] = find('recipe', c.recipes, k);
+      const it = {};
+      for (const k of Object.keys(ID_NAMES.item)) it[k] = find('item', c.items, k);
+      ({ MONEY, CD, LD, MD, RD, WOOD, PLANKS, COTTON, WFRAME, IFRAME } = it);
+      tables();
     }
-    // Buy-order hold: once our order was seen on the board and then left it (filled or
-    // cancelled), the item may be ordered again. Never seen → the full orderHoldHours hold.
-    for (const item of s.ordersKnown ? Object.keys(posted) : []) {
-      const onBoard = s.myOrders?.some((o) => o.side === 'Buy' && o.item === +item);
-      if (onBoard && !postedSeen.has(item)) postedSeen.add(item);
-      else if (!onBoard && postedSeen.has(item)) { delete posted[item]; postedSeen.delete(item); changed = true; }
+
+    const cfg = {
+      dryRun: false,           // log actions instead of sending them
+      autoResume: true,        // after a page reload, resume a run that was going
+      sawmills: 6,             // once the Workshop is unlocked (1 before, 3 from 50 buildings); at least 2 per Frame Timber Workshop
+      workshops: 2,            // on Frame Timber
+      ironFrameWorkshops: 1,   // Phase 5: on Rivet Iron Frame, once the Smelter runs
+      ironMines: 1, coalMines: 1, // at least; more as the Smelters' Iron Ore / Coal use needs at the current floor rates (4 / 2 at equal rates)
+      quarries: 1, smelters: 1, kilns: 1, labs: 1,
+      goldMines: Infinity,     // leftover frames → Gold Mines (+8 CD each; the CD source for Smelter and Phase 5). Infinity = auto: up to GOLD_AUTO while a plan unlock is open
+      dispatchOffice: false,   // Phase 5 optional unlock
+      workshopPlanks: 205,     // planks before unlocking the Workshop (100 prototype + 100 build + 5 kit)
+      landPaybackHours: 2,     // camps/farms/Gold Mines: land is also bought, above the walls below, while (acres + building) pay back from
+      // the building's own live income within this many hours (payback alone ignores the CD they bring: slower in the sim)
+      maxAcrePrice: 500,       // $: land wall for camps/farms once the Workshop unlock has started, used when that income isn't known (no bid)
+      maxAcrePriceEarly: 3000, // $: camps/farms before that (the plan pushes land until 155 CD), same fallback
+      maxAcrePriceCritical: 5000, // $: land for plan buildings (Sawmill, Workshop, Mines, Smelter) ...
+      landCashShare: 0.02,     // ... or up to this share of cash per acre, whichever is higher (money sitting still is wasted)
+      // CD booster (the plan's "build-and-demolish CD"): once the Workshop is unlocked, when a plan
+      // unlock waits only on CD and cash is idle, build cheap camps/farms and demolish them
+      // (+1 CD each, 50% base refunded). Starts with a 1-building probe; disabled for good if the
+      // CD isn't kept or the refund doesn't arrive (e.g. patched).
+      cdBooster: true,
+      boosterBatch: 10,       // buildings per build+demolish cycle (limited by free acres)
+      boosterFarmGapMs: 30000, // via CD Farm: wait this long after it stops before starting it again
+      boosterMinCash: 20000,   // $: only above this much cash
+      boosterKeepCash: 10000,  // $: never spend below this
+      boosterAcres: 5,         // acres kept free for it (bought once, reused)
+      woodReserve: 60,         // never sell below this (plus 10 min of what groups eat, kits and upcoming builds)
+      sellAll: true,           // auto-sell every item's full courier loads above its reserve (like auto-ship)
+      sellKeepMinutes: 30,     // keep this many minutes of what your groups eat of an item
+      neverSell: [],           // extra item ids never sold (Planks, Wooden/Iron Frames, data are never sold anyway)
+      smallLoadsUntil: 25,     // sell part loads until this many camps+farms exist
+      minSmallLoad: 20,
+      autoShipCotton: true,
+      buyKits: true,           // buy kit / prototype parts the corp can't make yet
+      maxBuyPrice: 3,          // × base value: most paid per unit for those parts
+      postBuyOrders: true,     // no seller at all → post a player buy order for the part ...
+      buyOrderMult: 1.5,       // ... at this many × the item's base value per unit (money is escrowed; one open order per item)
+      orderHoldHours: 24,      // never post another buy order for the same item within this time
+      saveForCritical: true,   // stop buying camps/farms while saving for a ready plan building
+      maxUnequippedCamps: 3,   // camps/farms waiting for their Wood kit before buying more
+      resumePaused: true,      // resume powered groups paused by an unpaid bill
+      floorUpgrades: true,     // switch tasks to the best-scoring known floorplan
+      floorBuyMult: 1.5,       // missing floorplan parts: fill player sell orders at up to this many × base value per unit,
+      // else post a buy order at this price (parts you don't make); 0 = never buy
+      billHours: 1,            // cash floor = this many hours of power bills (min $100 once powered)
+      maxActionsPerMin: 20,       // halved (down to a quarter) after an action the server doesn't apply
+      intervalMs: 3000,
+      maxIdleMs: 9000,         // while there is nothing to do the loop slows from intervalMs up to this
+      stallMinutes: 20,        // alert when the plan hasn't moved for this long while actions keep coming (0 = off)
+      liveResume: true,        // after a reload, resume Live (with a 60 s cancel) if this tab was running Live
+      jitterMinMs: 150, jitterMaxMs: 900,
+      timeoutMs: 8000,
+    };
+    const DEFAULTS = { ...cfg, neverSell: [...cfg.neverSell] };
+
+    // ---- persistence ----------------------------------------------------------
+
+    // dryRun and billHours are never remembered: every paste/reload starts as a dry run with 1 h of bills.
+    const SESSION_ONLY = ['dryRun', 'billHours'];
+    const persistable = () => Object.fromEntries(Object.entries(cfg).filter(([k]) => !SESSION_ONLY.includes(k)));
+    let saved = {};
+    try { saved = JSON.parse(store?.getItem(KEY) || '{}'); } catch { }
+    for (const [k, v] of Object.entries(saved.cfg || {})) if (!SESSION_ONLY.includes(k) && k in cfg) cfg[k] = v === null ? Infinity : v; // JSON has no Infinity
+    const userPaused = new Set(saved.userPaused || []);   // groups you paused: never resumed
+    const billPaused = new Set(saved.billPaused || []);   // groups paused by an unpaid bill: resumed when cash allows
+    const keptPaused = new Set(saved.keptPaused || []);   // earlyGame.keepPaused(id): never resumed, never cleared
+    const posted = { ...(saved.posted || {}) };           // item → when we last posted a buy order for it
+    const wasRunning = !!saved.running;
+    let running = false;
+    const save = () => {
+      try {
+        store?.setItem(KEY, JSON.stringify({ cfg: persistable(), userPaused: [...userPaused], billPaused: [...billPaused], keptPaused: [...keptPaused], posted, running, boosterLeft }));
+      } catch { }
+    };
+
+    // One running copy per browser: a heartbeat lock in localStorage (another browser can't be seen).
+    const TAB = Math.random().toString(36).slice(2);
+    const LOCK = KEY + '.lock';
+    function lockOwner() {
+      try { const l = JSON.parse(store?.getItem(LOCK) || 'null'); return l && Date.now() - l.t < 60000 ? l.id : null; } catch { return null; }
     }
-    if (changed) save();
-  }
-  const postedSeen = new Set();
+    const takeLock = () => { try { store?.setItem(LOCK, JSON.stringify({ id: TAB, t: Date.now() })); } catch { } };
+    const dropLock = () => { try { if (lockOwner() === TAB) store?.removeItem(LOCK); } catch { } };
+    // A reload or a closed tab never reaches stop(): give the lock up as the page goes, or the reloaded tab is refused for up to a minute.
+    addEventListener?.('pagehide', dropLock);
 
-  // Courier conflicts: a shipment that didn't go because the courier was busy (auto-ship took it,
-  // turnaround cooldown, or our tick estimate was early) is not the deal's fault. No back-off,
-  // no failure count: courier work just waits until the courier is back.
-  let courierHoldUntil = 0, courierMisses = 0;
-  const usesCourier = (a) => a.steps.some((st) => st.msg.courier === true || st.msg.type === 'KeepFilling');
+    // ---- clock, cooldowns -----------------------------------------------------
 
-  // Result of an action: `stepsDone` steps were confirmed; `s` is the state afterwards.
-  // Returns 'courier' when it failed only because the courier was busy.
-  function finish(a, ok, stepsDone, s, why = '') {
-    if (ok && usesCourier(a)) courierMisses = 0;
-    if (!ok && usesCourier(a) && a.steps[0].msg.type !== 'KeepFilling' && s) {
-      const busy = s.courierWaitTicks > 0 || (s.courierReadyAt ?? 0) > (a.meta?.courierReadyAt ?? Infinity);
-      if (busy || courierMisses < 2) {
-        const knownMs = (s.courierWaitTicks ?? 0) * 500;
-        if (knownMs > 0) {
-          // Freight cooldown with a known end (courier_ready_at): retry 1 s after it ends,
-          // no escalation, since this was not a lost race.
-          courierHoldUntil = nowMs() + knownMs + 1000;
-        } else {
-          // End unknown: hold at least 10 s, longer after repeated misses.
-          courierMisses++;
-          courierHoldUntil = nowMs() + Math.max(10000, 5000 * 2 ** Math.min(courierMisses, 6));
+    let nowMs = () => Date.now();
+    const cooldowns = new Map();      // action key → { until, n, why }
+    const successes = new Map();      // action key → confirmed count
+    const failures = new Map();       // action key → failed count (never reset)
+    function report(key, ok, why = '') {
+      if (!key) return;
+      if (ok) { cooldowns.delete(key); successes.set(key, (successes.get(key) ?? 0) + 1); return; }
+      failures.set(key, (failures.get(key) ?? 0) + 1);
+      const c = cooldowns.get(key) ?? { n: 0 };
+      c.n++;
+      c.until = nowMs() + Math.min(600000, 15000 * 2 ** (c.n - 1));
+      c.why = why;
+      cooldowns.set(key, c);
+    }
+    const cooling = (key) => (cooldowns.get(key)?.until ?? 0) > nowMs();
+
+    // ---- CD Farm coordination -------------------------------------------------
+    // CD Farm (the module above) builds and demolishes Lumber Camps or Farms (its Building setting); any unassigned one above its
+    // baseline is treated as its own. So: while it runs (or finishes a step) we send nothing;
+    // while it has an interrupted run, its leftover pool camps are never assigned and no new
+    // camps/farms are built (they would look like its camps). window.cdFarm is re-read every time,
+    // so either module can be reloaded (or be missing) at any time.
+    const holds = new Set();          // earlyGame.hold(who): pause after the current step
+    let inStep = false;               // an action is being sent / confirmed
+    function farmInfo() {
+      const f = W.cdFarm;
+      if (!f) return null;
+      return { busy: !!(f.running || f.active), resumable: !!f.resumable, baseline: f.stats?.baselinePool ?? 0, building: f.building ?? B.CAMP, units: f.farmUnits ?? null, f };
+    }
+    // Unassigned buildings (Lumber Camps or Farms, whichever the run cycles) that belong to a running or interrupted CD Farm run.
+    function farmCamps(s, b = B.CAMP) {
+      const fi = farmInfo();
+      if (!fi || !(fi.busy || fi.resumable)) return 0;
+      if (fi.units) return fi.units[b] ?? 0;   // CD Farm Auto: units of every type it holds above the baseline
+      return b === fi.building ? Math.max(0, (s.pool[b] ?? 0) - fi.baseline) : 0;
+    }
+    let farmSeenBusyAt = -Infinity;   // last time CD Farm was seen running (a gap before the booster restarts it)
+    function heldReason() {
+      if (farmInfo()?.busy) { farmSeenBusyAt = nowMs(); return 'CD Farm is running (it demolishes unassigned camps)'; }
+      if (holds.size) return `held by ${[...holds].join(', ')}`;
+      return '';
+    }
+
+    // CD booster leftovers: buildings a build-and-demolish left behind, cleaned up next loop.
+    const boosterLeft = { ...(saved.boosterLeft || {}) };
+
+    // Called every loop. A powered group that becomes paused while cash is under ~2 bills (or
+    // the power service dropped) was paused by an unpaid bill; any other pause is yours.
+    const lastPaused = new Map();
+    function observe(s) {
+      const needAll = s.groups.reduce((a, g) => a + s.drawOf(g.building) * g.count, 0);
+      // With Auto power on, the subscription follows the running load, so being under the unpaused draw is not a short bill.
+      const billShort = (!s.autoPower && s.powerHave < needAll) || s.money < Math.max(s.powerHave, needAll) * 1000 * 2;
+      let changed = false;
+      for (const g of s.groups) {
+        const prev = lastPaused.get(g.id);
+        if (g.paused && prev !== true && !billPaused.has(g.id) && !userPaused.has(g.id)) {
+          if (prev === false && billShort && s.drawOf(g.building) > 0) billPaused.add(g.id);
+          else userPaused.add(g.id); // paused by you, or already paused when first seen
+          changed = true;
         }
-        return 'courier';
+        if (!g.paused && (billPaused.delete(g.id) | userPaused.delete(g.id))) changed = true;
+        lastPaused.set(g.id, !!g.paused);
       }
+      // Buy-order hold: once our order was seen on the board and then left it (filled or
+      // cancelled), the item may be ordered again. Never seen → the full orderHoldHours hold.
+      for (const item of s.ordersKnown ? Object.keys(posted) : []) {
+        const onBoard = s.myOrders?.some((o) => o.side === 'Buy' && o.item === +item);
+        if (onBoard && !postedSeen.has(item)) postedSeen.add(item);
+        else if (!onBoard && postedSeen.has(item)) { delete posted[item]; postedSeen.delete(item); changed = true; }
+      }
+      if (changed) save();
     }
-    report(a.key, ok, why);
-    const m = a.meta;
-    if (!m) return;
-    // A buy order may have been posted even if the board didn't show it: never post twice.
-    if (a.key.startsWith('post:')) { posted[m.item] = nowMs(); save(); return; }
-    if (a.key.startsWith('booster:cleanup') && ok) boosterLeft[m.b] = Math.max(0, (boosterLeft[m.b] ?? 0) - m.n);
-    save();
-  }
+    const postedSeen = new Set();
+
+    // Courier conflicts: a shipment that didn't go because the courier was busy (auto-ship took it,
+    // turnaround cooldown, or our tick estimate was early) is not the deal's fault. No back-off,
+    // no failure count: courier work just waits until the courier is back.
+    let courierHoldUntil = 0, courierMisses = 0;
+    const usesCourier = (a) => a.steps.some((st) => st.msg.courier === true || st.msg.type === 'KeepFilling');
+
+    // Result of an action: `stepsDone` steps were confirmed; `s` is the state afterwards.
+    // Returns 'courier' when it failed only because the courier was busy.
+    function finish(a, ok, stepsDone, s, why = '') {
+      if (ok && usesCourier(a)) courierMisses = 0;
+      if (!ok && usesCourier(a) && a.steps[0].msg.type !== 'KeepFilling' && s) {
+        const busy = s.courierWaitTicks > 0 || (s.courierReadyAt ?? 0) > (a.meta?.courierReadyAt ?? Infinity);
+        if (busy || courierMisses < 2) {
+          const knownMs = (s.courierWaitTicks ?? 0) * 500;
+          if (knownMs > 0) {
+            // Freight cooldown with a known end (courier_ready_at): retry 1 s after it ends,
+            // no escalation, since this was not a lost race.
+            courierHoldUntil = nowMs() + knownMs + 1000;
+          } else {
+            // End unknown: hold at least 10 s, longer after repeated misses.
+            courierMisses++;
+            courierHoldUntil = nowMs() + Math.max(10000, 5000 * 2 ** Math.min(courierMisses, 6));
+          }
+          return 'courier';
+        }
+      }
+      report(a.key, ok, why);
+      const m = a.meta;
+      if (!m) return;
+      // A buy order may have been posted even if the board didn't show it: never post twice.
+      if (a.key.startsWith('post:')) { posted[m.item] = nowMs(); save(); return; }
+      if (a.key.startsWith('booster:cleanup') && ok) boosterLeft[m.b] = Math.max(0, (boosterLeft[m.b] ?? 0) - m.n);
+      save();
+    }
 
 // continues the autopilot closure from autopilot-1.js (same try / IIFE)
   // ---- socket listener ------------------------------------------------------
@@ -10072,415 +10174,416 @@ try {
 
 
 // continues the autopilot closure from autopilot-4.js (same try / IIFE)
-  // ---- game UI ----------------------------------------------------------------------
-  // The Autopilot panel, built from the shared parts in core-form.js (core.ui): Status (hero, rows, state, banners,
-  // checklist), Settings (the same groups, controls and Backup as the other panels), Log, and a footer with the run mode.
-  // Nothing here runs without a DOM, so the offline simulator is unaffected.
+// ---- game UI ----------------------------------------------------------------------
+// The Autopilot panel, built from the shared parts in core-form.js (core.ui): Status (hero, rows, state, banners,
+// checklist), Settings (the same groups, controls and Backup as the other panels), Log, and a footer with the run mode.
+// Nothing here runs without a DOM, so the offline simulator is unaffected.
 
-  const UI_KEY = 'earlyGame.ui';
-  const ui = (() => { try { return { open: true, x: null, y: null, ...JSON.parse(store?.getItem(UI_KEY) || '{}') }; } catch { return { open: true, x: null, y: null }; } })();
-  const saveUi = () => { try { store?.setItem(UI_KEY, JSON.stringify(ui)); } catch {} };
+const UI_KEY = 'earlyGame.ui';
+const ui = (() => { try { return { open: true, x: null, y: null, ...JSON.parse(store?.getItem(UI_KEY) || '{}') }; } catch { return { open: true, x: null, y: null }; } })();
+const saveUi = () => { try { store?.setItem(UI_KEY, JSON.stringify(ui)); } catch { } };
 
-  const ICON = '<svg class="nav-icon" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 16h4v-4h4V8h4V4"></path><circle cx="15" cy="4" r="1.6" fill="currentColor" style="stroke:var(--nav-accent)"></circle></svg>';
+const ICON = '<svg class="nav-icon" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 16h4v-4h4V8h4V4"></path><circle cx="15" cy="4" r="1.6" fill="currentColor" style="stroke:var(--nav-accent)"></circle></svg>';
 
-  const mk = core.h;
-  const K = core.ui;
-  let P = null, chrome = null, uiTimer = null, unloaded = false;
-  const refs = {};
-  let confirmUntil = 0;
+const mk = core.h;
+const K = core.ui;
+let P = null, chrome = null, uiTimer = null, unloaded = false;
+const refs = {};
+let confirmUntil = 0;
 
-  const FIELDS = {
-    workshops: { kind: 'count', label: 'Frame Timber Workshops', min: 0, max: 50 },
-    sawmills: { kind: 'count', label: 'Sawmills (at least)', min: 0, max: 200 },
-    ironMines: { kind: 'count', label: 'Iron Mines (at least)', min: 0, max: 100 },
-    coalMines: { kind: 'count', label: 'Coal Mines (at least)', min: 0, max: 100 },
-    goldMines: { kind: 'count', label: 'Gold Mines', min: 0, optional: true, empty: 'Auto' },
-    ironFrameWorkshops: { kind: 'count', label: 'Iron Frame Workshops', min: 0, max: 50 },
-    landPaybackHours: { kind: 'count', label: 'Land pays back within', min: 0, max: 1000, unit: 'h' },
-    maxAcrePriceEarly: { kind: 'money', label: 'Land wall, early', min: 0 },
-    maxAcrePrice: { kind: 'money', label: 'Land wall, later', min: 0 },
-    boosterBatch: { kind: 'count', label: 'Booster batch', min: 1, max: 100 },
-    boosterMinCash: { kind: 'money', label: 'Booster starts above', min: 0 },
-    boosterKeepCash: { kind: 'money', label: 'Booster keeps', min: 0 },
-    // Advanced
-    quarries: { kind: 'count', label: 'Limestone Quarries', min: 0, max: 50 },
-    smelters: { kind: 'count', label: 'Smelters', min: 0, max: 50 },
-    maxAcrePriceCritical: { kind: 'money', label: 'Land wall, plan buildings', min: 0 },
-    landCashShare: { kind: 'pct', label: 'Land: share of cash', min: 0, max: 1, unit: '%' },
-    boosterAcres: { kind: 'count', label: 'Booster acres kept free', min: 0, max: 100 },
-    woodReserve: { kind: 'count', label: 'Wood never sold below', min: 0, max: 1000000 },
-    sellKeepMinutes: { kind: 'count', label: 'Keep minutes of use', min: 0, max: 1440, unit: 'min' },
-    maxBuyPrice: { kind: 'mult', label: 'Max buy price (× base)', min: 0.1, max: 100, unit: '×' },
-    floorBuyMult: { kind: 'mult', label: 'Floor parts, max × base', min: 0, max: 100, unit: '×' },
-    buyOrderMult: { kind: 'mult', label: 'Buy order price (× base)', min: 0.1, max: 100, unit: '×' },
-    orderHoldHours: { kind: 'count', label: 'Order hold', min: 0, max: 720, unit: 'h' },
-    maxActionsPerMin: { kind: 'count', label: 'Max actions per minute', min: 1, max: 60 },
-    intervalMs: { kind: 'count', label: 'Check every', min: 500, max: 60000, unit: 'ms' },
-    maxIdleMs: { kind: 'count', label: 'Slowest idle check', min: 500, max: 120000, unit: 'ms' },
-    stallMinutes: { kind: 'count', label: 'Stall alert after', min: 0, max: 600, unit: 'min' },
-  };
-  const ADV_FIELDS = ['quarries', 'smelters', 'maxAcrePriceCritical', 'landCashShare', 'boosterAcres', 'woodReserve', 'sellKeepMinutes', 'maxBuyPrice', 'floorBuyMult', 'buyOrderMult', 'orderHoldHours', 'maxActionsPerMin', 'intervalMs', 'maxIdleMs', 'stallMinutes'];
-  const CHECKS = [
-    ['sellAll', 'Sell spare full courier loads'],
-    ['cdBooster', 'CD booster (build + demolish)'],
-    ['floorUpgrades', 'Apply better floorplans'],
-    ['buyKits', 'Buy kit parts the corp can\'t make'],
-    ['postBuyOrders', 'Post buy orders when no one sells'],
-    ['dispatchOffice', 'Also unlock the Dispatch Office'],
-    ['autoResume', 'Resume after reload (as a dry run unless Live resume is on)'],
-  ];
-  const ADV_CHECKS = [
-    ['liveResume', 'Live resume: after a reload in this tab, go Live again after a 60 s cancel window'],
-    ['autoShipCotton', 'Auto-ship Cotton'],
-    ['saveForCritical', 'Save for a ready plan building before buying camps/farms'],
-    ['resumePaused', 'Resume groups paused by an unpaid bill'],
-  ];
-  function setCfg(key, v) { cfg[key] = v; confirmUntil = 0; save(); render(); }
-  const shownOf = (key, v) => (Number.isFinite(v) ? K.fmt(FIELDS[key]?.kind === 'pct' ? v * 100 : v) : '');
+const FIELDS = {
+  workshops: { kind: 'count', label: 'Frame Timber Workshops', min: 0, max: 50 },
+  sawmills: { kind: 'count', label: 'Sawmills (at least)', min: 0, max: 200 },
+  ironMines: { kind: 'count', label: 'Iron Mines (at least)', min: 0, max: 100 },
+  coalMines: { kind: 'count', label: 'Coal Mines (at least)', min: 0, max: 100 },
+  goldMines: { kind: 'count', label: 'Gold Mines', min: 0, optional: true, empty: 'Auto' },
+  ironFrameWorkshops: { kind: 'count', label: 'Iron Frame Workshops', min: 0, max: 50 },
+  landPaybackHours: { kind: 'count', label: 'Land pays back within', min: 0, max: 1000, unit: 'h' },
+  maxAcrePriceEarly: { kind: 'money', label: 'Land wall, early', min: 0 },
+  maxAcrePrice: { kind: 'money', label: 'Land wall, later', min: 0 },
+  boosterBatch: { kind: 'count', label: 'Booster batch', min: 1, max: 100 },
+  boosterMinCash: { kind: 'money', label: 'Booster starts above', min: 0 },
+  boosterKeepCash: { kind: 'money', label: 'Booster keeps', min: 0 },
+  // Advanced
+  quarries: { kind: 'count', label: 'Limestone Quarries', min: 0, max: 50 },
+  smelters: { kind: 'count', label: 'Smelters', min: 0, max: 50 },
+  maxAcrePriceCritical: { kind: 'money', label: 'Land wall, plan buildings', min: 0 },
+  landCashShare: { kind: 'pct', label: 'Land: share of cash', min: 0, max: 1, unit: '%' },
+  boosterAcres: { kind: 'count', label: 'Booster acres kept free', min: 0, max: 100 },
+  woodReserve: { kind: 'count', label: 'Wood never sold below', min: 0, max: 1000000 },
+  sellKeepMinutes: { kind: 'count', label: 'Keep minutes of use', min: 0, max: 1440, unit: 'min' },
+  maxBuyPrice: { kind: 'mult', label: 'Max buy price (× base)', min: 0.1, max: 100, unit: '×' },
+  floorBuyMult: { kind: 'mult', label: 'Floor parts, max × base', min: 0, max: 100, unit: '×' },
+  buyOrderMult: { kind: 'mult', label: 'Buy order price (× base)', min: 0.1, max: 100, unit: '×' },
+  orderHoldHours: { kind: 'count', label: 'Order hold', min: 0, max: 720, unit: 'h' },
+  maxActionsPerMin: { kind: 'count', label: 'Max actions per minute', min: 1, max: 60 },
+  intervalMs: { kind: 'count', label: 'Check every', min: 500, max: 60000, unit: 'ms' },
+  maxIdleMs: { kind: 'count', label: 'Slowest idle check', min: 500, max: 120000, unit: 'ms' },
+  stallMinutes: { kind: 'count', label: 'Stall alert after', min: 0, max: 600, unit: 'min' },
+};
+const ADV_FIELDS = ['quarries', 'smelters', 'maxAcrePriceCritical', 'landCashShare', 'boosterAcres', 'woodReserve', 'sellKeepMinutes', 'maxBuyPrice', 'floorBuyMult', 'buyOrderMult', 'orderHoldHours', 'maxActionsPerMin', 'intervalMs', 'maxIdleMs', 'stallMinutes'];
+const CHECKS = [
+  ['sellAll', 'Sell spare full courier loads'],
+  ['cdBooster', 'CD booster (build + demolish)'],
+  ['floorUpgrades', 'Apply better floorplans'],
+  ['buyKits', 'Buy kit parts the corp can\'t make'],
+  ['postBuyOrders', 'Post buy orders when no one sells'],
+  ['dispatchOffice', 'Also unlock the Dispatch Office'],
+  ['autoResume', 'Resume after reload (as a dry run unless Live resume is on)'],
+];
+const ADV_CHECKS = [
+  ['liveResume', 'Live resume: after a reload in this tab, go Live again after a 60 s cancel window'],
+  ['autoShipCotton', 'Auto-ship Cotton'],
+  ['saveForCritical', 'Save for a ready plan building before buying camps/farms'],
+  ['resumePaused', 'Resume groups paused by an unpaid bill'],
+];
+function setCfg(key, v) { cfg[key] = v; confirmUntil = 0; save(); render(); }
+const shownOf = (key, v) => (Number.isFinite(v) ? K.fmt(FIELDS[key]?.kind === 'pct' ? v * 100 : v) : '');
 
-  function parseField(key, text) {
-    const f = FIELDS[key];
-    const str = text.trim();
-    if (str === '') return f.optional ? { v: Infinity } : { err: 'Required.' };
-    const decimal = f.kind === 'usd' || f.kind === 'mult' || f.kind === 'pct';
-    let v;
-    if (decimal) {
-      v = /^[$]?\d*\.?\d+[%×x]?$/i.test(str.replace(/[,\s_]/g, '')) ? Number(str.replace(/[$,%×x\s_]/gi, '')) : null;
-      if (v != null && f.kind === 'pct') v /= 100;
-    } else v = K.parseAmount(str);
-    if (v == null) return { err: decimal ? 'Use a number like 1 or 0.5.' : f.kind === 'money' ? 'Use an amount like 500, 20k or 1.5m.' : 'Use a whole number.' };
-    const disp = (x) => K.fmt(f.kind === 'pct' ? x * 100 : x);
-    if (f.min != null && v < f.min) return { err: `At least ${disp(f.min)}.` };
-    if (f.max != null && v > f.max) return { err: `At most ${disp(f.max)}.` };
-    return { v };
-  }
+function parseField(key, text) {
+  const f = FIELDS[key];
+  const str = text.trim();
+  if (str === '') return f.optional ? { v: Infinity } : { err: 'Required.' };
+  const decimal = f.kind === 'usd' || f.kind === 'mult' || f.kind === 'pct';
+  let v;
+  if (decimal) {
+    v = /^[$]?\d*\.?\d+[%×x]?$/i.test(str.replace(/[,\s_]/g, '')) ? Number(str.replace(/[$,%×x\s_]/gi, '')) : null;
+    if (v != null && f.kind === 'pct') v /= 100;
+  } else v = K.parseAmount(str);
+  if (v == null) return { err: decimal ? 'Use a number like 1 or 0.5.' : f.kind === 'money' ? 'Use an amount like 500, 20k or 1.5m.' : 'Use a whole number.' };
+  const disp = (x) => K.fmt(f.kind === 'pct' ? x * 100 : x);
+  if (f.min != null && v < f.min) return { err: `At least ${disp(f.min)}.` };
+  if (f.max != null && v > f.max) return { err: `At most ${disp(f.max)}.` };
+  return { v };
+}
 
-  const signed = (c) => (c < 0 ? '−' : '+') + usd(Math.abs(c));
+const signed = (c) => (c < 0 ? '−' : '+') + usd(Math.abs(c));
 
-  function amountOf(key) {
-    const f = FIELDS[key];
-    return K.amountField({
-      label: f.label, prefix: f.kind === 'money' || f.kind === 'usd' ? '$' : '', suffix: f.unit, placeholder: f.empty || '',
-      parse: (t) => parseField(key, t), format: (v) => shownOf(key, v),
-      get: () => cfg[key], set: (v) => setCfg(key, v), def: DEFAULTS[key], redraw: render,
-    });
-  }
+function amountOf(key) {
+  const f = FIELDS[key];
+  return K.amountField({
+    label: f.label, prefix: f.kind === 'money' || f.kind === 'usd' ? '$' : '', suffix: f.unit, placeholder: f.empty || '',
+    parse: (t) => parseField(key, t), format: (v) => shownOf(key, v),
+    get: () => cfg[key], set: (v) => setCfg(key, v), def: DEFAULTS[key], redraw: render,
+  });
+}
 
-  function buildPanel() {
-    refs.badge = mk('span', { class: 'idc-badge' });
-    refs.fields = {};
-    const amount = (...keys) => keys.map((k) => (refs.fields[k] = amountOf(k)).el);
-    refs.toggles = {};
-    for (const [key, label] of [...CHECKS, ...ADV_CHECKS]) refs.toggles[key] = K.toggleField(label, '', { get: () => cfg[key], set: (v) => setCfg(key, v), def: DEFAULTS[key] });
-    const tog = (key) => refs.toggles[key].el;
+function buildPanel() {
+  refs.badge = mk('span', { class: 'idc-badge' });
+  refs.fields = {};
+  const amount = (...keys) => keys.map((k) => (refs.fields[k] = amountOf(k)).el);
+  refs.toggles = {};
+  for (const [key, label] of [...CHECKS, ...ADV_CHECKS]) refs.toggles[key] = K.toggleField(label, '', { get: () => cfg[key], set: (v) => setCfg(key, v), def: DEFAULTS[key] });
+  const tog = (key) => refs.toggles[key].el;
 
-    // ---- Status tab
-    refs.hero = K.hero('Early-game plan');
-    refs.rows = K.rowList();
-    refs.state = K.stateLine();
-    refs.cdNote = K.banner(() => W.cdFarm?.panel?.(true), 'Open CD Farm');
-    refs.live = K.banner(() => { liveCountdownUntil = 0; W.corePlan?.cancelResume?.(); render(); }, 'Cancel: resume as a dry run');   // both countdowns: one Cancel
-    refs.stall = K.banner(() => { stalled = ''; core.setBadge('AP', ''); prog.at = nowMs(); prog.acts = 0; render(); }, 'Snooze');
-    refs.check = K.rowList();
-    refs.log = mk('div', { class: 'idc-recent', 'aria-live': 'polite' });
-    const checkSec = K.disclosure('Checklist', [refs.check.el], { open: !!ui.checkOpen, onToggle: (o) => { ui.checkOpen = o; saveUi(); } });
-    const status = [refs.hero.el, refs.rows.el, refs.state.el, refs.cdNote.el, refs.live.el, refs.stall.el, refs.log, checkSec];
+  // ---- Status tab
+  refs.hero = K.hero('Early-game plan');
+  refs.rows = K.rowList();
+  refs.state = K.stateLine();
+  refs.cdNote = K.banner(() => W.cdFarm?.panel?.(true), 'Open CD Farm');
+  refs.live = K.banner(() => { liveCountdownUntil = 0; W.corePlan?.cancelResume?.(); render(); }, 'Cancel: resume as a dry run');   // both countdowns: one Cancel
+  refs.stall = K.banner(() => { stalled = ''; core.setBadge('AP', ''); prog.at = nowMs(); prog.acts = 0; render(); }, 'Snooze');
+  refs.check = K.rowList();
+  refs.log = mk('div', { class: 'idc-recent', 'aria-live': 'polite' });
+  const checkSec = K.disclosure('Checklist', [refs.check.el], { open: !!ui.checkOpen, onToggle: (o) => { ui.checkOpen = o; saveUi(); } });
+  const status = [refs.hero.el, refs.rows.el, refs.state.el, refs.cdNote.el, refs.live.el, refs.stall.el, refs.log, checkSec];
 
-    // ---- Settings tab
-    refs.hours = K.inputBox({ label: 'Hours offline', suffix: 'h' });
-    refs.hours.input.value = '8';
-    refs.billNow = mk('div', { class: 'idc-desc' });
-    const offBtn = mk('button', { type: 'button', onclick: () => { const hrs = Number(refs.hours.input.value); if (hrs > 0) { offline(hrs); render(); } } }, 'Keep bills');
-    refs.dryRunSwitch = K.toggleField('Dry run switch', 'Shows the Dry run / Live switch in the footer. Dry run works out every step and sends nothing.', { get: () => !!ui.dryRunSwitch, set: (v) => { ui.dryRunSwitch = v; saveUi(); if (!running && !active) cfg.dryRun = v; render(); }, def: false });
-    refs.settings = K.settingsTab({
-      lockText: 'Stop the live run to change settings.',
-      tail: [K.group('Experimental', refs.dryRunSwitch.el)],
-      groups: [
-        K.group('Build targets', mk('div', { class: 'idc-two' }, ...amount('workshops', 'sawmills', 'ironMines', 'coalMines', 'goldMines', 'ironFrameWorkshops'))),
-        K.group('Land price limits', mk('div', { class: 'idc-two' }, ...amount('landPaybackHours', 'maxAcrePriceEarly', 'maxAcrePrice')),
-          mk('div', { class: 'idc-desc' }, 'Camps, farms and Gold Mines get land while it and the building pay back from their own income within this time; with no bid for what they make, the walls (most per acre, early on and later) apply.')),
-        K.group('CD booster', mk('div', { class: 'idc-two' }, ...amount('boosterBatch', 'boosterMinCash', 'boosterKeepCash')), tog('cdBooster')),
-        K.group('Automation', ...['sellAll', 'floorUpgrades', 'buyKits', 'postBuyOrders', 'dispatchOffice', 'autoResume'].map(tog)),
-        K.group('Power bills', K.field('Going offline: keep power bills for', mk('div', { class: 'idc-inline' }, refs.hours.box, offBtn), refs.billNow)),
-      ],
-      advanced: K.disclosure('Advanced', [K.group(null, mk('div', { class: 'idc-two' }, ...amount(...ADV_FIELDS)), ...ADV_CHECKS.map(([key]) => tog(key)))],
-        { open: !!ui.advOpen, onToggle: (o) => { ui.advOpen = o; saveUi(); } }),
-      backup: { onExport: () => core.exportFile(), onImport: () => core.importFile(), onReset: () => K.resetSettings('Autopilot', { snapshot: exportCfg, reset: resetCfg, restore: importCfg }) },
-    });
-
-    // ---- Log tab
-    refs.alertBtn = mk('button', { type: 'button', title: 'Notify me when Autopilot stops, stalls or changes phase while this tab is in the background', onclick: async () => { await core.askNotify(); render(); } }, 'Enable alerts');
-    const logt = K.logTab({ extra: [refs.alertBtn] });
-    refs.logv = logt.logv;
-
-    // ---- Footer (always visible)
-    refs.mode = K.runModeSeg(() => !!cfg.dryRun, (id) => { cfg.dryRun = id; confirmUntil = 0; render(); });
-    refs.alt = mk('button', { onclick: () => { confirmUntil = 0; render(); } }, 'Cancel');
-    refs.main = mk('button', { class: 'primary', onclick: onMain });
-    const foot = K.footer({ top: [refs.mode.el], main: refs.main, alt: refs.alt });
-    refs.plan = foot.plan;
-
-    P = K.createPanel({
-      id: 'ap', title: 'Autopilot', cls: 'egp-panel', state: ui, save: saveUi, headExtra: [refs.badge], foot: foot.el,
-      tabs: [{ id: 'status', label: 'Status', content: status }, { id: 'settings', label: 'Settings', content: refs.settings.content }, { id: 'log', label: 'Log', content: logt.content }],
-      onClose: () => panel(false), onTab: () => render(), opener: () => chrome?.opener,
-      // Default: bottom-left of the page content, just right of the game's sidebar.
-      defaultPlace: () => { const side = document.querySelector('.primary-navigation')?.getBoundingClientRect(); return { left: side && side.right < innerWidth / 2 ? Math.round(side.right + 16) : 20 }; },
-    });
-  }
-
-  // The mode shown and started from the panel while idle: Dry run only with the experimental switch on. A run in progress shows what it really is.
-  const viewDry = () => !!cfg.dryRun;   // the mode the panel shows and starts in: exactly what cfg says. Safety paths set it on purpose (refused Live, a reload resumed as a dry run), so the render never overrides it.
-  // Core plan in this panel: once the plan is done (or the hand-off has stopped Autopilot) and whenever it runs; null otherwise.
-  function cpOf(s) {
-    let c = null; try { c = W.corePlan?.status?.() ?? null; } catch {}
-    if (!c) return null;
-    const p = s ? phaseOf(s) : null;
-    c.handedOff &&= p === 'done' || p >= 4;   // the saved hand-off has no corp id: a new corp in this browser starts at Phase 1 again (4: a bill pause)
-    return c.running || c.handedOff || p === 'done' ? c : null;
-  }
-  // Core plan has taken over (it runs, or the hand-off is done): the panel is Core plan's, with the early plan as one "done" row.
-  const coreView = (cp) => !!cp && (cp.running || cp.handedOff);
-  const STAGES = [['A', 'start'], ['B', 'Assembly Plant unlock'], ['C', 'Retail Store unlock'], ['D', 'Retail Store built']];
-  const END_NAMES = { E1: 'money engine runs', E2: 'only endgame unlocks left', E3: 'CD on the Farm cycle', E4: 'land done', E5: 'cash in hand' };
-  // Progress of the whole plan, so the bar never drops back at the hand-off: the early plan is the first fifth, then a fifth per stage A-D
-  // (in Stage D, the share of end conditions E1-E5 that hold).
-  function cpProgress(cp) {
-    const i = STAGES.findIndex(([k]) => k === cp.stage);
-    if (cp.stage === 'END') return 100;
-    if (i < 0) return 100 / (STAGES.length + 1);   // starting: the early plan is done
-    const ok = cp.end.filter((e) => / ok:/.test(e)).length;
-    return ((1 + i + (cp.stage === 'D' && cp.end.length ? ok / cp.end.length : 0)) / (STAGES.length + 1)) * 100;
-  }
-  // Core plan's checklist: its stages, then the end conditions E1-E5 (the endgame gate; the log and corePlan.status() say why one is open).
-  function cpChecklist(cp) {
-    const i = cp.stage === 'END' ? STAGES.length : STAGES.findIndex(([k]) => k === cp.stage);
-    return [
-      ...STAGES.map(([k, what], j) => ['Stage ' + k + ' · ' + what, j < i ? '✓' : j === i ? 'now' : '·']),
-      ...cp.end.map((e) => { const m = /^(E\d) (ok|NO):/.exec(e); return m ? [m[1] + ' · ' + (END_NAMES[m[1]] ?? ''), m[2] === 'ok' ? '✓' : '·'] : [e, '']; }),
-    ];
-  }
-  const cpMode = (c) => (c.running ? (c.resumeIn ? 'resuming Live in ' + c.resumeIn + ' s' : c.dryRun ? 'dry run' : 'live') : 'stopped');
-  function onMain() {
-    const s = read(), cp = cpOf(s);
-    // After Plan done one button runs both: Stop stops Autopilot and Core plan; Start starts Core plan alone once the hand-off is done.
-    if (running || cp?.running) { if (cp?.running) W.corePlan.stop(); if (running) stop(); else render(); return; }
-    const go = (dry) => { if (cp?.handedOff) { W.corePlan.start({ dryRun: dry }); render(); } else if (dry) start(); else start({ dryRun: false }); };
-    if (viewDry()) return go(true);
-    if (Date.now() < confirmUntil) { confirmUntil = 0; return go(false); }
-    confirmUntil = Date.now() + 6000;
-    render();
-    setTimeout(render, 6100);
-  }
-
-  // 'run' | 'wait' | 'err' | ''
-  function tone(cp) {
-    if (running && stalled) return 'err';
-    if (coreView(cp)) return cp.running ? (cp.dryRun ? 'wait' : 'run') : cp.stopReason ? 'err' : '';   // a short hold for a Core plan purchase is not a pause
-    if (running) return heldReason() || cfg.dryRun ? 'wait' : 'run';
-    if (cp?.running) return cp.dryRun || cp.holds.length ? 'wait' : 'run';
-    if (cp?.stopReason) return 'err';
-    if (stopReason && stopReason !== 'stopped by you') return 'err';
-    return '';
-  }
-
-  function cdFarmNote(cv) {
-    // Holds by CD Farm and Core plan are their own short steps; only a hold from the console needs the user.
-    const mine = [...holds].filter((w) => w !== 'corePlan' && w !== 'CD Farm');
-    const fi = farmInfo();
-    if (cv) {
-      // A non-Auto CD Farm run left interrupted blocks CD Farm Auto, which Core plan drives: that one needs the user.
-      if (fi?.resumable) return { text: 'CD Farm has an interrupted run. Resume or discard it in CD Farm so it can farm CD for Core plan again.', btn: true };
-      return mine.length ? { text: `Autopilot's selling and bill chores are paused from the console (${mine.join(', ')}). Run earlyGame.release() there to go on.`, btn: false } : null;
-    }
-    if (fi?.busy) return { text: `CD Farm is running${fi.f.stats?.by ? ` (${fi.f.stats.by})` : ''}. Autopilot waits until it stops.`, btn: true };
-    if (fi?.resumable) return { text: 'CD Farm has an interrupted run. Its leftover camps are left alone, and no camps, farms or booster run until you resume or discard it there.', btn: true };
-    if (mine.length) return { text: `Autopilot is paused from the console (${mine.join(', ')}). Run earlyGame.release() there to go on.`, btn: false };
-    return null;
-  }
-
-  function renderPanel(s, ph, cp, t) {
-    K.setTone(P.dot, t);
-    const on = running || !!cp?.running, dry = running || !cp?.running ? viewDry() : cp.dryRun;
-    refs.badge.textContent = dry ? 'Dry run' : 'Live';
-    refs.badge.className = 'idc-badge' + (dry ? '' : ' live');
-    if (!s) {
-      refs.hero.set('—', '', 0); refs.rows.set([]); refs.check.set([]);
-      refs.state.set(t, 'Waiting for the game to load…');
-    } else {
-      const cv = coreView(cp);
-      const list = checklist(s);
-      const marks = list.filter(([, v]) => /^(✓|·|researching|queued)/.test(v));
-      if (cv) refs.hero.set(cp.stage === 'END' ? 'Done' : cp.stage ? 'Stage ' + cp.stage : 'Starting', cp.stage === 'END' ? 'end conditions met' : cp.stage ? 'of D' : '', cpProgress(cp), 'Core plan');
-      else refs.hero.set(ph === 'done' ? 'Plan done' : `Phase ${ph}`, ph === 'done' ? '' : 'of 5',
-        ph === 'done' ? 100 : marks.length ? (marks.filter(([, v]) => v.startsWith('✓')).length / marks.length) * 100 : 0, 'Early-game plan');   // done is full: optional rows (Gold Mines) never tick
-      refs.rows.set([
-        ...(cv ? [['Early-game plan', '✓ done']] : cp ? [['Core plan', (cp.stage ? 'stage ' + cp.stage + ' · ' : '') + cpMode(cp)]] : []),
-        ...(cv && cp.resumeIn ? [['Core plan', cpMode(cp)]] : []),
-        // Autopilot runs on after the hand-off only for its chores, until Auto power takes over the subscription
-        ...(cv && running ? [['Autopilot chores', cfg.dryRun ? 'dry run, sends nothing' : s.autoPower ? 'selling, bill resume' : 'until Auto power is on']] : []),
-        ['Money', cv ? usd(s.money) : `${usd(s.money)} · floor ${usd(moneyFloor(s))}`],
-        ['CD', K.fmt(s.cd)],
-        ['Acres', `${s.acresUsed} / ${s.acresOwned} · next ${usd(acrePrice(s.landBought))}`],
-        // the subscription only (bought contracts are not in it): after the hand-off Auto utilities and Core plan's checks own power
-        ...(cv ? [] : [['Power', `${s.powerHave} MW (need ${s.powerNeed})`]]),
-        ['Courier', s.courierFree ? 'free' : `busy, ${courierEta(s)}`],
-        ...(cv ? [] : [['Actions', `${actions} sent this session`]]),
-        ...(cashRate() ? [['Cash change', `${signed(cashRate().perHour)}/h (last ${cashRate().mins} min)`]] : []),
-        ...(rateScale < 1 ? [['Pace', `${Math.round(rateScale * 100)}% after an action the server did not apply`]] : []),
-      ]);
-      const skip = new Set(['Phase', 'Money', 'CD', 'Acres', 'Power', 'Courier']);
-      refs.check.set(cv ? cpChecklist(cp) : list.filter(([k]) => !skip.has(k)).map(([k, v]) => [k, String(v)]));
-      const held = running && heldReason();
-      let next;
-      try { const d = decide(s); next = d.wait ? 'Waiting: ' + d.wait : 'Next: ' + d.reason; } catch (e) { next = 'error: ' + e.message; }
-      // Core plan's line once it runs (or Autopilot has stopped at Plan done): what it does next or waits for
-      const cpLine = cp && (cp.running || !running) ? (cp.running ? (cp.dryRun ? 'Dry run. ' : '') + 'Core plan ' + (cp.next ? 'next: ' + cp.next : cp.waits[0] ? 'waiting: ' + cp.waits[0] : 'is reading the game…')
-        : 'Core plan stopped' + (cp.stopReason ? ': ' + cp.stopReason : '') + '.') : '';
-      refs.state.set(t, cv ? cpLine || 'Core plan stopped.'
-        : held ? `Paused: ${held}`
-        : cpLine ? cpLine
-        : running ? (cfg.dryRun ? 'Dry run. ' : '') + next
-        : (stopReason ? `Stopped: ${stopReason}. ` : 'Stopped. ') + next);
-    }
-    const cv = coreView(cp);
-    const n = cdFarmNote(cv);
-    refs.cdNote.set(n?.text ?? '', !!n?.btn && !!W.cdFarm?.panel);
-    // Recent lines: Core plan's once it has taken over, Autopilot's before
-    const recent = cv ? core.ledger.list().filter((e) => e.mod === 'CP').slice(-6).reverse().map((e) => new Date(e.t).toLocaleTimeString() + ' ' + e.text) : log;
-    refs.log.replaceChildren(...recent.map((l) => mk('div', {}, l)));
-    refs.live.set(liveCountdownUntil ? `Resuming Live after the reload in ${Math.max(0, Math.ceil((liveCountdownUntil - Date.now()) / 1000))} s. Cancel to resume as a dry run instead.`
-      : cp?.resumeIn ? `Core plan resumes Live after the reload in ${cp.resumeIn} s. Cancel to keep it a dry run.` : '');
-    refs.stall.set(stalled ? `Looks stalled: ${stalled}. Autopilot keeps running; check the log below.` : '');
-    K.syncLog(P, ui, refs.logv);
-    refs.alertBtn.hidden = core.notifyPerm() !== 'default';
-
-    // Settings
-    refs.settings.sync(running && !cfg.dryRun);
-    let changed = 0;
-    for (const f of Object.values(refs.fields)) if (f.sync()) changed++;
-    for (const k of Object.keys(refs.toggles)) if (refs.toggles[k].sync()) changed++;
-    P.setTabBadge('settings', changed ? changed + ' setting' + (changed > 1 ? 's' : '') + ' changed from the defaults' : '');
-    refs.billNow.textContent = `Now ${cfg.billHours} h${s ? ` = ${usd(moneyFloor(s))} kept` : ''}. Back to 1 h on reload.`;
-
-    // Footer
-    // Dry run is experimental: off by default, so the panel runs Live unless the switch is on.
-    refs.mode.el.hidden = !ui.dryRunSwitch;
-    refs.dryRunSwitch.input.disabled = running || active;
-    refs.mode.sync();
-    refs.mode.btns.forEach((b) => { b.disabled = on || active; });
-    const other = lockOwner() && lockOwner() !== TAB && !running;
-    const confirming = !on && !viewDry() && Date.now() < confirmUntil;
-    refs.plan.set(viewDry()
-      ? 'Dry run: works out every step and writes it to the log, but sends nothing.'
-      : `Live: sends actions to the game, one confirmed step at a time, and never spends below the power-bill floor${s ? ` (${usd(moneyFloor(s))})` : ''}.${confirming ? ' Click Confirm start to go.' : ''}`,
-    { hidden: on, hot: confirming });
-    refs.main.textContent = on ? 'Stop' : other ? 'Running in another tab' : active ? 'Stopping…' : viewDry() ? 'Start dry run' : confirming ? 'Confirm start' : 'Start live';
-    refs.main.disabled = !on && (other || active || !s);
-    refs.alt.hidden = !confirming;
-  }
-
-  const onResize = () => P?.place();
-
-  function render() {
-    if (!HAS_DOM || unloaded) return;
-    const s = read();
-    const cp = cpOf(s);
-    const t = tone(cp);
-    const ph = s ? (cp?.handedOff ? 'done' : phaseOf(s)) : null;   // after the hand-off the early plan stays done, even if Iron Frames dip
-    const dry = running || !cp?.running ? viewDry() : cp.dryRun, stage = cp?.running && cp.stage;
-    chrome?.setPill(!coreView(cp) && heldReason() ? 'Held' : dry ? 'Dry run' : ph === 'done' ? (stage ? 'Core ' + stage : 'Done') : `P${ph ?? '?'}`, t, !(running || cp?.running));
-    chrome?.setChip(ph == null ? 'Autopilot' : ph === 'done' ? (stage ? 'Core plan ' + stage : 'Plan done') : `Phase ${ph}`, t,
-      `Autopilot · ${running ? (heldReason() ? 'paused' : cfg.dryRun ? 'dry run' : 'live') : 'stopped'}` + (cp ? ' · Core plan · ' + cpMode(cp) : ''));
-    const open = !!P?.el.isConnected;
-    chrome?.setOpen(open);
-    if (open) renderPanel(s, ph, cp, t);
-  }
-
-  function panel(show = true, opts = {}) {
-    if (!HAS_DOM || unloaded) return;
-    if (show) { if (!P) buildPanel(); P.mount(opts); } else P?.unmount();
-    ui.open = !!show; saveUi();
-    render();
-  }
-
-  function mountUi() {
-    chrome = K.createChrome({
-      label: 'Autopilot', navTitle: 'Early-game autopilot', icon: ICON, navClass: 'egp-tab', chipClass: 'egp-chip',
-      onToggle: () => K.togglePanel(P, ui, panel),
-      navInsert: (nav, el) => nav.insertBefore(el, nav.querySelector('.cdf-tab')),   // above CD Farm's tab
-      chipInsert: (tools, el) => tools.insertBefore(el, tools.querySelector('.cdf-chip') || tools.querySelector('.tip-anchor') || null),
-    });
-    if (!ui.dryRunSwitch && !running && !active) cfg.dryRun = false;   // Dry run is experimental: off by default, so the panel starts Live unless the switch is on.
-    chrome.mount();
-    uiTimer = setInterval(render, 1000);
-    if (ui.open) panel(true); else render();
-    addEventListener('resize', onResize);
-  }
-  function unmountUi() {
-    clearInterval(uiTimer); uiTimer = null;
-    P?.unmount(); chrome?.unmount();
-    P = chrome = null;
-    removeEventListener('resize', onResize);
-  }
-// continues the autopilot closure from autopilot-5.js (same try / IIFE)
-  // ---- load ---------------------------------------------------------------------------
-
-  W.earlyGame = {
-    start, stop, plan, status, floors, offline, keepPaused, panel, read, decide, cfg, hold, release, reserve, tune, exportCfg, importCfg, resetCfg,
-    get stalled() { return stalled; },
-    get running() { return running; },
-    get active() { return active; },
-    get busy() { return isLive(); },   // sending live actions
-    get held() { return heldReason(); },
-    // Pure pieces for the offline simulator.
-    _core: {
-      checkGame, watchStall, stalledNow: () => stalled, resetWatch: () => { stalled = ''; prog.at = 0; lastPhase = null; },
-      snapshot: fullSnapshot, normalize, decide, checklist, phaseOf, planDone, mineTarget, goldTarget, incomePerMin, buildCost, buildSteps, sellersOf, priceCents, idMissing, finish, observe, userPaused, billPaused, floorTable, bomOf, transferMsg,
-      setClock: (fn) => { nowMs = fn; courierHoldUntil = 0; courierMisses = 0; cooldowns.clear(); successes.clear(); failures.clear(); for (const k in boosterLeft) delete boosterLeft[k]; },
-    },
-    _unload: () => {
-      unloaded = true; running = false; holds.clear(); dropLock(); core.setBadge('AP', ''); core.reserves?.unregister('earlyGame');
-      removeEventListener?.('pagehide', dropLock);
-      if (HAS_DOM) unmountUi();
-    },
-  };
-
-  // Calls go through the exported object so anything wrapping earlyGame.hold / release (tests, other scripts) still sees them.
-  core.reserves?.register('earlyGame', {
-    reserve: () => (W.earlyGame?.reserve ?? reserve)(),
-    busy: () => (W.earlyGame ? W.earlyGame.busy : isLive()),
-    hold: (w) => (W.earlyGame?.hold ?? hold)(w),
-    release: (w) => (W.earlyGame?.release ?? release)(w),
+  // ---- Settings tab
+  refs.hours = K.inputBox({ label: 'Hours offline', suffix: 'h' });
+  refs.hours.input.value = '8';
+  refs.billNow = mk('div', { class: 'idc-desc' });
+  const offBtn = mk('button', { type: 'button', onclick: () => { const hrs = Number(refs.hours.input.value); if (hrs > 0) { offline(hrs); render(); } } }, 'Keep bills');
+  refs.dryRunSwitch = K.toggleField('Dry run switch', 'Shows the Dry run / Live switch in the footer. Dry run works out every step and sends nothing.', { get: () => !!ui.dryRunSwitch, set: (v) => { ui.dryRunSwitch = v; saveUi(); if (!running && !active) cfg.dryRun = v; render(); }, def: false });
+  refs.keepOnline = K.toggleField('Keep online', 'The game sees this tab as visible, so its socket watchdog keeps it online while the tab is hidden.', { get: () => !!W.keepOnline?.on, set: (v) => { W.keepOnline?.set(v); render(); }, def: true });
+  refs.settings = K.settingsTab({
+    lockText: 'Stop the live run to change settings.',
+    tail: [K.group('Connection', refs.keepOnline.el), K.group('Experimental', refs.dryRunSwitch.el)],
+    groups: [
+      K.group('Build targets', mk('div', { class: 'idc-two' }, ...amount('workshops', 'sawmills', 'ironMines', 'coalMines', 'goldMines', 'ironFrameWorkshops'))),
+      K.group('Land price limits', mk('div', { class: 'idc-two' }, ...amount('landPaybackHours', 'maxAcrePriceEarly', 'maxAcrePrice')),
+        mk('div', { class: 'idc-desc' }, 'Camps, farms and Gold Mines get land while it and the building pay back from their own income within this time; with no bid for what they make, the walls (most per acre, early on and later) apply.')),
+      K.group('CD booster', mk('div', { class: 'idc-two' }, ...amount('boosterBatch', 'boosterMinCash', 'boosterKeepCash')), tog('cdBooster')),
+      K.group('Automation', ...['sellAll', 'floorUpgrades', 'buyKits', 'postBuyOrders', 'dispatchOffice', 'autoResume'].map(tog)),
+      K.group('Power bills', K.field('Going offline: keep power bills for', mk('div', { class: 'idc-inline' }, refs.hours.box, offBtn), refs.billNow)),
+    ],
+    advanced: K.disclosure('Advanced', [K.group(null, mk('div', { class: 'idc-two' }, ...amount(...ADV_FIELDS)), ...ADV_CHECKS.map(([key]) => tog(key)))],
+      { open: !!ui.advOpen, onToggle: (o) => { ui.advOpen = o; saveUi(); } }),
+    backup: { onExport: () => core.exportFile(), onImport: () => core.importFile(), onReset: () => K.resetSettings('Autopilot', { snapshot: exportCfg, reset: resetCfg, restore: importCfg }) },
   });
 
-  // Wait for the game to render and connect before mounting or resuming.
-  if (HAS_DOM) (async () => {
-    while (!document.querySelector('.primary-navigation') || !read()) {
-      if (unloaded) return;
-      await sleep(500);
-    }
-    mountUi();
-    console.log('[earlyGame] ready (dry run by default). Open "Autopilot" in the sidebar, or earlyGame.status() / earlyGame.plan() / earlyGame.start()');
-    if (W.cdFarm?.running) console.warn('[earlyGame] CD Farm is running; Autopilot waits until it stops.');
-    if (wasRunning && cfg.autoResume) {
-      while (!read()?.wsOpen) { if (unloaded) return; await sleep(500); }
-      await sleep(2000); // let the fresh snapshot land
+  // ---- Log tab
+  refs.alertBtn = mk('button', { type: 'button', title: 'Notify me when Autopilot stops, stalls or changes phase while this tab is in the background', onclick: async () => { await core.askNotify(); render(); } }, 'Enable alerts');
+  const logt = K.logTab({ extra: [refs.alertBtn] });
+  refs.logv = logt.logv;
+
+  // ---- Footer (always visible)
+  refs.mode = K.runModeSeg(() => !!cfg.dryRun, (id) => { cfg.dryRun = id; confirmUntil = 0; render(); });
+  refs.alt = mk('button', { onclick: () => { confirmUntil = 0; render(); } }, 'Cancel');
+  refs.main = mk('button', { class: 'primary', onclick: onMain });
+  const foot = K.footer({ top: [refs.mode.el], main: refs.main, alt: refs.alt });
+  refs.plan = foot.plan;
+
+  P = K.createPanel({
+    id: 'ap', title: 'Autopilot', cls: 'egp-panel', state: ui, save: saveUi, headExtra: [refs.badge], foot: foot.el,
+    tabs: [{ id: 'status', label: 'Status', content: status }, { id: 'settings', label: 'Settings', content: refs.settings.content }, { id: 'log', label: 'Log', content: logt.content }],
+    onClose: () => panel(false), onTab: () => render(), opener: () => chrome?.opener,
+    // Default: bottom-left of the page content, just right of the game's sidebar.
+    defaultPlace: () => { const side = document.querySelector('.primary-navigation')?.getBoundingClientRect(); return { left: side && side.right < innerWidth / 2 ? Math.round(side.right + 16) : 20 }; },
+  });
+}
+
+// The mode shown and started from the panel while idle: Dry run only with the experimental switch on. A run in progress shows what it really is.
+const viewDry = () => !!cfg.dryRun;   // the mode the panel shows and starts in: exactly what cfg says. Safety paths set it on purpose (refused Live, a reload resumed as a dry run), so the render never overrides it.
+// Core plan in this panel: once the plan is done (or the hand-off has stopped Autopilot) and whenever it runs; null otherwise.
+function cpOf(s) {
+  let c = null; try { c = W.corePlan?.status?.() ?? null; } catch { }
+  if (!c) return null;
+  const p = s ? phaseOf(s) : null;
+  c.handedOff &&= p === 'done' || p >= 4;   // the saved hand-off has no corp id: a new corp in this browser starts at Phase 1 again (4: a bill pause)
+  return c.running || c.handedOff || p === 'done' ? c : null;
+}
+// Core plan has taken over (it runs, or the hand-off is done): the panel is Core plan's, with the early plan as one "done" row.
+const coreView = (cp) => !!cp && (cp.running || cp.handedOff);
+const STAGES = [['A', 'start'], ['B', 'Assembly Plant unlock'], ['C', 'Retail Store unlock'], ['D', 'Retail Store built']];
+const END_NAMES = { E1: 'money engine runs', E2: 'only endgame unlocks left', E3: 'CD on the Farm cycle', E4: 'land done', E5: 'cash in hand' };
+// Progress of the whole plan, so the bar never drops back at the hand-off: the early plan is the first fifth, then a fifth per stage A-D
+// (in Stage D, the share of end conditions E1-E5 that hold).
+function cpProgress(cp) {
+  const i = STAGES.findIndex(([k]) => k === cp.stage);
+  if (cp.stage === 'END') return 100;
+  if (i < 0) return 100 / (STAGES.length + 1);   // starting: the early plan is done
+  const ok = cp.end.filter((e) => / ok:/.test(e)).length;
+  return ((1 + i + (cp.stage === 'D' && cp.end.length ? ok / cp.end.length : 0)) / (STAGES.length + 1)) * 100;
+}
+// Core plan's checklist: its stages, then the end conditions E1-E5 (the endgame gate; the log and corePlan.status() say why one is open).
+function cpChecklist(cp) {
+  const i = cp.stage === 'END' ? STAGES.length : STAGES.findIndex(([k]) => k === cp.stage);
+  return [
+    ...STAGES.map(([k, what], j) => ['Stage ' + k + ' · ' + what, j < i ? '✓' : j === i ? 'now' : '·']),
+    ...cp.end.map((e) => { const m = /^(E\d) (ok|NO):/.exec(e); return m ? [m[1] + ' · ' + (END_NAMES[m[1]] ?? ''), m[2] === 'ok' ? '✓' : '·'] : [e, '']; }),
+  ];
+}
+const cpMode = (c) => (c.running ? (c.resumeIn ? 'resuming Live in ' + c.resumeIn + ' s' : c.dryRun ? 'dry run' : 'live') : 'stopped');
+function onMain() {
+  const s = read(), cp = cpOf(s);
+  // After Plan done one button runs both: Stop stops Autopilot and Core plan; Start starts Core plan alone once the hand-off is done.
+  if (running || cp?.running) { if (cp?.running) W.corePlan.stop(); if (running) stop(); else render(); return; }
+  const go = (dry) => { if (cp?.handedOff) { W.corePlan.start({ dryRun: dry }); render(); } else if (dry) start(); else start({ dryRun: false }); };
+  if (viewDry()) return go(true);
+  if (Date.now() < confirmUntil) { confirmUntil = 0; return go(false); }
+  confirmUntil = Date.now() + 6000;
+  render();
+  setTimeout(render, 6100);
+}
+
+// 'run' | 'wait' | 'err' | ''
+function tone(cp) {
+  if (running && stalled) return 'err';
+  if (coreView(cp)) return cp.running ? (cp.dryRun ? 'wait' : 'run') : cp.stopReason ? 'err' : '';   // a short hold for a Core plan purchase is not a pause
+  if (running) return heldReason() || cfg.dryRun ? 'wait' : 'run';
+  if (cp?.running) return cp.dryRun || cp.holds.length ? 'wait' : 'run';
+  if (cp?.stopReason) return 'err';
+  if (stopReason && stopReason !== 'stopped by you') return 'err';
+  return '';
+}
+
+function cdFarmNote(cv) {
+  // Holds by CD Farm and Core plan are their own short steps; only a hold from the console needs the user.
+  const mine = [...holds].filter((w) => w !== 'corePlan' && w !== 'CD Farm');
+  const fi = farmInfo();
+  if (cv) {
+    // A non-Auto CD Farm run left interrupted blocks CD Farm Auto, which Core plan drives: that one needs the user.
+    if (fi?.resumable) return { text: 'CD Farm has an interrupted run. Resume or discard it in CD Farm so it can farm CD for Core plan again.', btn: true };
+    return mine.length ? { text: `Autopilot's selling and bill chores are paused from the console (${mine.join(', ')}). Run earlyGame.release() there to go on.`, btn: false } : null;
+  }
+  if (fi?.busy) return { text: `CD Farm is running${fi.f.stats?.by ? ` (${fi.f.stats.by})` : ''}. Autopilot waits until it stops.`, btn: true };
+  if (fi?.resumable) return { text: 'CD Farm has an interrupted run. Its leftover camps are left alone, and no camps, farms or booster run until you resume or discard it there.', btn: true };
+  if (mine.length) return { text: `Autopilot is paused from the console (${mine.join(', ')}). Run earlyGame.release() there to go on.`, btn: false };
+  return null;
+}
+
+function renderPanel(s, ph, cp, t) {
+  K.setTone(P.dot, t);
+  const on = running || !!cp?.running, dry = running || !cp?.running ? viewDry() : cp.dryRun;
+  refs.badge.textContent = dry ? 'Dry run' : 'Live';
+  refs.badge.className = 'idc-badge' + (dry ? '' : ' live');
+  if (!s) {
+    refs.hero.set('—', '', 0); refs.rows.set([]); refs.check.set([]);
+    refs.state.set(t, 'Waiting for the game to load…');
+  } else {
+    const cv = coreView(cp);
+    const list = checklist(s);
+    const marks = list.filter(([, v]) => /^(✓|·|researching|queued)/.test(v));
+    if (cv) refs.hero.set(cp.stage === 'END' ? 'Done' : cp.stage ? 'Stage ' + cp.stage : 'Starting', cp.stage === 'END' ? 'end conditions met' : cp.stage ? 'of D' : '', cpProgress(cp), 'Core plan');
+    else refs.hero.set(ph === 'done' ? 'Plan done' : `Phase ${ph}`, ph === 'done' ? '' : 'of 5',
+      ph === 'done' ? 100 : marks.length ? (marks.filter(([, v]) => v.startsWith('✓')).length / marks.length) * 100 : 0, 'Early-game plan');   // done is full: optional rows (Gold Mines) never tick
+    refs.rows.set([
+      ...(cv ? [['Early-game plan', '✓ done']] : cp ? [['Core plan', (cp.stage ? 'stage ' + cp.stage + ' · ' : '') + cpMode(cp)]] : []),
+      ...(cv && cp.resumeIn ? [['Core plan', cpMode(cp)]] : []),
+      // Autopilot runs on after the hand-off only for its chores, until Auto power takes over the subscription
+      ...(cv && running ? [['Autopilot chores', cfg.dryRun ? 'dry run, sends nothing' : s.autoPower ? 'selling, bill resume' : 'until Auto power is on']] : []),
+      ['Money', cv ? usd(s.money) : `${usd(s.money)} · floor ${usd(moneyFloor(s))}`],
+      ['CD', K.fmt(s.cd)],
+      ['Acres', `${s.acresUsed} / ${s.acresOwned} · next ${usd(acrePrice(s.landBought))}`],
+      // the subscription only (bought contracts are not in it): after the hand-off Auto utilities and Core plan's checks own power
+      ...(cv ? [] : [['Power', `${s.powerHave} MW (need ${s.powerNeed})`]]),
+      ['Courier', s.courierFree ? 'free' : `busy, ${courierEta(s)}`],
+      ...(cv ? [] : [['Actions', `${actions} sent this session`]]),
+      ...(cashRate() ? [['Cash change', `${signed(cashRate().perHour)}/h (last ${cashRate().mins} min)`]] : []),
+      ...(rateScale < 1 ? [['Pace', `${Math.round(rateScale * 100)}% after an action the server did not apply`]] : []),
+    ]);
+    const skip = new Set(['Phase', 'Money', 'CD', 'Acres', 'Power', 'Courier']);
+    refs.check.set(cv ? cpChecklist(cp) : list.filter(([k]) => !skip.has(k)).map(([k, v]) => [k, String(v)]));
+    const held = running && heldReason();
+    let next;
+    try { const d = decide(s); next = d.wait ? 'Waiting: ' + d.wait : 'Next: ' + d.reason; } catch (e) { next = 'error: ' + e.message; }
+    // Core plan's line once it runs (or Autopilot has stopped at Plan done): what it does next or waits for
+    const cpLine = cp && (cp.running || !running) ? (cp.running ? (cp.dryRun ? 'Dry run. ' : '') + 'Core plan ' + (cp.next ? 'next: ' + cp.next : cp.waits[0] ? 'waiting: ' + cp.waits[0] : 'is reading the game…')
+      : 'Core plan stopped' + (cp.stopReason ? ': ' + cp.stopReason : '') + '.') : '';
+    refs.state.set(t, cv ? cpLine || 'Core plan stopped.'
+      : held ? `Paused: ${held}`
+        : cpLine ? cpLine
+          : running ? (cfg.dryRun ? 'Dry run. ' : '') + next
+            : (stopReason ? `Stopped: ${stopReason}. ` : 'Stopped. ') + next);
+  }
+  const cv = coreView(cp);
+  const n = cdFarmNote(cv);
+  refs.cdNote.set(n?.text ?? '', !!n?.btn && !!W.cdFarm?.panel);
+  // Recent lines: Core plan's once it has taken over, Autopilot's before
+  const recent = cv ? core.ledger.list().filter((e) => e.mod === 'CP').slice(-6).reverse().map((e) => new Date(e.t).toLocaleTimeString() + ' ' + e.text) : log;
+  refs.log.replaceChildren(...recent.map((l) => mk('div', {}, l)));
+  refs.live.set(liveCountdownUntil ? `Resuming Live after the reload in ${Math.max(0, Math.ceil((liveCountdownUntil - Date.now()) / 1000))} s. Cancel to resume as a dry run instead.`
+    : cp?.resumeIn ? `Core plan resumes Live after the reload in ${cp.resumeIn} s. Cancel to keep it a dry run.` : '');
+  refs.stall.set(stalled ? `Looks stalled: ${stalled}. Autopilot keeps running; check the log below.` : '');
+  K.syncLog(P, ui, refs.logv);
+  refs.alertBtn.hidden = core.notifyPerm() !== 'default';
+
+  // Settings
+  refs.settings.sync(running && !cfg.dryRun);
+  let changed = 0;
+  for (const f of Object.values(refs.fields)) if (f.sync()) changed++;
+  for (const k of Object.keys(refs.toggles)) if (refs.toggles[k].sync()) changed++;
+  P.setTabBadge('settings', changed ? changed + ' setting' + (changed > 1 ? 's' : '') + ' changed from the defaults' : '');
+  refs.billNow.textContent = `Now ${cfg.billHours} h${s ? ` = ${usd(moneyFloor(s))} kept` : ''}. Back to 1 h on reload.`;
+
+  // Footer
+  // Dry run is experimental: off by default, so the panel runs Live unless the switch is on.
+  refs.mode.el.hidden = !ui.dryRunSwitch;
+  refs.dryRunSwitch.input.disabled = running || active;
+  refs.mode.sync();
+  refs.mode.btns.forEach((b) => { b.disabled = on || active; });
+  const other = lockOwner() && lockOwner() !== TAB && !running;
+  const confirming = !on && !viewDry() && Date.now() < confirmUntil;
+  refs.plan.set(viewDry()
+    ? 'Dry run: works out every step and writes it to the log, but sends nothing.'
+    : `Live: sends actions to the game, one confirmed step at a time, and never spends below the power-bill floor${s ? ` (${usd(moneyFloor(s))})` : ''}.${confirming ? ' Click Confirm start to go.' : ''}`,
+    { hidden: on, hot: confirming });
+  refs.main.textContent = on ? 'Stop' : other ? 'Running in another tab' : active ? 'Stopping…' : viewDry() ? 'Start dry run' : confirming ? 'Confirm start' : 'Start live';
+  refs.main.disabled = !on && (other || active || !s);
+  refs.alt.hidden = !confirming;
+}
+
+const onResize = () => P?.place();
+
+function render() {
+  if (!HAS_DOM || unloaded) return;
+  const s = read();
+  const cp = cpOf(s);
+  const t = tone(cp);
+  const ph = s ? (cp?.handedOff ? 'done' : phaseOf(s)) : null;   // after the hand-off the early plan stays done, even if Iron Frames dip
+  const dry = running || !cp?.running ? viewDry() : cp.dryRun, stage = cp?.running && cp.stage;
+  chrome?.setPill(!coreView(cp) && heldReason() ? 'Held' : dry ? 'Dry run' : ph === 'done' ? (stage ? 'Core ' + stage : 'Done') : `P${ph ?? '?'}`, t, !(running || cp?.running));
+  chrome?.setChip(ph == null ? 'Autopilot' : ph === 'done' ? (stage ? 'Core plan ' + stage : 'Plan done') : `Phase ${ph}`, t,
+    `Autopilot · ${running ? (heldReason() ? 'paused' : cfg.dryRun ? 'dry run' : 'live') : 'stopped'}` + (cp ? ' · Core plan · ' + cpMode(cp) : ''));
+  const open = !!P?.el.isConnected;
+  chrome?.setOpen(open);
+  if (open) renderPanel(s, ph, cp, t);
+}
+
+function panel(show = true, opts = {}) {
+  if (!HAS_DOM || unloaded) return;
+  if (show) { if (!P) buildPanel(); P.mount(opts); } else P?.unmount();
+  ui.open = !!show; saveUi();
+  render();
+}
+
+function mountUi() {
+  chrome = K.createChrome({
+    label: 'Autopilot', navTitle: 'Early-game autopilot', icon: ICON, navClass: 'egp-tab', chipClass: 'egp-chip',
+    onToggle: () => K.togglePanel(P, ui, panel),
+    navInsert: (nav, el) => nav.insertBefore(el, nav.querySelector('.cdf-tab')),   // above CD Farm's tab
+    chipInsert: (tools, el) => tools.insertBefore(el, tools.querySelector('.cdf-chip') || tools.querySelector('.tip-anchor') || null),
+  });
+  if (!ui.dryRunSwitch && !running && !active) cfg.dryRun = false;   // Dry run is experimental: off by default, so the panel starts Live unless the switch is on.
+  chrome.mount();
+  uiTimer = setInterval(render, 1000);
+  if (ui.open) panel(true); else render();
+  addEventListener('resize', onResize);
+}
+function unmountUi() {
+  clearInterval(uiTimer); uiTimer = null;
+  P?.unmount(); chrome?.unmount();
+  P = chrome = null;
+  removeEventListener('resize', onResize);
+}
+// continues the autopilot closure from autopilot-5.js (same try / IIFE)
+// ---- load ---------------------------------------------------------------------------
+
+W.earlyGame = {
+  start, stop, plan, status, floors, offline, keepPaused, panel, read, decide, cfg, hold, release, reserve, tune, exportCfg, importCfg, resetCfg,
+  get stalled() { return stalled; },
+  get running() { return running; },
+  get active() { return active; },
+  get busy() { return isLive(); },   // sending live actions
+  get held() { return heldReason(); },
+  // Pure pieces for the offline simulator.
+  _core: {
+    checkGame, watchStall, stalledNow: () => stalled, resetWatch: () => { stalled = ''; prog.at = 0; lastPhase = null; },
+    snapshot: fullSnapshot, normalize, decide, checklist, phaseOf, planDone, mineTarget, goldTarget, incomePerMin, buildCost, buildSteps, sellersOf, priceCents, idMissing, finish, observe, userPaused, billPaused, floorTable, bomOf, transferMsg,
+    setClock: (fn) => { nowMs = fn; courierHoldUntil = 0; courierMisses = 0; cooldowns.clear(); successes.clear(); failures.clear(); for (const k in boosterLeft) delete boosterLeft[k]; },
+  },
+  _unload: () => {
+    unloaded = true; running = false; holds.clear(); dropLock(); core.setBadge('AP', ''); core.reserves?.unregister('earlyGame');
+    removeEventListener?.('pagehide', dropLock);
+    if (HAS_DOM) unmountUi();
+  },
+};
+
+// Calls go through the exported object so anything wrapping earlyGame.hold / release (tests, other scripts) still sees them.
+core.reserves?.register('earlyGame', {
+  reserve: () => (W.earlyGame?.reserve ?? reserve)(),
+  busy: () => (W.earlyGame ? W.earlyGame.busy : isLive()),
+  hold: (w) => (W.earlyGame?.hold ?? hold)(w),
+  release: (w) => (W.earlyGame?.release ?? release)(w),
+});
+
+// Wait for the game to render and connect before mounting or resuming.
+if (HAS_DOM) (async () => {
+  while (!document.querySelector('.primary-navigation') || !read()) {
+    if (unloaded) return;
+    await sleep(500);
+  }
+  mountUi();
+  console.log('[earlyGame] ready (live by default). Open "Autopilot" in the sidebar, or earlyGame.status() / earlyGame.plan() / earlyGame.start() (live) / earlyGame.start({ dryRun: true })');
+  if (W.cdFarm?.running) console.warn('[earlyGame] CD Farm is running; Autopilot waits until it stops.');
+  if (wasRunning && cfg.autoResume) {
+    while (!read()?.wsOpen) { if (unloaded) return; await sleep(500); }
+    await sleep(2000); // let the fresh snapshot land
+    if (unloaded || running) return;
+    // A crashed or discarded tab never released its lock (no pagehide): it expires 60 s after its last heartbeat. A live tab keeps
+    // refreshing its lock, so this waits at most ~66 s for it to let go, then says so in the ledger instead of resuming.
+    for (let w = 0; lockOwner() && lockOwner() !== TAB; w++) {
+      if (w === 33) { core.ledger.add('AP', 'fail', 'not resumed: another tab is running Autopilot'); return; }
+      await sleep(2000);
       if (unloaded || running) return;
-      // A crashed or discarded tab never released its lock (no pagehide): it expires 60 s after its last heartbeat. A live tab keeps
-      // refreshing its lock, so this waits at most ~66 s for it to let go, then says so in the ledger instead of resuming.
-      for (let w = 0; lockOwner() && lockOwner() !== TAB; w++) {
-        if (w === 33) { core.ledger.add('AP', 'fail', 'not resumed: another tab is running Autopilot'); return; }
-        await sleep(2000);
-        if (unloaded || running) return;
-      }
-      let live = false;
-      if (cfg.liveResume && liveFlag) { live = await liveCountdown(); if (unloaded || running) return; }
-      cfg.dryRun = !live;
-      console.log(live ? '[earlyGame] resuming the run from before the reload, LIVE (liveResume)'
-        : '[earlyGame] resuming the run from before the reload (as a DRY RUN: switch to Live in the panel to send again)');
-      start();
     }
-  })();
+    let live = false;
+    if (cfg.liveResume && liveFlag) { live = await liveCountdown(); if (unloaded || running) return; }
+    cfg.dryRun = !live;
+    console.log(live ? '[earlyGame] resuming the run from before the reload, LIVE (liveResume)'
+      : '[earlyGame] resuming the run from before the reload (as a DRY RUN: switch to Live in the panel to send again)');
+    start();
+  }
 })();
+}) ();
 } catch (e) { console.error('[IdleCorp] Autopilot failed to load:', e); }
