@@ -36,12 +36,12 @@ t('hand-off: plan unlocks in + core buildings + a running Rivet group → done, 
   const st = base();
   st.unlocked_buildings = ['Sawmill', 'Workshop', 'Mine', 'Quarry', 'Smelter', 'Factory', 'Kiln', 'Paper Mill', 'Manufacturing Lab'].map(B);
   st.building_pool[0] = { [B('Sawmill')]: 1, [B('Mine')]: 1, [B('Quarry')]: 1, [B('Kiln')]: 1, [B('Manufacturing Lab')]: 1, [B('Smelter')]: 1 };
-  st.groups = { 7: { building: B('Workshop'), count: 1, equipped: 1, recipe: R('Rivet Iron Frame'), region: 0, name: 'rivet' } };
+  st.groups = { 7: { building: B('Workshop'), count: 1, equipped: 1, recipe: R('Assemble Iron Frame'), region: 0, name: 'rivet' } };
   assert.strictEqual(k.phaseOf(snap(st)), 'done');
   // Core plan never builds the Smelter / Rivet chain and the Assembly Plant prototype needs Iron Frames: no hand-off without them
-  st.groups[7].recipe = R('Frame Timber');
+  st.groups[7].recipe = R('Assemble Wooden Frame');
   assert.notStrictEqual(k.phaseOf(snap(st)), 'done', 'no Rivet group: not done');
-  st.groups[7].recipe = R('Rivet Iron Frame');
+  st.groups[7].recipe = R('Assemble Iron Frame');
   delete st.building_pool[0][B('Smelter')];
   assert.notStrictEqual(k.phaseOf(snap(st)), 'done', 'no Smelter: not done');
   st.building_pool[0][B('Smelter')] = 1;

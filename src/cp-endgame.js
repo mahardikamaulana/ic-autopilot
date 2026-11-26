@@ -3,7 +3,7 @@
 // ============================================================================
 // Director "endgame" (wiki/guides/core-game-plan.md 12, plan D6). Off by default (cfg.dir_endgame) until a live run has checked it.
 // Only once E1-E5 hold (out.finished / out.E), the Refinery start first when it can go, then one step at a time, each waiting on the one before it:
-//   1. 1 Assembly Plant, bought into a new group "Wire Frame"; 2. that group on Wire Frame (default floor, x1);
+//   1. 1 Assembly Plant, bought into a new group "Assemble Wired Frame"; 2. that group on Assemble Wired Frame (default floor, x1);
 //   3. Copper Mines on Mine Copper Ore, 5 per Smelter, the x3 merge floor applied before the first one;
 //   4. one Smelter on Draw Copper Wire, the Smelt x3 floor applied before it;
 //   5. stock gates: a production group pauses once every endgame target its output feeds is met and resumes when one is below
@@ -25,7 +25,7 @@ try {
   const MINES_PER_SMELTER = 5, SMELTERS = 1;     // Smelt x3 eats 600 Ore/h, a Mine on the x3 merge makes 144 (plan D6)
   // Each production group with every target downstream of it: it pauses only when all of them hold.
   const CHAIN = [
-    { b: 'Assembly Plant', r: 'Wire Frame', feeds: ['Wired Frame'] },
+    { b: 'Assembly Plant', r: 'Assemble Wired Frame', feeds: ['Wired Frame'] },
     { b: 'Smelter', r: 'Draw Copper Wire', feeds: ['Copper Wire', 'Wired Frame'] },
     { b: 'Mine', r: 'Mine Copper Ore', feeds: ['Copper Ore', 'Copper Wire', 'Wired Frame'] },
   ];
@@ -72,14 +72,14 @@ try {
     }
     return buyStep(v, ctx, bn, r, label);
   }
-  // Steps 1-2: an Assembly Plant you own already counts; one with no recipe goes on Wire Frame, one on another recipe is left to you.
+  // Steps 1-2: an Assembly Plant you own already counts; one with no recipe goes on Assemble Wired Frame, one on another recipe is left to you.
   function plantStep(v, ctx) {
-    const b = v.idB('Assembly Plant'), r = v.C.recipes[v.idR('Wire Frame')];
-    if (b == null || !r) return { wait: 'manual: the catalog has no ' + (b == null ? 'Assembly Plant' : 'Wire Frame') };
+    const b = v.idB('Assembly Plant'), r = v.C.recipes[v.idR('Assemble Wired Frame')];
+    if (b == null || !r) return { wait: 'manual: the catalog has no ' + (b == null ? 'Assembly Plant' : 'Assemble Wired Frame') };
     if (groupsOn(v, b, r.id).length) return null;
     const idle = v.groups.find((g) => g.building === b && g.count > 0 && g.recipe == null);
     if (idle) return { action: setRecipe(v, idle, r) };
-    if (v.owned('Assembly Plant') > 0) return { wait: 'manual: your Assembly Plant runs another recipe or sits in the pool: put one on Wire Frame' };
+    if (v.owned('Assembly Plant') > 0) return { wait: 'manual: your Assembly Plant runs another recipe or sits in the pool: put one on Assemble Wired Frame' };
     return buyStep(v, ctx, 'Assembly Plant', r, 'Assembly Plant');
   }
 

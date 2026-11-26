@@ -91,7 +91,7 @@ try {
     building: { CAMP: 'Lumber Camp', MINE: 'Mine', QUARRY: 'Quarry', SAWMILL: 'Sawmill', SMELTER: 'Smelter', KILN: 'Kiln', WORKSHOP: 'Workshop',
       FARM: 'Farm', LAB: 'Manufacturing Lab', FACTORY: 'Factory', PAPER_MILL: 'Paper Mill', DISPATCH: 'Dispatch Office' },
     recipe: { FELL_WOOD: 'Fell Wood', MINE_IRON: 'Mine Iron Ore', MINE_COAL: 'Mine Coal', LIMESTONE: 'Quarry Limestone', SAW_PLANKS: 'Saw Planks',
-      IRON_SHEET: 'Roll Iron Sheet', FRAME_TIMBER: 'Frame Timber', RIVET: 'Rivet Iron Frame', GROW_COTTON: 'Grow Cotton', MINE_GOLD: 'Mine Gold Ore', MIX_CONCRETE: 'Mix Concrete' },
+      IRON_SHEET: 'Roll Iron Sheet', FRAME_TIMBER: 'Assemble Wooden Frame', RIVET: 'Assemble Iron Frame', GROW_COTTON: 'Grow Cotton', MINE_GOLD: 'Mine Gold Ore', MIX_CONCRETE: 'Mix Concrete' },
     item: { MONEY: 'Money', CD: 'Construction Data', LD: 'Logistics Data', MD: 'Manufacturing Data', RD: 'Research Data', WOOD: 'Wood', PLANKS: 'Planks',
       COTTON: 'Cotton', WFRAME: 'Wooden Frame', IFRAME: 'Iron Frame' },
   };

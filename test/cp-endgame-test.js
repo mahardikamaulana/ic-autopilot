@@ -49,7 +49,7 @@ const FIN = () => ({ finished: true, E: [] });
     const types = r.action.steps.map((s) => s.msg.type);
     assert.deepStrictEqual(types.slice(-2), ['BuyBuilding', 'CreateGroup']);
     assert.strictEqual(r.action.steps.at(-2).msg.building, B('Assembly Plant'));
-    assert.strictEqual(r.action.steps.at(-1).msg.name, 'Wire Frame');
+    assert.strictEqual(r.action.steps.at(-1).msg.name, 'Assemble Wired Frame');
     assert.ok(r.action.hold);
     const v = view(cp, st), short = cp.cfg.bufferAcres + 5 - v.freeAcres;
     if (short > 0) assert.deepStrictEqual(r.action.steps[0].msg, { type: 'BuyLand', amount: short, region: 0 }); else assert.strictEqual(types[0], 'BuyBuilding');
@@ -69,7 +69,7 @@ const FIN = () => ({ finished: true, E: [] });
     const noKit = endCorp(); noKit.stock[0][I('Iron Frame')] = 0;
     assert.match(X.endgameDecide(view(cp, noKit), F.ctxOf(), FIN()).wait, /^Assembly Plant: kit short: \d+ Iron Frame/);
     // an Assembly Plant you own already counts; one on another recipe is left to you
-    const own = endCorp(); own.groups[900] = { building: B('Assembly Plant'), region: 0, count: 1, recipe: Rc('Wire Frame') };
+    const own = endCorp(); own.groups[900] = { building: B('Assembly Plant'), region: 0, count: 1, recipe: Rc('Assemble Wired Frame') };
     assert.strictEqual(X.endgameDecide(view(cp, own), F.ctxOf(), FIN()).action.id, 'eg:floor:' + Rc('Mine Copper Ore'));
   });
 
@@ -89,7 +89,7 @@ const FIN = () => ({ finished: true, E: [] });
     // C1: CD and the Wired Frames in hand start the Refinery first; the builds and gates follow while it researches
     assert.deepStrictEqual(seq, [
       'StartTech',
-      'BuyBuilding:Assembly Plant CreateGroup', 'SetRecipe:Wire Frame',
+      'BuyBuilding:Assembly Plant CreateGroup', 'SetRecipe:Assemble Wired Frame',
       'EditLayout:Mine Copper Ore', 'BuyBuilding:Mine CreateGroup', 'SetRecipe:Mine Copper Ore',
       'BuyBuilding:Mine AssignBuildings', 'BuyBuilding:Mine AssignBuildings', 'BuyBuilding:Mine AssignBuildings', 'BuyBuilding:Mine AssignBuildings',
       'EditLayout:Draw Copper Wire', 'BuyBuilding:Smelter CreateGroup', 'SetRecipe:Draw Copper Wire',
@@ -105,9 +105,9 @@ const FIN = () => ({ finished: true, E: [] });
 
   await t('endgame (D6): a later step never runs before an earlier one: Mines wait for the Wire Frame group, the Smelter for 5 Mines', () => {
     const st = endCorp();
-    st.groups[900] = { building: B('Assembly Plant'), region: 0, count: 1, recipe: null, name: 'Wire Frame' };
-    assert.deepStrictEqual(X.endgameDecide(view(cp, st), F.ctxOf(), FIN()).action.steps[0].msg, { type: 'SetRecipe', group: 900, recipe: Rc('Wire Frame') });
-    st.groups[900].recipe = Rc('Wire Frame');
+    st.groups[900] = { building: B('Assembly Plant'), region: 0, count: 1, recipe: null, name: 'Assemble Wired Frame' };
+    assert.deepStrictEqual(X.endgameDecide(view(cp, st), F.ctxOf(), FIN()).action.steps[0].msg, { type: 'SetRecipe', group: 900, recipe: Rc('Assemble Wired Frame') });
+    st.groups[900].recipe = Rc('Assemble Wired Frame');
     st.layouts[Rc('Mine Copper Ore')] = { fx: { rate: 3 } };
     st.groups[901] = { building: B('Mine'), region: 0, count: 4, recipe: Rc('Mine Copper Ore') };
     const r = X.endgameDecide(view(cp, st), F.ctxOf(), FIN());
@@ -125,7 +125,7 @@ const FIN = () => ({ finished: true, E: [] });
 
   await t('endgame stock gates (D6): copper and wire groups pause only when every target they feed is met, resume below; yours stay yours', () => {
     const st = endCorp();
-    st.groups[900] = { building: B('Assembly Plant'), region: 0, count: 1, recipe: Rc('Wire Frame') };
+    st.groups[900] = { building: B('Assembly Plant'), region: 0, count: 1, recipe: Rc('Assemble Wired Frame') };
     st.groups[901] = { building: B('Mine'), region: 0, count: 5, recipe: Rc('Mine Copper Ore') };
     st.groups[902] = { building: B('Smelter'), region: 0, count: 1, recipe: Rc('Draw Copper Wire') };
     const ctx = F.ctxOf(), m = ctx.mem('endgame');
@@ -168,7 +168,7 @@ const FIN = () => ({ finished: true, E: [] });
 
   await t('endgame: with steps 1-4 in place and targets unmet, the Refinery start waits for its prototype and 750,000 CD, then StartTech', () => {
     const st = endCorp();
-    st.groups[900] = { building: B('Assembly Plant'), region: 0, count: 1, recipe: Rc('Wire Frame') };
+    st.groups[900] = { building: B('Assembly Plant'), region: 0, count: 1, recipe: Rc('Assemble Wired Frame') };
     st.groups[901] = { building: B('Mine'), region: 0, count: 5, recipe: Rc('Mine Copper Ore') };
     st.groups[902] = { building: B('Smelter'), region: 0, count: 1, recipe: Rc('Draw Copper Wire') };
     for (const r of ['Mine Copper Ore', 'Draw Copper Wire']) st.layouts[Rc(r)] = { fx: { rate: 3 } };
@@ -184,7 +184,7 @@ const FIN = () => ({ finished: true, E: [] });
 
   await t('endgame gates: no stranded pause: before E1-E5 hold only the resume half runs; with the endgame off every group it paused comes back', () => {
     const st = endCorp();
-    st.groups[900] = { building: B('Assembly Plant'), region: 0, count: 1, recipe: Rc('Wire Frame'), paused: true };
+    st.groups[900] = { building: B('Assembly Plant'), region: 0, count: 1, recipe: Rc('Assemble Wired Frame'), paused: true };
     st.groups[902] = { building: B('Smelter'), region: 0, count: 1, recipe: Rc('Draw Copper Wire'), paused: true };
     st.groups[903] = { building: B('Smelter'), region: 0, count: 1, recipe: Rc('Draw Copper Wire'), paused: true };   // paused by someone else
     const ctx = F.ctxOf({ tick: T0 });
@@ -213,7 +213,7 @@ const FIN = () => ({ finished: true, E: [] });
 
   await t('endgame floors: an EditLayout the server did not apply waits cfg.floorRetryMin before the next try', () => {
     const st = endCorp();
-    st.groups[900] = { building: B('Assembly Plant'), region: 0, count: 1, recipe: Rc('Wire Frame') };
+    st.groups[900] = { building: B('Assembly Plant'), region: 0, count: 1, recipe: Rc('Assemble Wired Frame') };
     const mem = F.ctxOf().mem, ctx = (min) => F.ctxOf({ mem, now: Date.now() + min * 60000 });   // until() stamps Date.now(), as buildout's floorStep
     const a = X.endgameDecide(view(cp, st), ctx(0), FIN()).action;
     assert.strictEqual(a.id, 'eg:floor:' + Rc('Mine Copper Ore'));
@@ -232,7 +232,7 @@ const FIN = () => ({ finished: true, E: [] });
 
   await t('endgame floors: a failed Mine floor does not block the Smelter floor (the retry wait is per recipe)', () => {
     const st = endCorp();
-    st.groups[900] = { building: B('Assembly Plant'), region: 0, count: 1, recipe: Rc('Wire Frame') };
+    st.groups[900] = { building: B('Assembly Plant'), region: 0, count: 1, recipe: Rc('Assemble Wired Frame') };
     const mem = F.ctxOf().mem, ctx = F.ctxOf({ mem, now: Date.now() });
     const mine = X.endgameDecide(view(cp, st), ctx, FIN()).action;
     assert.strictEqual(mine.id, 'eg:floor:' + Rc('Mine Copper Ore'));

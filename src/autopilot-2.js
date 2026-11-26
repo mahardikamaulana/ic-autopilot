@@ -357,11 +357,11 @@
     { name: 'Smelt x3', rate: 3, recipes: ['Roll Iron Sheet', 'Roll Steel Sheet', 'Draw Copper Wire'],
       cells: core.floorDesigns.smeltX3 },
     { name: 'Kiln x3', rate: 3, recipes: ['Mix Concrete', 'Blow Glass'], cells: SMELT_X3 }, // Mix Concrete, Blow Glass
-    { name: 'Frame Timber x5', rate: 5, recipes: ['Frame Timber'], cells: WORKSHOP_V1 },
+    { name: 'Frame Timber x5', rate: 5, recipes: ['Assemble Wooden Frame'], cells: WORKSHOP_V1 },
     // Scored with the game's engine on 2026-11-22: x5 on Make Bookshelf / Table / Chair. Layouts are per recipe, so each gets its own
     // EditLayout; the live scorer (engineRate) still decides, the library rate is only a fallback when no scorer is reachable.
     { name: 'Workshop v1 x5', rate: 5, fits: (s, r) => (FURNITURE_V1.has(s.recipe(r)?.name) ? unpack(WORKSHOP_V1) : null) },
-    { name: 'Rivet x3', rate: 3, recipes: ['Rivet Iron Frame'], cells: RIVET_X3 },
+    { name: 'Rivet x3', rate: 3, recipes: ['Assemble Iron Frame'], cells: RIVET_X3 },
     // Scored x3 on Make Bench and Make Desk (2026-11-22).
     { name: 'Rivet x3 (two inputs)', rate: 3, fits: (s, r) => (FURNITURE_RIVET.has(s.recipe(r)?.name) ? unpack(RIVET_X3) : null) },
   ];

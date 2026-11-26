@@ -27,7 +27,7 @@ try {
   const REGION = 0, TPS = 2, TICKS_H = 3600 * TPS;
   // fallback shelf goods when the board names none the Corporation can make
   const RECIPE = { Bookshelf: 'Make Bookshelf', Table: 'Make Table', Chair: 'Make Chair', Bench: 'Make Bench' };
-  const STORE = 'Retail Store', GROUP_NAME = 'Retail', WORKSHOP = 'Workshop', FT = 'Frame Timber', FT_GROUP = 'Frame Timber';
+  const STORE = 'Retail Store', GROUP_NAME = 'Retail', WORKSHOP = 'Workshop', FT = 'Assemble Wooden Frame', FT_GROUP = 'Frame Timber';
   const RATES = { power: 1000, water: 400, bandwidth: 1500 };   // cents per unit per 10-min bill (same as autoUtil billsOf)
   // shortcut: the corp state carries no stock quality, so the price uses quality 0; read it once the protocol shows one.
   const Q0 = 0.952;                    // quality factor at quality 0 (wiki retail.md, Price)

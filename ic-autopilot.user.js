@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IC Autopilot
 // @namespace    idlecorp-toolkit
-// @version      2.8.18
+// @version      2.8.19
 // @author       XPARAD0X
 // @description  Early-game Autopilot, CD Farm (Construction Data by building and demolishing buildings; Auto picks the cheapest source itself), Lab runner (keeps the Manufacturing Labs researching), Auto ship (an "Auto ship" button on every distributor bid) and Auto utilities (an "Auto" switch that keeps the power and water subscriptions at what the groups need) for IdleCorp, each with a panel, menu or switch in the game UI.
 // @homepageURL  https://github.com/mahardikamaulana/ic-autopilot
@@ -5354,7 +5354,7 @@ try {
   function startConditions(v, ctx) {
     const miss2 = S2_NEEDS.filter((n) => !v.unlocked(n));
     const s2 = cond('S2', !miss2.length, miss2.length ? 'not unlocked: ' + miss2.join(', ') : 'all unlocked');
-    const need3 = [['Smelter', 'Roll Iron Sheet'], ['Workshop', 'Rivet Iron Frame'], ['Workshop', 'Frame Timber']].filter(([b, r]) => !v.running(b, r));
+    const need3 = [['Smelter', 'Roll Iron Sheet'], ['Workshop', 'Assemble Iron Frame'], ['Workshop', 'Assemble Wooden Frame']].filter(([b, r]) => !v.running(b, r));
     const ifs = v.has('Iron Frame');
     const s3 = cond('S3', !need3.length && ifs >= 16, need3.length ? 'not running: ' + need3.map(([b, r]) => b + ' on ' + r).join(', ') : ifs < 16 ? 'Iron Frame stock ' + ifs + ' < 16' : 'running, Iron Frames ' + ifs);
     const lab = v.owned('Manufacturing Lab'), kiln = v.owned('Kiln'), mine = v.owned('Mine'), quarry = v.owned('Quarry');
@@ -5362,7 +5362,7 @@ try {
     const s1 = cond('S1', ctx.planDone === true || (s2.ok && s3.ok && s4.ok), ctx.planDone === true ? 'Autopilot: Plan done' : (s2.ok && s3.ok && s4.ok) ? 'S2-S4 hold' : 'Autopilot has not finished the Early-Game Plan, and S2-S4 do not all hold');
     // Autopilot's Plan done stands for S2-S4: a corp that finished the early plan its own way still starts Stage A.
     // Plan done implies a running Rivet group (Core plan never builds one); without it S3 still fails, or the prototype's Iron Frames never come.
-    const rivet = v.running('Workshop', 'Rivet Iron Frame');
+    const rivet = v.running('Workshop', 'Assemble Iron Frame');
     if (ctx.planDone === true) for (const c of [s2, s3, s4]) if (!c.ok && (c !== s3 || rivet)) { c.ok = true; c.why = 'Autopilot: Plan done (' + c.why + ')'; }
     const s5 = cond('S5', !v.unlocked('Assembly Plant'), v.unlocked('Assembly Plant') ? 'Assembly Plant is already unlocked (join at stage B or later)' : 'not unlocked yet');
     const c10 = ctx.cashDelta10;
@@ -5966,7 +5966,7 @@ try {
     const N = v.N, C = v.C, st = v.st;
     const id = { camp: v.idB('Lumber Camp'), saw: v.idB('Sawmill'), ws: v.idB('Workshop'), farm: v.idB('Farm'), kiln: v.idB('Kiln') };
     const rec = (n) => recipeOf(C, n);
-    const R = { wood: rec('Fell Wood'), planks: rec('Saw Planks'), ft: rec('Frame Timber'), rivet: rec('Rivet Iron Frame'), cotton: rec('Grow Cotton'),
+    const R = { wood: rec('Fell Wood'), planks: rec('Saw Planks'), ft: rec('Assemble Wooden Frame'), rivet: rec('Assemble Iron Frame'), cotton: rec('Grow Cotton'),
       glass: rec('Blow Glass'), concrete: rec('Mix Concrete'), bookshelf: rec('Make Bookshelf'), table: rec('Make Table'), chair: rec('Make Chair') };
     const missing = [...Object.entries(id).filter(([, x]) => x == null).map(([k]) => 'building ' + k), ...Object.entries(R).filter(([, x]) => !x).map(([k]) => 'recipe ' + k)];
     if (missing.length) return { missing };
@@ -6566,7 +6566,7 @@ try {
       if (resumed.length) m.set({ kilnMine: mine.filter((id) => !resumed.includes(id)), kilnUser: [...new Set([...(m.get().kilnUser ?? []), ...resumed])] });
       // Frame Timber the WF gate paused: one running again on Frame Timber was resumed by the user (hands off); one gone, emptied or
       // running on another recipe just drops out (a paused one on another recipe stays: ftStep resumes it).
-      const ftR = v.idR('Frame Timber'), ftMine = m.get().ftMine ?? [], ftKeep = [], ftUser = [];
+      const ftR = v.idR('Assemble Wooden Frame'), ftMine = m.get().ftMine ?? [], ftKeep = [], ftUser = [];
       for (const id of ftMine) { const g = v.groups.find((x) => x.id === id); if (g && g.count > 0 && g.paused) ftKeep.push(id); else if (g && g.recipe === ftR) ftUser.push(id); }
       if (ftKeep.length !== ftMine.length) m.set({ ftMine: ftKeep, ...(ftUser.length ? { ftUser: [...new Set([...(m.get().ftUser ?? []), ...ftUser])] } : {}) });
       const e = engine(v, ctx);
@@ -6670,7 +6670,7 @@ try {
   const REGION = 0, TPS = 2, TICKS_H = 3600 * TPS;
   // fallback shelf goods when the board names none the Corporation can make
   const RECIPE = { Bookshelf: 'Make Bookshelf', Table: 'Make Table', Chair: 'Make Chair', Bench: 'Make Bench' };
-  const STORE = 'Retail Store', GROUP_NAME = 'Retail', WORKSHOP = 'Workshop', FT = 'Frame Timber', FT_GROUP = 'Frame Timber';
+  const STORE = 'Retail Store', GROUP_NAME = 'Retail', WORKSHOP = 'Workshop', FT = 'Assemble Wooden Frame', FT_GROUP = 'Frame Timber';
   const RATES = { power: 1000, water: 400, bandwidth: 1500 };   // cents per unit per 10-min bill (same as autoUtil billsOf)
   // shortcut: the corp state carries no stock quality, so the price uses quality 0; read it once the protocol shows one.
   const Q0 = 0.952;                    // quality factor at quality 0 (wiki retail.md, Price)
@@ -8187,7 +8187,7 @@ try {
 // ============================================================================
 // Director "endgame" (wiki/guides/core-game-plan.md 12, plan D6). Off by default (cfg.dir_endgame) until a live run has checked it.
 // Only once E1-E5 hold (out.finished / out.E), the Refinery start first when it can go, then one step at a time, each waiting on the one before it:
-//   1. 1 Assembly Plant, bought into a new group "Wire Frame"; 2. that group on Wire Frame (default floor, x1);
+//   1. 1 Assembly Plant, bought into a new group "Assemble Wired Frame"; 2. that group on Assemble Wired Frame (default floor, x1);
 //   3. Copper Mines on Mine Copper Ore, 5 per Smelter, the x3 merge floor applied before the first one;
 //   4. one Smelter on Draw Copper Wire, the Smelt x3 floor applied before it;
 //   5. stock gates: a production group pauses once every endgame target its output feeds is met and resumes when one is below
@@ -8209,7 +8209,7 @@ try {
   const MINES_PER_SMELTER = 5, SMELTERS = 1;     // Smelt x3 eats 600 Ore/h, a Mine on the x3 merge makes 144 (plan D6)
   // Each production group with every target downstream of it: it pauses only when all of them hold.
   const CHAIN = [
-    { b: 'Assembly Plant', r: 'Wire Frame', feeds: ['Wired Frame'] },
+    { b: 'Assembly Plant', r: 'Assemble Wired Frame', feeds: ['Wired Frame'] },
     { b: 'Smelter', r: 'Draw Copper Wire', feeds: ['Copper Wire', 'Wired Frame'] },
     { b: 'Mine', r: 'Mine Copper Ore', feeds: ['Copper Ore', 'Copper Wire', 'Wired Frame'] },
   ];
@@ -8256,14 +8256,14 @@ try {
     }
     return buyStep(v, ctx, bn, r, label);
   }
-  // Steps 1-2: an Assembly Plant you own already counts; one with no recipe goes on Wire Frame, one on another recipe is left to you.
+  // Steps 1-2: an Assembly Plant you own already counts; one with no recipe goes on Assemble Wired Frame, one on another recipe is left to you.
   function plantStep(v, ctx) {
-    const b = v.idB('Assembly Plant'), r = v.C.recipes[v.idR('Wire Frame')];
-    if (b == null || !r) return { wait: 'manual: the catalog has no ' + (b == null ? 'Assembly Plant' : 'Wire Frame') };
+    const b = v.idB('Assembly Plant'), r = v.C.recipes[v.idR('Assemble Wired Frame')];
+    if (b == null || !r) return { wait: 'manual: the catalog has no ' + (b == null ? 'Assembly Plant' : 'Assemble Wired Frame') };
     if (groupsOn(v, b, r.id).length) return null;
     const idle = v.groups.find((g) => g.building === b && g.count > 0 && g.recipe == null);
     if (idle) return { action: setRecipe(v, idle, r) };
-    if (v.owned('Assembly Plant') > 0) return { wait: 'manual: your Assembly Plant runs another recipe or sits in the pool: put one on Wire Frame' };
+    if (v.owned('Assembly Plant') > 0) return { wait: 'manual: your Assembly Plant runs another recipe or sits in the pool: put one on Assemble Wired Frame' };
     return buyStep(v, ctx, 'Assembly Plant', r, 'Assembly Plant');
   }
 
@@ -8451,7 +8451,7 @@ try {
     building: { CAMP: 'Lumber Camp', MINE: 'Mine', QUARRY: 'Quarry', SAWMILL: 'Sawmill', SMELTER: 'Smelter', KILN: 'Kiln', WORKSHOP: 'Workshop',
       FARM: 'Farm', LAB: 'Manufacturing Lab', FACTORY: 'Factory', PAPER_MILL: 'Paper Mill', DISPATCH: 'Dispatch Office' },
     recipe: { FELL_WOOD: 'Fell Wood', MINE_IRON: 'Mine Iron Ore', MINE_COAL: 'Mine Coal', LIMESTONE: 'Quarry Limestone', SAW_PLANKS: 'Saw Planks',
-      IRON_SHEET: 'Roll Iron Sheet', FRAME_TIMBER: 'Frame Timber', RIVET: 'Rivet Iron Frame', GROW_COTTON: 'Grow Cotton', MINE_GOLD: 'Mine Gold Ore', MIX_CONCRETE: 'Mix Concrete' },
+      IRON_SHEET: 'Roll Iron Sheet', FRAME_TIMBER: 'Assemble Wooden Frame', RIVET: 'Assemble Iron Frame', GROW_COTTON: 'Grow Cotton', MINE_GOLD: 'Mine Gold Ore', MIX_CONCRETE: 'Mix Concrete' },
     item: { MONEY: 'Money', CD: 'Construction Data', LD: 'Logistics Data', MD: 'Manufacturing Data', RD: 'Research Data', WOOD: 'Wood', PLANKS: 'Planks',
       COTTON: 'Cotton', WFRAME: 'Wooden Frame', IFRAME: 'Iron Frame' },
   };
@@ -9053,11 +9053,11 @@ try {
     { name: 'Smelt x3', rate: 3, recipes: ['Roll Iron Sheet', 'Roll Steel Sheet', 'Draw Copper Wire'],
       cells: core.floorDesigns.smeltX3 },
     { name: 'Kiln x3', rate: 3, recipes: ['Mix Concrete', 'Blow Glass'], cells: SMELT_X3 }, // Mix Concrete, Blow Glass
-    { name: 'Frame Timber x5', rate: 5, recipes: ['Frame Timber'], cells: WORKSHOP_V1 },
+    { name: 'Frame Timber x5', rate: 5, recipes: ['Assemble Wooden Frame'], cells: WORKSHOP_V1 },
     // Scored with the game's engine on 2026-11-22: x5 on Make Bookshelf / Table / Chair. Layouts are per recipe, so each gets its own
     // EditLayout; the live scorer (engineRate) still decides, the library rate is only a fallback when no scorer is reachable.
     { name: 'Workshop v1 x5', rate: 5, fits: (s, r) => (FURNITURE_V1.has(s.recipe(r)?.name) ? unpack(WORKSHOP_V1) : null) },
-    { name: 'Rivet x3', rate: 3, recipes: ['Rivet Iron Frame'], cells: RIVET_X3 },
+    { name: 'Rivet x3', rate: 3, recipes: ['Assemble Iron Frame'], cells: RIVET_X3 },
     // Scored x3 on Make Bench and Make Desk (2026-11-22).
     { name: 'Rivet x3 (two inputs)', rate: 3, fits: (s, r) => (FURNITURE_RIVET.has(s.recipe(r)?.name) ? unpack(RIVET_X3) : null) },
   ];

@@ -13,7 +13,7 @@ const liveB = () => { const st = F.liveB(); st.stock[0][I('Wooden Frame')] = 12;
 // Live Stage B with the v1 furniture floors saved (copied from Frame Timber's) and the Kiln gate already met.
 function liveReady() {
   const st = liveB();
-  for (const n of ['Make Bookshelf', 'Make Table', 'Make Chair']) st.layouts[Rc(n)] = F.clone(st.layouts[Rc('Frame Timber')]);
+  for (const n of ['Make Bookshelf', 'Make Table', 'Make Chair']) st.layouts[Rc(n)] = F.clone(st.layouts[Rc('Assemble Wooden Frame')]);
   st.stock[0][I('Glass')] = 150; st.stock[0][I('Concrete')] = 500;
   return st;
 }
@@ -104,8 +104,8 @@ const wsGroups = (st) => Object.values(st.groups).filter((g) => g.building === B
     await F.waitFor(() => !cp.active);
     const ws = Object.values(st.groups).filter((g) => g.building === B('Workshop'));
     const on = (r) => ws.filter((g) => g.recipe === Rc(r)).reduce((a, g) => a + g.count, 0);
-    assert.strictEqual(on('Frame Timber'), 1);
-    assert.strictEqual(st.groups[11].count, 1); assert.strictEqual(st.groups[11].recipe, Rc('Rivet Iron Frame'));
+    assert.strictEqual(on('Assemble Wooden Frame'), 1);
+    assert.strictEqual(st.groups[11].count, 1); assert.strictEqual(st.groups[11].recipe, Rc('Assemble Iron Frame'));
     assert.strictEqual(on('Make Bookshelf') + on('Make Table') + on('Make Chair'), 5);
     assert.ok(on('Make Chair') >= 1 && on('Make Table') >= 1, JSON.stringify(ws));
     assert.ok(!w.ws.sent.some((m) => m.type === 'BuyBuilding' || m.type === 'BuyLand'));
@@ -141,7 +141,7 @@ const wsGroups = (st) => Object.values(st.groups).filter((g) => g.building === B
     const ws = Object.values(st.groups).filter((g) => g.building === B('Workshop'));
     const on = (r) => ws.filter((g) => g.recipe === Rc(r)).reduce((a, g) => a + g.count, 0);
     assert.strictEqual(on('Make Bookshelf') + on('Make Table') + on('Make Chair'), 2);
-    assert.strictEqual(on('Frame Timber'), 4);
+    assert.strictEqual(on('Assemble Wooden Frame'), 4);
     cp.stop();
     st.land_bought[0] += 40; st.items[F.MONEY] = 1e9;
     const v = cp._view(st, cat, deals), ctx = F.ctxOf({ retailBoard: retail, retailCap: 2 });
@@ -452,7 +452,7 @@ const wsGroups = (st) => Object.values(st.groups).filter((g) => g.building === B
   // ---- fix pass: switch / tidy agree, one group per recipe, wave gates, wave memory, Kiln ownership ----------------------------
   function oneFtGroup(floors) {
     const st = liveB();
-    for (const n of floors) st.layouts[Rc(n)] = F.clone(st.layouts[Rc('Frame Timber')]);
+    for (const n of floors) st.layouts[Rc(n)] = F.clone(st.layouts[Rc('Assemble Wooden Frame')]);
     st.stock[0][I('Glass')] = 150; st.stock[0][I('Concrete')] = 500;
     st.groups[3].count = 6; delete st.groups[8]; st.groups[2].count = 60;   // one Frame Timber group of 6, 7,200 planks/h
     return st;
@@ -486,7 +486,7 @@ const wsGroups = (st) => Object.values(st.groups).filter((g) => g.building === B
 
   // ---- fix pass 2: floors for the buy path, Autopilot's share, parts, backoff ----------------------------------------------------------
   const floorSt = () => { const st = liveB(); st.stock[0][I('Glass')] = 150; st.stock[0][I('Concrete')] = 500; return st; };
-  const tableRunning = (st, n = 6) => { for (const r of ['Make Bookshelf', 'Make Chair']) st.layouts[Rc(r)] = F.clone(st.layouts[Rc('Frame Timber')]); st.groups[8].recipe = Rc('Make Table'); st.groups[8].count = n; st.groups[8].name = 'Make Table'; st.groups[3].count = 1; return st; };   // no spare Frame Timber: nothing to switch
+  const tableRunning = (st, n = 6) => { for (const r of ['Make Bookshelf', 'Make Chair']) st.layouts[Rc(r)] = F.clone(st.layouts[Rc('Assemble Wooden Frame')]); st.groups[8].recipe = Rc('Make Table'); st.groups[8].count = n; st.groups[8].name = 'Make Table'; st.groups[3].count = 1; return st; };   // no spare Frame Timber: nothing to switch
   const apLive = (up) => ({ mods: { earlyGame: { busy: true, running: true, cfg: { floorUpgrades: up } } } });
 
   await F.t('furniture floor: Frame Timber at its keep and no furniture yet: the buy path still gets its floor', () => {
@@ -575,7 +575,7 @@ const wsGroups = (st) => Object.values(st.groups).filter((g) => g.building === B
     const names = furn.map((g) => C_name(g.recipe));
     assert.strictEqual(new Set(names).size, names.length, 'one group per recipe: ' + JSON.stringify(furn));
     assert.ok(furn.every((g) => g.name === C_name(g.recipe)));
-    assert.strictEqual(wsGroups(st).filter((g) => g.recipe === Rc('Frame Timber')).reduce((a, g) => a + g.count, 0), 1);
+    assert.strictEqual(wsGroups(st).filter((g) => g.recipe === Rc('Assemble Wooden Frame')).reduce((a, g) => a + g.count, 0), 1);
     assert.ok(!w.ws.sent.some((m) => m.type === 'AssignBuildings' && m.group === 3));
     cp.stop(); F.unload();
   });
@@ -636,7 +636,7 @@ const wsGroups = (st) => Object.values(st.groups).filter((g) => g.building === B
     st.building_pool[0][B('Workshop')] = 0;
     st.groups[97] = { building: B('Workshop'), region: 0, count: 1, recipe: null, name: 'My shop', modules: {} };
     a = bo(dec());
-    assert.ok(!a || a.id !== 'bo:recipe:97:' + Rc('Frame Timber'), a?.text);
+    assert.ok(!a || a.id !== 'bo:recipe:97:' + Rc('Assemble Wooden Frame'), a?.text);
     assert.ok(!a || !String(a.id).startsWith('bo:recipe:97'), a?.text);
     mem('buildout').set({ groupsMine: [97] });
     assert.ok(String(bo(dec())?.id).startsWith('bo:recipe:97'), 'a group the plan made gets its recipe');
@@ -817,7 +817,7 @@ const wsGroups = (st) => Object.values(st.groups).filter((g) => g.building === B
     st.groups[1].count = 0; st.groups[2].count = 200; st.items[F.MONEY] = 1e10; st.next_group_id = 40;
     return st;
   }
-  const benchLayout = (st) => { st.layouts[Rc('Make Bench')] = { ...F.clone(st.layouts[Rc('Frame Timber')]), fx: { rate: 3 } }; };
+  const benchLayout = (st) => { st.layouts[Rc('Make Bench')] = { ...F.clone(st.layouts[Rc('Assemble Wooden Frame')]), fx: { rate: 3 } }; };
   const pass = { retailOk: true };
 
   await F.t('D4 Bench: after a pass the Rivet x3 floor goes on Make Bench first, then the Workshop is bought; never before a pass or on the fail path', () => {

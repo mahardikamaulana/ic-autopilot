@@ -45,8 +45,8 @@ function stageA(over = {}) {
     stock: { 0: { [I('Iron Frame')]: 30, [I('Concrete')]: 100 } },
     groups: {
       1: { building: B('Smelter'), region: 0, count: 3, recipe: Rc('Roll Iron Sheet') },
-      2: { building: B('Workshop'), region: 0, count: 2, recipe: Rc('Rivet Iron Frame') },
-      3: { building: B('Workshop'), region: 0, count: 2, recipe: Rc('Frame Timber') },
+      2: { building: B('Workshop'), region: 0, count: 2, recipe: Rc('Assemble Iron Frame') },
+      3: { building: B('Workshop'), region: 0, count: 2, recipe: Rc('Assemble Wooden Frame') },
       4: { building: B('Farm'), region: 0, count: 20, recipe: Rc('Grow Cotton') },
       5: { building: B('Lumber Camp'), region: 0, count: 40, recipe: 0 },
       6: { building: B('Mine'), region: 0, count: 2, recipe: Rc('Mine Iron Ore') },

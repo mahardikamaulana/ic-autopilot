@@ -110,7 +110,7 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
     assert.match(r.action.text, /keep line/);
     // Plenty again, but a Smelter now smelts Gold Ore: an engine input, stop.
     st.stock[0][I('Gold Ore')] = 50000;
-    st.groups[7].recipe = Rc('Smelt Gold'); delete st.groups[7].work;
+    st.groups[7].recipe = Rc('Smelt Gold Bar'); delete st.groups[7].work;
     r = X.slotDecide(view(cp, st, deals), cx(), out);
     assert.deepStrictEqual(r.action.steps.map((s) => s.msg), [{ type: 'StopFilling', deal: 24 }]);
     assert.match(r.action.text, /engine input/);
@@ -218,7 +218,7 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
     let r = XS.sellDecide(view(cpS, st, deals), cx(), out);
     assert.ok(!r.action || !/^sell:keep/.test(r.action.id), 'nothing eats Gold Ore yet: keep 0 is right');
     // A Smelter switches to Smelt Gold: 48 h of its use must stay.
-    st.groups[7].recipe = Rc('Smelt Gold'); delete st.groups[7].work;
+    st.groups[7].recipe = Rc('Smelt Gold Bar'); delete st.groups[7].work;
     const keep = XS.keepLine(view(cpS, st, deals), out.rule, I('Gold Ore'));
     assert.ok(keep > 0);
     r = XS.sellDecide(view(cpS, st, deals), cx(), out);
@@ -239,7 +239,7 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
     const jobs = [{ deal: 47, from: 45, item: I('Gold Ore'), keep: 0, left: null, fullLoads: true }];
     const as = { jobs: () => jobs, start: (o) => { started.push(o); jobs[0].keep = o.keep; return o.deal; }, stop() { } };
     const mm = F.ctxOf().mem; mm('sell').set({ mine: [45] });
-    st.groups[7].recipe = Rc('Smelt Gold'); delete st.groups[7].work;
+    st.groups[7].recipe = Rc('Smelt Gold Bar'); delete st.groups[7].work;
     const keep = XS.keepLine(view(cpS, st, deals), out.rule, I('Gold Ore'));
     assert.ok(keep > 0);
     const now = 1.8e12, cx = () => F.ctxOf({ now, tick: T0, deals, mods: { autoSell: as }, mem: mm });

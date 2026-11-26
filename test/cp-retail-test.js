@@ -341,9 +341,9 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
     const ws = Object.values(st.groups).filter((g) => g.building === B('Workshop'));
     const on = (r) => ws.filter((g) => g.recipe === Rc(r)).reduce((a, g) => a + g.count, 0);
     for (const [n, r] of [['Bookshelf', 'Make Bookshelf'], ['Table', 'Make Table'], ['Chair', 'Make Chair']]) assert.ok(on(r) <= Math.ceil(d.capBy[n]), n + ' ' + on(r) + ' vs cap ' + d.capBy[n]);
-    assert.strictEqual(on('Frame Timber'), 600 - on('Make Bookshelf') - on('Make Table') - on('Make Chair'));
+    assert.strictEqual(on('Assemble Wooden Frame'), 600 - on('Make Bookshelf') - on('Make Table') - on('Make Chair'));
     assert.strictEqual(st.building_pool[0][B('Workshop')] ?? 0, 0);
-    assert.ok(Object.values(st.groups).some((g) => g.name === 'Frame Timber' && g.recipe === Rc('Frame Timber')));
+    assert.ok(Object.values(st.groups).some((g) => g.name === 'Frame Timber' && g.recipe === Rc('Assemble Wooden Frame')));
     // an undecided fail (no measured sales) never moves Workshops
     mem('retail').set({ decision: { ok: false, kind: 'undecided', cap: 0, capBy: {}, measured: false } });
     st.groups[3].count += 50;
@@ -359,7 +359,7 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
     const run = (m) => { const ctx = F.ctxOf({ retailBoard: board(), mem, now: 1.8e12 + m * MIN }); const out = c._decide(c._view(st, cat, []), ctx); return out.actions.filter((a) => a.director === 'retail'); };
     st.groups[11].paused = true; st.stock[0][I('Chair')] = 0;
     assert.strictEqual(run(0).length, 0, 'paused Chair group keeps Chair on the shelf');
-    st.groups[11].recipe = Rc('Frame Timber'); st.groups[11].work = [];
+    st.groups[11].recipe = Rc('Assemble Wooden Frame'); st.groups[11].work = [];
     assert.strictEqual(run(10).length, 0, 'just retuned: still on the shelf');
     assert.strictEqual(run(60).length, 0);
     const r = run(71);
@@ -413,7 +413,7 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
   function failSt() {
     const st = liveC();
     st.groups[90] = { building: B('Retail Store'), region: 0, count: 1, recipe: null, name: 'Retail', modules: {}, assortment: shelfIds() };
-    st.groups[91] = { building: B('Workshop'), region: 0, count: 2, recipe: Rc('Rivet Iron Frame'), modules: {} };
+    st.groups[91] = { building: B('Workshop'), region: 0, count: 2, recipe: Rc('Assemble Iron Frame'), modules: {} };
     st.retail_ratings = { 0: 10000 };
     return st;
   }
@@ -475,12 +475,12 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
     assert.ok(ids.length < 12, 'converges: ' + ids.join(', '));
     // the tidy made the Frame Timber group from the pooled Workshop, so the cut joins it in the same action
     assert.deepStrictEqual(cut.steps.map((s) => s.msg.type), ['UnassignBuildings', 'AssignBuildings'], 'the cut is placed in the same action');
-    assert.strictEqual(st.groups[cut.steps[1].msg.group].recipe, Rc('Frame Timber'));
+    assert.strictEqual(st.groups[cut.steps[1].msg.group].recipe, Rc('Assemble Wooden Frame'));
     assert.strictEqual(new Set(ids.map((x) => x.split(':').slice(0, 4).join(':'))).size, ids.length, 'no step undone and redone: ' + ids.join(', '));
     const on = (r) => Object.values(st.groups).filter((g) => g.recipe === Rc(r)).reduce((a, g) => a + g.count, 0);
     assert.deepStrictEqual([on('Make Bookshelf'), on('Make Table'), on('Make Chair')], [1, 1, 1]);
     assert.strictEqual(st.building_pool[0][B('Workshop')] ?? 0, 0);
-    assert.strictEqual(on('Frame Timber') + on('Rivet Iron Frame') + 3, total, 'every other Workshop on Frame Timber');
+    assert.strictEqual(on('Assemble Wooden Frame') + on('Assemble Iron Frame') + 3, total, 'every other Workshop on Frame Timber');
     // nothing left for the fail path: the B3 re-run starts at the capped output, the old fail kept as prevDecision
     const r = mem('retail').get();
     assert.strictEqual(r.decision, null); assert.strictEqual(r.prevDecision.kind, 'saturating');
@@ -503,13 +503,13 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
   await t('fail path vs buildout: no Frame Timber group: the cut makes one, it gets its recipe next, converges, the re-run starts', () => {
     const { cp: c } = F.load(['cp-buildout', 'cp-retail']);
     const st = failSt();
-    for (const g of Object.values(st.groups)) if (g.recipe === Rc('Frame Timber')) g.recipe = Rc('Make Bookshelf');   // every Frame Timber Workshop on Bookshelf
+    for (const g of Object.values(st.groups)) if (g.recipe === Rc('Assemble Wooden Frame')) g.recipe = Rc('Make Bookshelf');   // every Frame Timber Workshop on Bookshelf
     const mem = memWith(FAIL3), { ids, acts } = converge(c, st, mem);
     assert.ok(ids.length < 12, 'converges: ' + ids.join(', '));
     const cut = acts.find((a) => a.id.startsWith('retail:ft:cut:'));
     assert.deepStrictEqual(cut.steps.map((s) => s.msg.type), ['UnassignBuildings', 'CreateGroup'], ids.join(', '));
     const ft = Object.values(st.groups).find((g) => g.name === 'Frame Timber');
-    assert.strictEqual(ft.recipe, Rc('Frame Timber'));
+    assert.strictEqual(ft.recipe, Rc('Assemble Wooden Frame'));
     assert.deepStrictEqual(['Make Bookshelf', 'Make Table', 'Make Chair'].map((r) => furnOn(st, r)), [1, 1, 1]);
     assert.strictEqual(st.building_pool[0][B('Workshop')] ?? 0, 0);
     const r = mem('retail').get();
@@ -520,7 +520,7 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
     const { cp: c } = F.load(['cp-buildout', 'cp-retail']);
     const st = failSt();
     st.groups[3].count = 1; st.groups[8].count = 1;
-    st.groups[11].recipe = Rc('Frame Timber'); st.groups[11].count = 6;   // Chair at 0 (keep 1), spare Frame Timber to switch
+    st.groups[11].recipe = Rc('Assemble Wooden Frame'); st.groups[11].count = 6;   // Chair at 0 (keep 1), spare Frame Timber to switch
     for (const n of ['Make Bookshelf', 'Make Table', 'Make Chair']) st.layouts[Rc(n)] = { fx: { rate: 5 }, bom: [] };
     for (const g of Object.values(st.groups)) if (g.building === B('Sawmill')) g.count *= 10;
     const b = board(), rows = b.shelves[0] ?? b.shelves['0'];

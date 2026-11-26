@@ -4,7 +4,7 @@
   function startConditions(v, ctx) {
     const miss2 = S2_NEEDS.filter((n) => !v.unlocked(n));
     const s2 = cond('S2', !miss2.length, miss2.length ? 'not unlocked: ' + miss2.join(', ') : 'all unlocked');
-    const need3 = [['Smelter', 'Roll Iron Sheet'], ['Workshop', 'Rivet Iron Frame'], ['Workshop', 'Frame Timber']].filter(([b, r]) => !v.running(b, r));
+    const need3 = [['Smelter', 'Roll Iron Sheet'], ['Workshop', 'Assemble Iron Frame'], ['Workshop', 'Assemble Wooden Frame']].filter(([b, r]) => !v.running(b, r));
     const ifs = v.has('Iron Frame');
     const s3 = cond('S3', !need3.length && ifs >= 16, need3.length ? 'not running: ' + need3.map(([b, r]) => b + ' on ' + r).join(', ') : ifs < 16 ? 'Iron Frame stock ' + ifs + ' < 16' : 'running, Iron Frames ' + ifs);
     const lab = v.owned('Manufacturing Lab'), kiln = v.owned('Kiln'), mine = v.owned('Mine'), quarry = v.owned('Quarry');
@@ -12,7 +12,7 @@
     const s1 = cond('S1', ctx.planDone === true || (s2.ok && s3.ok && s4.ok), ctx.planDone === true ? 'Autopilot: Plan done' : (s2.ok && s3.ok && s4.ok) ? 'S2-S4 hold' : 'Autopilot has not finished the Early-Game Plan, and S2-S4 do not all hold');
     // Autopilot's Plan done stands for S2-S4: a corp that finished the early plan its own way still starts Stage A.
     // Plan done implies a running Rivet group (Core plan never builds one); without it S3 still fails, or the prototype's Iron Frames never come.
-    const rivet = v.running('Workshop', 'Rivet Iron Frame');
+    const rivet = v.running('Workshop', 'Assemble Iron Frame');
     if (ctx.planDone === true) for (const c of [s2, s3, s4]) if (!c.ok && (c !== s3 || rivet)) { c.ok = true; c.why = 'Autopilot: Plan done (' + c.why + ')'; }
     const s5 = cond('S5', !v.unlocked('Assembly Plant'), v.unlocked('Assembly Plant') ? 'Assembly Plant is already unlocked (join at stage B or later)' : 'not unlocked yet');
     const c10 = ctx.cashDelta10;

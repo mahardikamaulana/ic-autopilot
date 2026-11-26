@@ -97,7 +97,7 @@ try {
     const N = v.N, C = v.C, st = v.st;
     const id = { camp: v.idB('Lumber Camp'), saw: v.idB('Sawmill'), ws: v.idB('Workshop'), farm: v.idB('Farm'), kiln: v.idB('Kiln') };
     const rec = (n) => recipeOf(C, n);
-    const R = { wood: rec('Fell Wood'), planks: rec('Saw Planks'), ft: rec('Frame Timber'), rivet: rec('Rivet Iron Frame'), cotton: rec('Grow Cotton'),
+    const R = { wood: rec('Fell Wood'), planks: rec('Saw Planks'), ft: rec('Assemble Wooden Frame'), rivet: rec('Assemble Iron Frame'), cotton: rec('Grow Cotton'),
       glass: rec('Blow Glass'), concrete: rec('Mix Concrete'), bookshelf: rec('Make Bookshelf'), table: rec('Make Table'), chair: rec('Make Chair') };
     const missing = [...Object.entries(id).filter(([, x]) => x == null).map(([k]) => 'building ' + k), ...Object.entries(R).filter(([, x]) => !x).map(([k]) => 'recipe ' + k)];
     if (missing.length) return { missing };
