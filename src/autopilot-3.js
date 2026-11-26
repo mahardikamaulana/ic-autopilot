@@ -213,13 +213,15 @@
 
     // 2. Power.
     // Auto utilities owns power while it is on: it subscribes the running load; this step would raise it back to the unpaused draw.
-    if (s.powerNeed > s.powerHave && !s.autoPower) {
-      const level = Math.min(MAX_POWER, s.powerNeed);
+    // Power bought on contracts covers part of the draw: only the rest is subscribed.
+    const powerShort = s.powerNeed - s.powerBought;
+    if (powerShort > s.powerHave && !s.autoPower) {
+      const level = Math.min(MAX_POWER, powerShort);
       if (level > s.powerHave) {
-        yield act('power', `power: groups draw ${s.powerNeed} MW, subscribed ${s.powerHave}`,
+        yield act('power', `power: groups draw ${s.powerNeed} MW${s.powerBought > 0 ? `, ${s.powerBought} MW bought` : ''}, subscribed ${s.powerHave}`,
           { msg: { type: 'SetSubscription', region: REGION, utility: 'power', level }, until: (x) => x.powerHave === level });
       }
-      if (s.powerNeed > MAX_POWER) yield { wait: `power need ${s.powerNeed} MW is above the ${MAX_POWER} MW grid cap` };
+      if (powerShort > MAX_POWER) yield { wait: `power need ${powerShort} MW is above the ${MAX_POWER} MW grid cap` };
     }
 
     // 3a. Booster leftovers (its demolish got lost): demolish them, don't put them to work.

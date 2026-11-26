@@ -32,6 +32,8 @@ try {
     // command, or waits for the server to apply one, passes fresh = true.
     const WALK_TTL = 120;
     let walkOut = null, walkAt = 0;
+    // Contracts are a prop of the page router: unreadable while a Corporation profile is open, so the last look is kept (null: never seen).
+    let lastContracts = null;
     function walk(fresh = false) {
       const now = Date.now();
       if (!fresh && walkOut && now - walkAt < WALK_TTL) return walkOut;
@@ -66,6 +68,7 @@ try {
         if (f.child) stack.push(f.child);
         if (f.sibling) stack.push(f.sibling);
       }
+      if (out.contracts) lastContracts = out.contracts; else out.contracts = lastContracts;
       walkOut = out; walkAt = now;
       if (out.ws?.readyState === 1) attach(out.ws, out);
       return out;

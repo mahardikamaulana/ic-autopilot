@@ -2,11 +2,11 @@
   // ---- reading the game, sending, confirming ---------------------------------------------------------------------------------
   let pacer = core.pacer ? core.pacer({ cmdsPerMin: cfg.cmdsPerMin }) : null;
   function read(fresh = false) {
-    const { ws, st, catalog, deals, engine } = core.walk(fresh);
+    const { ws, st, catalog, deals, engine, contracts } = core.walk(fresh);
     lastEngine = engine ?? lastEngine;
     if (!st || !catalog) return null;
     core.seeTick(st.ssi?.last_user_mutation_tick);
-    return { st, catalog, ws, deals: deals ?? [], wsOpen: ws?.readyState === 1, mutTick: st.ssi?.last_user_mutation_tick ?? 0, v: view(st, catalog, deals ?? []) };
+    return { st, catalog, ws, deals: deals ?? [], contracts, wsOpen: ws?.readyState === 1, mutTick: st.ssi?.last_user_mutation_tick ?? 0, v: view(st, catalog, deals ?? []) };
   }
   const cash = [];
   const pauseSent = new Map();   // group id -> when Core plan last sent SetPaused true for it (D7 reads it: a late confirm is not a bill pause)
@@ -34,7 +34,7 @@
       retailOk: null,   // set by the retail director's checkpoint sampler (ctx is mutable for directors' context())
       tick: Math.max(core.nowTick(), r?.st?.ssi?.last_user_mutation_tick ?? 0),
       reserveItems: (() => { const o = {}; for (const [n, x] of Object.entries(others?.by ?? {})) if (n !== 'corePlan') for (const [i, k] of Object.entries(x.items ?? {})) o[i] = (o[i] ?? 0) + k; return o; })(),
-      now: Date.now(), premium: !!r?.st?.premium, deals: r?.deals ?? [],
+      now: Date.now(), premium: !!r?.st?.premium, deals: r?.deals ?? [], contracts: r?.contracts ?? null,
       retailBoard: (() => { try { const j = lastEngine?.retailJson?.(); return typeof j === 'string' ? JSON.parse(j) : j ?? null; } catch { return null; } })(),
       mem: memOf, live: running && !cfg.dryRun, dryRun: cfg.dryRun, pauseSent: Object.fromEntries(pauseSent),
       mods: { cdFarm: W.cdFarm ?? null, labRunner: W.labRunner ?? null, autoSell: W.autoSell ?? null, autoUtil: W.autoUtil ?? null, earlyGame: W.earlyGame ?? null },

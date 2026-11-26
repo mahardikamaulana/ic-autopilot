@@ -250,8 +250,8 @@ function renderPanel(s, ph, cp, t) {
       ['Money', cv ? usd(s.money) : `${usd(s.money)} · floor ${usd(moneyFloor(s))}`],
       ['CD', K.fmt(s.cd)],
       ['Acres', `${s.acresUsed} / ${s.acresOwned} · next ${usd(acrePrice(s.landBought))}`],
-      // the subscription only (bought contracts are not in it): after the hand-off Auto utilities and Core plan's checks own power
-      ...(cv ? [] : [['Power', `${s.powerHave} MW (need ${s.powerNeed})`]]),
+      // the subscription and power bought on contracts: after the hand-off Auto utilities and Core plan's checks own power
+      ...(cv ? [] : [['Power', powerText(s)]]),
       ['Courier', s.courierFree ? 'free' : `busy, ${courierEta(s)}`],
       ...(cv ? [] : [['Actions', `${actions} sent this session`]]),
       ...(cashRate() ? [['Cash change', `${signed(cashRate().perHour)}/h (last ${cashRate().mins} min)`]] : []),

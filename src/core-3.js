@@ -52,6 +52,18 @@ function powerPriceMult(engine = walk().engine, tick = nowTick()) {
     return ev?.outage && Number.isFinite(ev.percent) ? Math.max(0, (100 + ev.percent) / 100) : 1;
   } catch { return 1; }
 }
+// Power or water this Corporation buys on contracts in one region (a power-market buy is one): each Active contract's capacity, less the
+// part of what the buyer draws (up to the contract) that the seller is not delivering; in a shortfall the grid covers that gap during the
+// grace period. contracts: walk().contracts (null before the board was first seen: nothing bought counts).
+function bought(util, region, st, contracts) {
+  const corp = st?.ssi?.corp_id;
+  let n = 0;
+  for (const c of contracts ?? []) {
+    if (c.utility !== util || c.region !== region || c.state !== 'Active' || c.buyer !== corp) continue;
+    n += (c.amount ?? 0) - Math.max(0, Math.min(Math.max(c.drawn ?? 0, 0), c.amount ?? 0) - Math.max(c.delivered ?? 0, 0));
+  }
+  return n;
+}
 
 const titleTimer = HAS_DOM ? setInterval(applyTitle, 2000) : 0;
 addEventListener?.('pagehide', flushLedger);
@@ -60,7 +72,7 @@ W.idleCore = {
   version: 1,
   walk, sleep, every, sleepWake, waitConfirm, tune, markSend, lastRtt, nowTick, seeTick, sock, orderBook, link, realHidden,
   h, makeDraggable, toast, ledger: ledgerApi, ui,
-  setBadge, notify, askNotify, notifyPerm, stopAll, reserves, floorDesigns, courierCU, powerPriceMult,
+  setBadge, notify, askNotify, notifyPerm, stopAll, reserves, floorDesigns, courierCU, powerPriceMult, bought,
   exportConfig, importConfig, exportFile, importFile, missingFields,
   _unload() {
     orderBook.release();

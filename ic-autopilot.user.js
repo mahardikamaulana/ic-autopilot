@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IC Autopilot
 // @namespace    idlecorp-toolkit
-// @version      2.8.20
+// @version      2.8.21
 // @author       XPARAD0X
 // @description  Early-game Autopilot, CD Farm (Construction Data by building and demolishing buildings; Auto picks the cheapest source itself), Lab runner (keeps the Manufacturing Labs researching), Auto ship (an "Auto ship" button on every distributor bid), Auto utilities (an "Auto" switch that keeps the power and water subscriptions at what the groups need), Core plan and Keep online (keeps the socket alive while the tab is hidden) for IdleCorp, each with a panel, menu or switch in the game UI. Everything runs live by default.
 // @homepageURL  https://github.com/mahardikamaulana/ic-autopilot
@@ -68,6 +68,8 @@ try {
     // command, or waits for the server to apply one, passes fresh = true.
     const WALK_TTL = 120;
     let walkOut = null, walkAt = 0;
+    // Contracts are a prop of the page router: unreadable while a Corporation profile is open, so the last look is kept (null: never seen).
+    let lastContracts = null;
     function walk(fresh = false) {
       const now = Date.now();
       if (!fresh && walkOut && now - walkAt < WALK_TTL) return walkOut;
@@ -102,6 +104,7 @@ try {
         if (f.child) stack.push(f.child);
         if (f.sibling) stack.push(f.sibling);
       }
+      if (out.contracts) lastContracts = out.contracts; else out.contracts = lastContracts;
       walkOut = out; walkAt = now;
       if (out.ws?.readyState === 1) attach(out.ws, out);
       return out;
@@ -1121,6 +1124,18 @@ function powerPriceMult(engine = walk().engine, tick = nowTick()) {
     return ev?.outage && Number.isFinite(ev.percent) ? Math.max(0, (100 + ev.percent) / 100) : 1;
   } catch { return 1; }
 }
+// Power or water this Corporation buys on contracts in one region (a power-market buy is one): each Active contract's capacity, less the
+// part of what the buyer draws (up to the contract) that the seller is not delivering; in a shortfall the grid covers that gap during the
+// grace period. contracts: walk().contracts (null before the board was first seen: nothing bought counts).
+function bought(util, region, st, contracts) {
+  const corp = st?.ssi?.corp_id;
+  let n = 0;
+  for (const c of contracts ?? []) {
+    if (c.utility !== util || c.region !== region || c.state !== 'Active' || c.buyer !== corp) continue;
+    n += (c.amount ?? 0) - Math.max(0, Math.min(Math.max(c.drawn ?? 0, 0), c.amount ?? 0) - Math.max(c.delivered ?? 0, 0));
+  }
+  return n;
+}
 
 const titleTimer = HAS_DOM ? setInterval(applyTitle, 2000) : 0;
 addEventListener?.('pagehide', flushLedger);
@@ -1129,7 +1144,7 @@ W.idleCore = {
   version: 1,
   walk, sleep, every, sleepWake, waitConfirm, tune, markSend, lastRtt, nowTick, seeTick, sock, orderBook, link, realHidden,
   h, makeDraggable, toast, ledger: ledgerApi, ui,
-  setBadge, notify, askNotify, notifyPerm, stopAll, reserves, floorDesigns, courierCU, powerPriceMult,
+  setBadge, notify, askNotify, notifyPerm, stopAll, reserves, floorDesigns, courierCU, powerPriceMult, bought,
   exportConfig, importConfig, exportFile, importFile, missingFields,
   _unload() {
     orderBook.release();
@@ -4893,17 +4908,15 @@ try {
     function restore() { try { apply(JSON.parse(store?.getItem(KEY) || 'null')); } catch { } }
 
     // ---- reading the game ----------------------------------------------------------------------------------------------
-    let lastContracts = null;    // contracts are a prop of the page router: unreadable while a Corporation profile is open, so keep the last look
     function read(fresh = false) {
       const { ws, st, catalog, contracts, engine } = core.walk(fresh);
       if (!st || !catalog) return null;
       core.seeTick(st.ssi?.last_user_mutation_tick);
-      if (Array.isArray(contracts)) lastContracts = contracts;
       const tick = core.nowTick();
       // Transmission lines: the client asks its engine for the flows (lineFlows, a BigInt tick) only when the state has lines.
       let flows = [];
       try { if ((st.lines ?? []).length && tick > 0 && typeof engine?.lineFlows === 'function') flows = JSON.parse(engine.lineFlows(BigInt(tick))) ?? []; } catch { flows = []; }
-      return { st, catalog, contracts: lastContracts, flows, ws, wsOpen: ws?.readyState === 1, tick, mutTick: st.ssi?.last_user_mutation_tick ?? 0, priceMult: core.powerPriceMult?.() ?? 1 };
+      return { st, catalog, contracts, flows, ws, wsOpen: ws?.readyState === 1, tick, mutTick: st.ssi?.last_user_mutation_tick ?? 0, priceMult: core.powerPriceMult?.() ?? 1 };
     }
 
     const ixRef = new WeakMap();
@@ -4946,12 +4959,9 @@ try {
       const lineIn = lines.filter((f) => f.to === region).reduce((a, f) => a + (Number(f.delivered) || 0), 0);
       const lineOut = lines.filter((f) => f.from === region && f.delivered > 0).reduce((a, f) => a + (Number(f.sent) || 0), 0);
       const corp = st.ssi?.corp_id;
-      const deal = (who, field) => (contracts ?? []).filter((c) => c.utility === util && c.region === region && c.state === 'Active' && c[who] === corp).reduce((a, c) => a + (c[field] ?? 0), 0);
-      // A bought contract counts its whole capacity, less the part of what the buyer draws (up to the contract) that the seller is not
-      // delivering: in a shortfall during its grace period the grid covers that gap. What is promised to others is owed, whatever has got through.
-      const short = (c) => Math.max(0, Math.min(Math.max(c.drawn ?? 0, 0), c.amount ?? 0) - Math.max(c.delivered ?? 0, 0));
-      const bought = (contracts ?? []).filter((c) => c.utility === util && c.region === region && c.state === 'Active' && c.buyer === corp);
-      const imported = bought.reduce((a, c) => a + (c.amount ?? 0) - short(c), 0), sold = deal('seller', 'amount');
+      // What is bought counts its capacity less any shortfall (core.bought); what is promised to others is owed, whatever has got through.
+      const imported = core.bought(util, region, st, contracts);
+      const sold = (contracts ?? []).filter((c) => c.utility === util && c.region === region && c.state === 'Active' && c.seller === corp).reduce((a, c) => a + (c.amount ?? 0), 0);
       // A group that could start but whose draw is more than the free capacity is stalled; it starts once that much more is free.
       // A group with no machines yet (equipped 0) cannot start whatever the power: the game calls it "unequipped", not stalled.
       const free = Math.max(0, have + gen + discharge + imported + lineIn - load - sold - lineOut);
@@ -5098,10 +5108,11 @@ try {
       }
       c.fails = 0; c.retryAt = 0;                                   // nothing to send: earlier failures are not "in a row" any more
       const lowNote = m.need < 0 ? ' (surplus ' + Math.round(-m.need) + ')' : '';
+      const boughtNote = m.imported > 0 ? ' + ' + m.imported + ' ' + unit(util) + ' bought' : '';
       if (d.kind === 'broke') return { ...row, text: 'Needs ' + want + ' ' + unit(util) + ' but cash cannot cover the upfront ' + usd((want - m.have) * u.rate * mult) + ' and the next bill' + (mult > 1 ? ' (NPC power x' + mult + ')' : ''), tone: 'warn' };
       if (over) return { ...row, text: 'Needs ' + Math.ceil(over) + ' ' + unit(util) + ', the cap is ' + u.max, tone: 'warn' };
-      if (d.kind === 'hold') return { ...row, text: 'Holding ' + m.have + ' ' + unit(util) + ': ' + d.why, tone: 'muted' };
-      return { ...row, text: 'Following the load: ' + m.have + ' ' + unit(util) + ' for ' + Math.max(0, Math.ceil(m.need)) + ' needed' + lowNote, tone: 'muted' };
+      if (d.kind === 'hold') return { ...row, text: 'Holding ' + m.have + ' ' + unit(util) + boughtNote + ': ' + d.why, tone: 'muted' };
+      return { ...row, text: 'Following the load: ' + m.have + ' ' + unit(util) + boughtNote + ' for ' + Math.max(0, Math.ceil(m.need + m.imported)) + ' needed' + lowNote, tone: 'muted' };
     }
 
     function ensureLoop() {
@@ -5732,11 +5743,11 @@ try {
   // ---- reading the game, sending, confirming ---------------------------------------------------------------------------------
   let pacer = core.pacer ? core.pacer({ cmdsPerMin: cfg.cmdsPerMin }) : null;
   function read(fresh = false) {
-    const { ws, st, catalog, deals, engine } = core.walk(fresh);
+    const { ws, st, catalog, deals, engine, contracts } = core.walk(fresh);
     lastEngine = engine ?? lastEngine;
     if (!st || !catalog) return null;
     core.seeTick(st.ssi?.last_user_mutation_tick);
-    return { st, catalog, ws, deals: deals ?? [], wsOpen: ws?.readyState === 1, mutTick: st.ssi?.last_user_mutation_tick ?? 0, v: view(st, catalog, deals ?? []) };
+    return { st, catalog, ws, deals: deals ?? [], contracts, wsOpen: ws?.readyState === 1, mutTick: st.ssi?.last_user_mutation_tick ?? 0, v: view(st, catalog, deals ?? []) };
   }
   const cash = [];
   const pauseSent = new Map();   // group id -> when Core plan last sent SetPaused true for it (D7 reads it: a late confirm is not a bill pause)
@@ -5764,7 +5775,7 @@ try {
       retailOk: null,   // set by the retail director's checkpoint sampler (ctx is mutable for directors' context())
       tick: Math.max(core.nowTick(), r?.st?.ssi?.last_user_mutation_tick ?? 0),
       reserveItems: (() => { const o = {}; for (const [n, x] of Object.entries(others?.by ?? {})) if (n !== 'corePlan') for (const [i, k] of Object.entries(x.items ?? {})) o[i] = (o[i] ?? 0) + k; return o; })(),
-      now: Date.now(), premium: !!r?.st?.premium, deals: r?.deals ?? [],
+      now: Date.now(), premium: !!r?.st?.premium, deals: r?.deals ?? [], contracts: r?.contracts ?? null,
       retailBoard: (() => { try { const j = lastEngine?.retailJson?.(); return typeof j === 'string' ? JSON.parse(j) : j ?? null; } catch { return null; } })(),
       mem: memOf, live: running && !cfg.dryRun, dryRun: cfg.dryRun, pauseSent: Object.fromEntries(pauseSent),
       mods: { cdFarm: W.cdFarm ?? null, labRunner: W.labRunner ?? null, autoSell: W.autoSell ?? null, autoUtil: W.autoUtil ?? null, earlyGame: W.earlyGame ?? null },
@@ -7977,8 +7988,10 @@ try {
       const f = activeFills(v, ctx).sort((a, z) => z.left - a.left)[0];
       c.push(chk('autoship', !!f && f.left >= cfg.slotRearmMinutes * 120, !f ? 'no auto-ship running' : itemName(v, f.bid.item) + ' auto-ship, ' + Math.floor(f.left / 120) + ' min left'));
     }
+    // Power bought on contracts (ctx.contracts, the board) covers part of the load: the subscription only has to cover the rest.
     const au = ctx.mods?.autoUtil, sub = v.st.subscriptions?.[REGION]?.power ?? 0, load = au?._measure ? au._measure('power', REGION, v.st, v.catalog, 0, []).load : powerLoad(v);
-    if (load > 0) c.push(chk('power', !!au?.conf?.power?.on && sub >= load, (au?.conf?.power?.on ? 'Auto power on' : 'Auto power off') + ', ' + sub + ' MW subscribed for ' + load + ' MW load'));
+    const bought = boughtPower(v, ctx);
+    if (load > 0) c.push(chk('power', !!au?.conf?.power?.on && sub + bought >= load, (au?.conf?.power?.on ? 'Auto power on' : 'Auto power off') + ', ' + sub + ' MW subscribed' + (bought > 0 ? ' + ' + bought + ' MW bought' : '') + ' for ' + load + ' MW load'));
     const floor = sub * 12000 * (core?.powerPriceMult?.() ?? 1);   // a world event's NPC power price multiplier
     c.push(chk('cash', v.money >= floor, 'money ' + usd(v.money) + (v.money >= floor ? ' >= ' : ' < ') + 'bill floor ' + usd(floor) + ' (2 h of bills)'));
     if (out.stage === 'D' || out.stage === 'END') {
@@ -8099,10 +8112,12 @@ try {
   const lastPaused = new Map();                  // this session only, like Autopilot: a group paused before the load counts as yours
   const drawOf = (v, g) => v.bld(g.building).draws?.power ?? 0;
   const powerHave = (v) => v.st.subscriptions?.[REGION]?.power ?? 0;
+  const boughtPower = (v, ctx) => (core?.bought ? core.bought('power', REGION, v.st, ctx.contracts) : 0);   // power bought on contracts
   function resumeObserve(v, m, ctx = {}) {
-    const before = v.groups.reduce((a, g) => a + (lastPaused.get(g.id) === false ? drawOf(v, g) * g.count : 0), 0), have = powerHave(v);
+    const before = v.groups.reduce((a, g) => a + (lastPaused.get(g.id) === false ? drawOf(v, g) * g.count : 0), 0), have = powerHave(v), bought = boughtPower(v, ctx);
     // With Auto power on, the subscription follows the running load, so being under the unpaused draw is not a short bill.
-    const billShort = (ctx.mods?.autoUtil?.conf?.power?.on !== true && have < before) || v.money < Math.max(have, before) * 1000 * 2;
+    // Power bought on contracts covers part of the draw; only the rest has to be subscribed (and billed).
+    const billShort = (ctx.mods?.autoUtil?.conf?.power?.on !== true && have + bought < before) || v.money < Math.max(have, before - bought) * 1000 * 2;
     const sent = ctx.pauseSent ?? {}, grace = (cfg.resumeGraceMin ?? 2) * 60000;
     const o = m.get(), bill = new Set(o.bill ?? []), user = new Set(o.user ?? []);
     let changed = false;
@@ -8131,12 +8146,12 @@ try {
     if (!list.length) return null;
     const eg = ctx.mods?.earlyGame;
     if (eg?.running && eg.cfg?.resumePaused !== false) return { wait: 'Autopilot resumes the ' + list.length + ' bill-paused group(s) while it runs' };   // one driver per job
-    const have = powerHave(v), load = powerLoad(v), waits = [], autoOn = ctx.mods?.autoUtil?.conf?.power?.on === true;
+    const have = powerHave(v), bought = boughtPower(v, ctx), load = powerLoad(v), waits = [], autoOn = ctx.mods?.autoUtil?.conf?.power?.on === true;
     for (const g of list) {
       const mw = drawOf(v, g) * g.count, name = '"' + (g.name ?? v.bld(g.building).name) + '"';
       // With Auto power on the subscription follows running load and Auto raises it once the group runs: only cash gates the resume.
-      if (!autoOn && have < load + mw) { waits.push(name + ' is paused (unpaid bill?): power subscription ' + have + ' MW < ' + (load + mw) + ' MW with it'); continue; }
-      const need = Math.max(10000, (Math.max(have, load) + mw) * 1000 * 6) + mw * 1000;
+      if (!autoOn && have + bought < load + mw) { waits.push(name + ' is paused (unpaid bill?): power subscription ' + have + ' MW' + (bought > 0 ? ' + ' + bought + ' MW bought' : '') + ' < ' + (load + mw) + ' MW with it'); continue; }
+      const need = Math.max(10000, (Math.max(have, load - bought) + mw) * 1000 * 6) + mw * 1000;
       if (v.money < need) { waits.push(name + ' is paused (unpaid bill?): waiting for cash ' + usd(v.money) + ' / ' + usd(need) + ' to resume'); continue; }
       return { action: { id: 'resume:' + g.id, text: 'resume ' + name + ' (paused by an unpaid bill, bills affordable again)',
         steps: [{ msg: { type: 'SetPaused', group: g.id, paused: false }, until: (x) => !x.groups.find((y) => y.id === g.id)?.paused }] } };
@@ -8738,7 +8753,8 @@ try {
     function observe(s) {
       const needAll = s.groups.reduce((a, g) => a + s.drawOf(g.building) * g.count, 0);
       // With Auto power on, the subscription follows the running load, so being under the unpaused draw is not a short bill.
-      const billShort = (!s.autoPower && s.powerHave < needAll) || s.money < Math.max(s.powerHave, needAll) * 1000 * 2;
+      // Power bought on contracts covers part of the draw; only the rest has to be subscribed (and billed).
+      const billShort = (!s.autoPower && s.powerHave + s.powerBought < needAll) || s.money < Math.max(s.powerHave, needAll - s.powerBought) * 1000 * 2;
       let changed = false;
       for (const g of s.groups) {
         const prev = lastPaused.get(g.id);
@@ -8852,6 +8868,7 @@ try {
     const drawOf = (b) => bld(b).draws?.power ?? 0;
     const powerNeed = groups.filter((g) => !g.paused).reduce((a, g) => a + drawOf(g.building) * g.count, 0);
     const powerHave = st.subscriptions?.[REGION]?.power ?? 0;
+    const powerBought = 0;   // power bought on contracts: read() sets it from the contract board (not in a pure snapshot)
     const inbound = {};
     // A shipment to the Exchange (to_exchange, patch 2026-11-25) leaves stock; it is not inbound.
     for (const s of st.shipments ?? []) if (s.amount > 0 && !s.returning && s.inbound !== false && !s.to_exchange) inbound[s.item] = (inbound[s.item] ?? 0) + s.amount;
@@ -8866,7 +8883,7 @@ try {
     const items = st.items ?? {};
     return {
       st, catalog, bld, recipe, groups, pool, stock, items, inbound, atExchange, autoDeliver, kitFor, landBought, acresUsed,
-      owned, ownedAll, equipped, running, runningEquipped, drawOf, powerNeed, powerHave, tickNow,
+      owned, ownedAll, equipped, running, runningEquipped, drawOf, powerNeed, powerHave, powerBought, tickNow,
     };
   }
 
@@ -8927,7 +8944,7 @@ try {
   }
 
   function read(fresh = false) {
-    const { ws, st, catalog, deals, orders, engine } = core.walk(fresh);
+    const { ws, st, catalog, deals, orders, engine, contracts } = core.walk(fresh);
     if (!st || !catalog) return null;
     seeTick(st.ssi?.last_user_mutation_tick);
     const s = fullSnapshot(st, catalog, deals, orders, nowTick(), engine);
@@ -8937,6 +8954,7 @@ try {
     // hold only your own orders, or none (the walk finds no empty array: s.orders is [] then).
     if (core?.orderBook && s.wsOpen) s.ordersKnown = core.orderBook.live(REGION);
     s.autoPower = W.autoUtil?.conf?.power?.on === true;   // Auto utilities owns power while on (it subscribes the running load)
+    s.powerBought = core.bought('power', REGION, st, contracts);   // the grid service only has to cover what this does not
     return s;
   }
 
@@ -8967,9 +8985,11 @@ try {
   // No floor before anything draws power (the plan spends down to ~$18 at the start); then
   // max($100, billHours × $10/MW per 10 min), counting a powered building about to be added.
   function moneyFloor(s, extraMW = 0) {
-    const mw = Math.max(s.powerHave, s.powerNeed) + extraMW;
+    const mw = Math.max(s.powerHave, s.powerNeed - s.powerBought) + extraMW;
     return mw > 0 ? Math.max(10000, mw * 1000 * 6 * cfg.billHours) : 0;
   }
+  // The Power readout: the subscription, power bought on contracts, and what the unpaused groups draw.
+  const powerText = (s) => `${s.powerHave} MW${s.powerBought > 0 ? ` + ${s.powerBought} MW bought` : ''} (need ${s.powerNeed})`;
   // " — nothing is making it (…)" when no running group produces the item.
   function whyNoneMade(s, item) {
     if (s.madeHere.has(item)) return '';
@@ -9515,13 +9535,15 @@ try {
 
     // 2. Power.
     // Auto utilities owns power while it is on: it subscribes the running load; this step would raise it back to the unpaused draw.
-    if (s.powerNeed > s.powerHave && !s.autoPower) {
-      const level = Math.min(MAX_POWER, s.powerNeed);
+    // Power bought on contracts covers part of the draw: only the rest is subscribed.
+    const powerShort = s.powerNeed - s.powerBought;
+    if (powerShort > s.powerHave && !s.autoPower) {
+      const level = Math.min(MAX_POWER, powerShort);
       if (level > s.powerHave) {
-        yield act('power', `power: groups draw ${s.powerNeed} MW, subscribed ${s.powerHave}`,
+        yield act('power', `power: groups draw ${s.powerNeed} MW${s.powerBought > 0 ? `, ${s.powerBought} MW bought` : ''}, subscribed ${s.powerHave}`,
           { msg: { type: 'SetSubscription', region: REGION, utility: 'power', level }, until: (x) => x.powerHave === level });
       }
-      if (s.powerNeed > MAX_POWER) yield { wait: `power need ${s.powerNeed} MW is above the ${MAX_POWER} MW grid cap` };
+      if (powerShort > MAX_POWER) yield { wait: `power need ${powerShort} MW is above the ${MAX_POWER} MW grid cap` };
     }
 
     // 3a. Booster leftovers (its demolish got lost): demolish them, don't put them to work.
@@ -10116,7 +10138,7 @@ try {
       ['Money', `${usd(s.money)} (floor ${usd(moneyFloor(s))})`],
       ['CD', s.cd],
       ['Acres', `${s.acresUsed} / ${s.acresOwned} · next ${usd(acrePrice(s.landBought))}`],
-      ['Power', `${s.powerHave} MW (need ${s.powerNeed})`],
+      ['Power', powerText(s)],
       ['Lumber Camps / Farms', `${s.owned(B.CAMP)} / ${s.owned(B.FARM)}`],
       ...techPlan().map((t) => [`P${t.phase} unlock ${bname(s, t.b)}`, techState(t.b)]),
       row('Sawmills', s.owned(B.SAWMILL), sawTarget(s)),
@@ -10425,8 +10447,8 @@ function renderPanel(s, ph, cp, t) {
       ['Money', cv ? usd(s.money) : `${usd(s.money)} · floor ${usd(moneyFloor(s))}`],
       ['CD', K.fmt(s.cd)],
       ['Acres', `${s.acresUsed} / ${s.acresOwned} · next ${usd(acrePrice(s.landBought))}`],
-      // the subscription only (bought contracts are not in it): after the hand-off Auto utilities and Core plan's checks own power
-      ...(cv ? [] : [['Power', `${s.powerHave} MW (need ${s.powerNeed})`]]),
+      // the subscription and power bought on contracts: after the hand-off Auto utilities and Core plan's checks own power
+      ...(cv ? [] : [['Power', powerText(s)]]),
       ['Courier', s.courierFree ? 'free' : `busy, ${courierEta(s)}`],
       ...(cv ? [] : [['Actions', `${actions} sent this session`]]),
       ...(cashRate() ? [['Cash change', `${signed(cashRate().perHour)}/h (last ${cashRate().mins} min)`]] : []),

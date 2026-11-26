@@ -341,6 +341,23 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
     st.items[0] = 100;
     assert.strictEqual(hc(st, deals).find((x) => x.id === 'cash').ok, false);
   });
+  await t('cadence: the power check counts power bought on contracts (the subscription only covers the rest of the load)', () => {
+    const st = plain(), v0 = view(cpS, st), corp = st.ssi.corp_id;
+    const load = v0.groups.reduce((a, g) => a + (!g.paused && g.count > 0 ? (v0.bld(g.building).draws?.power ?? 0) * g.count : 0), 0), sub = 1;
+    assert.ok(load > sub, 'the fixture draws power');
+    st.subscriptions = { 0: { power: sub } };
+    const contract = (o) => ({ id: 11, seller: corp + 1, buyer: corp, utility: 'power', amount: load - sub, region: 0, state: 'Active', drawn: load - sub, delivered: load - sub, offer: 1, ...o });
+    const pc = (contracts) => XS.hourlyChecks(view(cpS, st), F.ctxOf({ contracts, mods: { autoUtil: { conf: { power: { on: true } } } } }), { stage: 'B' }).find((x) => x.id === 'power');
+    assert.strictEqual(pc(null).ok, false, 'board never seen: the subscription alone is short');
+    const p = pc([contract()]);
+    assert.strictEqual(p.ok, true, p.why);
+    assert.strictEqual(p.why, 'Auto power on, ' + sub + ' MW subscribed + ' + (load - sub) + ' MW bought for ' + load + ' MW load');
+    assert.strictEqual(pc([contract({ buyer: corp + 2 })]).ok, false, 'another Corporation bought it');
+    assert.strictEqual(pc([contract({ utility: 'water' })]).ok, false, 'bought water is not power');
+    assert.strictEqual(pc([contract({ region: 1 })]).ok, false, 'bought in another region');
+    assert.strictEqual(pc([contract({ state: 'Breached' })]).ok, false, 'an ended contract');
+    assert.strictEqual(pc([contract({ delivered: 0 })]).ok, false, 'nothing delivered: the grid covers that gap, so it is not supply');
+  });
   await t('cadence runner: a dry run alerts too (the alert is not a game command)', async () => {
     const st = plain();
     globalThis.localStorage = F.mem();                         // ctx.mem persists through localStorage, as in the browser
@@ -517,6 +534,8 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
     assert.match(dec({ mods: { earlyGame: { running: true, cfg: { resumePaused: true } } } }).waits.join(' | '), /resume: Autopilot resumes the 1 bill-paused group/);
     st.subscriptions[0].power = 0;
     assert.match(dec().waits.join(' | '), /power subscription 0 MW < \d+ MW with it/);
+    const cover = [{ utility: 'power', region: 0, state: 'Active', seller: 999, buyer: st.ssi.corp_id, amount: drawAll, drawn: 0, delivered: 0 }];
+    assert.ok(res(dec({ contracts: cover })), 'power bought on contracts covers the load: it resumes with no subscription');
     st.subscriptions[0].power = drawAll;
     mem('buildout').set({ kilnMine: [1] });                      // a director paused it on purpose
     assert.ok(!res(dec()));

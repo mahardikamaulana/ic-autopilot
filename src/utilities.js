@@ -78,17 +78,15 @@ try {
     function restore() { try { apply(JSON.parse(store?.getItem(KEY) || 'null')); } catch { } }
 
     // ---- reading the game ----------------------------------------------------------------------------------------------
-    let lastContracts = null;    // contracts are a prop of the page router: unreadable while a Corporation profile is open, so keep the last look
     function read(fresh = false) {
       const { ws, st, catalog, contracts, engine } = core.walk(fresh);
       if (!st || !catalog) return null;
       core.seeTick(st.ssi?.last_user_mutation_tick);
-      if (Array.isArray(contracts)) lastContracts = contracts;
       const tick = core.nowTick();
       // Transmission lines: the client asks its engine for the flows (lineFlows, a BigInt tick) only when the state has lines.
       let flows = [];
       try { if ((st.lines ?? []).length && tick > 0 && typeof engine?.lineFlows === 'function') flows = JSON.parse(engine.lineFlows(BigInt(tick))) ?? []; } catch { flows = []; }
-      return { st, catalog, contracts: lastContracts, flows, ws, wsOpen: ws?.readyState === 1, tick, mutTick: st.ssi?.last_user_mutation_tick ?? 0, priceMult: core.powerPriceMult?.() ?? 1 };
+      return { st, catalog, contracts, flows, ws, wsOpen: ws?.readyState === 1, tick, mutTick: st.ssi?.last_user_mutation_tick ?? 0, priceMult: core.powerPriceMult?.() ?? 1 };
     }
 
     const ixRef = new WeakMap();
@@ -131,12 +129,9 @@ try {
       const lineIn = lines.filter((f) => f.to === region).reduce((a, f) => a + (Number(f.delivered) || 0), 0);
       const lineOut = lines.filter((f) => f.from === region && f.delivered > 0).reduce((a, f) => a + (Number(f.sent) || 0), 0);
       const corp = st.ssi?.corp_id;
-      const deal = (who, field) => (contracts ?? []).filter((c) => c.utility === util && c.region === region && c.state === 'Active' && c[who] === corp).reduce((a, c) => a + (c[field] ?? 0), 0);
-      // A bought contract counts its whole capacity, less the part of what the buyer draws (up to the contract) that the seller is not
-      // delivering: in a shortfall during its grace period the grid covers that gap. What is promised to others is owed, whatever has got through.
-      const short = (c) => Math.max(0, Math.min(Math.max(c.drawn ?? 0, 0), c.amount ?? 0) - Math.max(c.delivered ?? 0, 0));
-      const bought = (contracts ?? []).filter((c) => c.utility === util && c.region === region && c.state === 'Active' && c.buyer === corp);
-      const imported = bought.reduce((a, c) => a + (c.amount ?? 0) - short(c), 0), sold = deal('seller', 'amount');
+      // What is bought counts its capacity less any shortfall (core.bought); what is promised to others is owed, whatever has got through.
+      const imported = core.bought(util, region, st, contracts);
+      const sold = (contracts ?? []).filter((c) => c.utility === util && c.region === region && c.state === 'Active' && c.seller === corp).reduce((a, c) => a + (c.amount ?? 0), 0);
       // A group that could start but whose draw is more than the free capacity is stalled; it starts once that much more is free.
       // A group with no machines yet (equipped 0) cannot start whatever the power: the game calls it "unequipped", not stalled.
       const free = Math.max(0, have + gen + discharge + imported + lineIn - load - sold - lineOut);
@@ -283,10 +278,11 @@ try {
       }
       c.fails = 0; c.retryAt = 0;                                   // nothing to send: earlier failures are not "in a row" any more
       const lowNote = m.need < 0 ? ' (surplus ' + Math.round(-m.need) + ')' : '';
+      const boughtNote = m.imported > 0 ? ' + ' + m.imported + ' ' + unit(util) + ' bought' : '';
       if (d.kind === 'broke') return { ...row, text: 'Needs ' + want + ' ' + unit(util) + ' but cash cannot cover the upfront ' + usd((want - m.have) * u.rate * mult) + ' and the next bill' + (mult > 1 ? ' (NPC power x' + mult + ')' : ''), tone: 'warn' };
       if (over) return { ...row, text: 'Needs ' + Math.ceil(over) + ' ' + unit(util) + ', the cap is ' + u.max, tone: 'warn' };
-      if (d.kind === 'hold') return { ...row, text: 'Holding ' + m.have + ' ' + unit(util) + ': ' + d.why, tone: 'muted' };
-      return { ...row, text: 'Following the load: ' + m.have + ' ' + unit(util) + ' for ' + Math.max(0, Math.ceil(m.need)) + ' needed' + lowNote, tone: 'muted' };
+      if (d.kind === 'hold') return { ...row, text: 'Holding ' + m.have + ' ' + unit(util) + boughtNote + ': ' + d.why, tone: 'muted' };
+      return { ...row, text: 'Following the load: ' + m.have + ' ' + unit(util) + boughtNote + ' for ' + Math.max(0, Math.ceil(m.need + m.imported)) + ' needed' + lowNote, tone: 'muted' };
     }
 
     function ensureLoop() {

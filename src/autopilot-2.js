@@ -54,6 +54,7 @@
     const drawOf = (b) => bld(b).draws?.power ?? 0;
     const powerNeed = groups.filter((g) => !g.paused).reduce((a, g) => a + drawOf(g.building) * g.count, 0);
     const powerHave = st.subscriptions?.[REGION]?.power ?? 0;
+    const powerBought = 0;   // power bought on contracts: read() sets it from the contract board (not in a pure snapshot)
     const inbound = {};
     // A shipment to the Exchange (to_exchange, patch 2026-11-25) leaves stock; it is not inbound.
     for (const s of st.shipments ?? []) if (s.amount > 0 && !s.returning && s.inbound !== false && !s.to_exchange) inbound[s.item] = (inbound[s.item] ?? 0) + s.amount;
@@ -68,7 +69,7 @@
     const items = st.items ?? {};
     return {
       st, catalog, bld, recipe, groups, pool, stock, items, inbound, atExchange, autoDeliver, kitFor, landBought, acresUsed,
-      owned, ownedAll, equipped, running, runningEquipped, drawOf, powerNeed, powerHave, tickNow,
+      owned, ownedAll, equipped, running, runningEquipped, drawOf, powerNeed, powerHave, powerBought, tickNow,
     };
   }
 
@@ -129,7 +130,7 @@
   }
 
   function read(fresh = false) {
-    const { ws, st, catalog, deals, orders, engine } = core.walk(fresh);
+    const { ws, st, catalog, deals, orders, engine, contracts } = core.walk(fresh);
     if (!st || !catalog) return null;
     seeTick(st.ssi?.last_user_mutation_tick);
     const s = fullSnapshot(st, catalog, deals, orders, nowTick(), engine);
@@ -139,6 +140,7 @@
     // hold only your own orders, or none (the walk finds no empty array: s.orders is [] then).
     if (core?.orderBook && s.wsOpen) s.ordersKnown = core.orderBook.live(REGION);
     s.autoPower = W.autoUtil?.conf?.power?.on === true;   // Auto utilities owns power while on (it subscribes the running load)
+    s.powerBought = core.bought('power', REGION, st, contracts);   // the grid service only has to cover what this does not
     return s;
   }
 
@@ -169,9 +171,11 @@
   // No floor before anything draws power (the plan spends down to ~$18 at the start); then
   // max($100, billHours × $10/MW per 10 min), counting a powered building about to be added.
   function moneyFloor(s, extraMW = 0) {
-    const mw = Math.max(s.powerHave, s.powerNeed) + extraMW;
+    const mw = Math.max(s.powerHave, s.powerNeed - s.powerBought) + extraMW;
     return mw > 0 ? Math.max(10000, mw * 1000 * 6 * cfg.billHours) : 0;
   }
+  // The Power readout: the subscription, power bought on contracts, and what the unpaused groups draw.
+  const powerText = (s) => `${s.powerHave} MW${s.powerBought > 0 ? ` + ${s.powerBought} MW bought` : ''} (need ${s.powerNeed})`;
   // " — nothing is making it (…)" when no running group produces the item.
   function whyNoneMade(s, item) {
     if (s.madeHere.has(item)) return '';

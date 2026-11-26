@@ -282,7 +282,8 @@ try {
     function observe(s) {
       const needAll = s.groups.reduce((a, g) => a + s.drawOf(g.building) * g.count, 0);
       // With Auto power on, the subscription follows the running load, so being under the unpaused draw is not a short bill.
-      const billShort = (!s.autoPower && s.powerHave < needAll) || s.money < Math.max(s.powerHave, needAll) * 1000 * 2;
+      // Power bought on contracts covers part of the draw; only the rest has to be subscribed (and billed).
+      const billShort = (!s.autoPower && s.powerHave + s.powerBought < needAll) || s.money < Math.max(s.powerHave, needAll - s.powerBought) * 1000 * 2;
       let changed = false;
       for (const g of s.groups) {
         const prev = lastPaused.get(g.id);

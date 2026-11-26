@@ -373,7 +373,7 @@
       ['Money', `${usd(s.money)} (floor ${usd(moneyFloor(s))})`],
       ['CD', s.cd],
       ['Acres', `${s.acresUsed} / ${s.acresOwned} · next ${usd(acrePrice(s.landBought))}`],
-      ['Power', `${s.powerHave} MW (need ${s.powerNeed})`],
+      ['Power', powerText(s)],
       ['Lumber Camps / Farms', `${s.owned(B.CAMP)} / ${s.owned(B.FARM)}`],
       ...techPlan().map((t) => [`P${t.phase} unlock ${bname(s, t.b)}`, techState(t.b)]),
       row('Sawmills', s.owned(B.SAWMILL), sawTarget(s)),
