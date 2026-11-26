@@ -210,6 +210,41 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     }
   });
 
+  await t('sleep / sleepWake / every: a socket message fires timers that are due (hidden-tab throttling)', async () => {
+    fresh();
+    class FakeWS { constructor() { this.readyState = 1; this.listeners = []; } addEventListener(_t, f) { this.listeners.push(f); } removeEventListener() {} }
+    globalThis.WebSocket = FakeWS;
+    const ws = new FakeWS();
+    const st = { groups: {}, stock: {}, ssi: {}, items: {} };
+    const fiber = { memoizedState: { memoizedState: { current: ws }, next: { memoizedState: st, next: null } }, memoizedProps: null, child: null, sibling: null };
+    globalThis.document = { body: {}, getElementById: (id) => (id === 'root' ? { __reactContainer$x: fiber } : null), title: 'x' };
+    // Hold back long timers the way a hidden tab does: anything over 1 s never fires on its own here.
+    const realST = globalThis.setTimeout;
+    globalThis.setTimeout = (fn, ms, ...a) => realST(fn, ms > 1000 ? 1e9 : ms, ...a);
+    (0, eval)(coreSrc);
+    const core = globalThis.idleCore;
+    try {
+      core.walk(true);
+      const msg = () => ws.listeners.forEach((f) => f({ data: '{"kind":"Diff","tick":1}' }));
+      let slept = false, woke = false, runs = 0;
+      core.sleep(1200).then(() => { slept = true; });
+      core.sleepWake(1200).then(() => { woke = true; });
+      const stop = core.every(1200, () => { runs++; });
+      msg(); await sleep(0);
+      assert.ok(!slept && !woke && runs === 0, 'nothing fires before it is due');
+      await new Promise((r) => realST(r, 1250)); msg(); await sleep(0);
+      assert.ok(slept && woke, 'sleep and sleepWake end on the first message after they are due');
+      assert.strictEqual(runs, 1, 'every() runs once');
+      msg(); assert.strictEqual(runs, 1, 'and is not due again right away');
+      stop(); await new Promise((r) => realST(r, 1250)); msg();
+      assert.strictEqual(runs, 1, 'a stopped every() never runs');
+    } finally {
+      globalThis.setTimeout = realST;
+      core._unload(); globalThis.idleCore = undefined;
+      delete globalThis.document; delete globalThis.WebSocket;
+    }
+  });
+
   await t('order book: off the Goods tab Autopilot waits (posts nothing) until a full-region board filter is answered, even by a book of only your own order; it releases only its own filter', async () => {
     fresh();
     class FakeWS { constructor() { this.readyState = 1; this.sent = []; this.ls = []; } addEventListener(_t, f) { this.ls.push(f); } removeEventListener() {} send(m) { this.sent.push(JSON.parse(m)); } emit(m) { for (const f of this.ls) f({ data: JSON.stringify(m) }); } }

@@ -225,14 +225,13 @@
     mounted = true;
     styleEl = h('style', { id: 'as-style' }, CSS);
     document.head.append(styleEl);
-    obs = new MutationObserver(renderAll);
-    obs.observe(document.body, { childList: true, subtree: true });
+    obs = core.ui.onDom(renderAll);
     tickTimer = setInterval(inject, 1000);
     inject();
   }
   function unmountUi() {
     mounted = false;
-    obs?.disconnect(); obs = null;
+    obs?.(); obs = null;
     clearInterval(tickTimer); clearTimeout(passTimer);
     closeMenu(false);
     styleEl?.remove(); panelEl?.remove(); styleEl = panelEl = null;

@@ -271,5 +271,65 @@ t('Auto planner: Wooden Frames worth nothing (nothing consumes them) pull in Qua
   assert.ok(guarded.notes.some((n) => /skipped: item:/.test(n)), guarded.notes.join(' | '));
 });
 
+// ---- any corp: region, floor, standalone target, hold cap, lot depth, names --------------------------------------------
+
+t('pickRegion: Heartland unless another held region has more free acres; a fixed choice wins', () => {
+  const st = { land_bought: { 0: 0 }, groups: { 1: { building: CAMP, count: 20, region: 0 } }, building_pool: {}, construction: {} };
+  assert.strictEqual(P.pickRegion({ st, catalog: C }), 0, 'only Heartland held');
+  assert.deepStrictEqual(P.regionAcres({ st, catalog: C, region: 0 }), { owned: 25, used: 20, free: 5 });
+  const two = { ...st, land_bought: { 0: 0, 3: 10 } };
+  assert.strictEqual(P.pickRegion({ st: two, catalog: C }), 3, 'Frontier has 10 free, Heartland 5');
+  const tie = { ...st, land_bought: { 0: 0, 1: 5 } };
+  assert.strictEqual(P.pickRegion({ st: tie, catalog: C }), 0, 'tie goes to Heartland');
+  assert.strictEqual(P.pickRegion({ st: two, catalog: C, choice: 1 }), 1);
+  assert.strictEqual(P.firstAcre(3), 1500); assert.strictEqual(P.firstAcre(9), 5000); assert.strictEqual(P.starterAcres(1), 0);
+});
+
+t('ownedAll: the price counts groups and pools in every region plus the queues', () => {
+  const st = { groups: { 1: { building: CAMP, count: 3, region: 0 }, 2: { building: CAMP, count: 2, region: 1 } }, building_pool: { 0: { [CAMP]: 1 }, 1: { [FARM]: 4 } },
+    construction: { builds: [{ building: CAMP, count: 1, region: 2 }], demolitions: [] } };
+  const o = P.ownedAll({ st, catalog: C });
+  assert.strictEqual(o[CAMP], 7); assert.strictEqual(o[FARM], 4);
+});
+
+t('manualFloor: the default floor is capped at half the cash at start; a set floor is kept', () => {
+  assert.strictEqual(P.manualFloor({ minMoney: 30000, isDefault: true, moneyStart: 2000 }), 1000);
+  assert.strictEqual(P.manualFloor({ minMoney: 30000, isDefault: true, moneyStart: 1e6 }), 30000);
+  assert.strictEqual(P.manualFloor({ minMoney: 30000, isDefault: false, moneyStart: 2000 }), 30000);
+});
+
+t('nextLockedTech: cheapest tech whose prerequisite is unlocked, skipping research in progress', () => {
+  const techs = board.catalog.techs;
+  assert.ok(techs?.length, 'catalog has techs');
+  const t0 = P.nextLockedTech({ catalog: board.catalog, unlocked: [] });
+  const open = techs.filter((x) => x.requires == null);
+  assert.strictEqual(t0.cd, Math.min(...open.map((x) => x.cost)));
+  const t1 = P.nextLockedTech({ catalog: board.catalog, unlocked: [], research: { building: t0.b } });
+  assert.notStrictEqual(t1.b, t0.b);
+  assert.strictEqual(P.nextLockedTech({ catalog: board.catalog, unlocked: techs.map((x) => x.building) }), null);
+});
+
+t('runMaxMs: 15 min up to $100k/h or with nothing held, shorter as income grows, never under 5 min', () => {
+  assert.strictEqual(P.runMaxMs({ incomeCentsPerHour: null }), 900000);
+  assert.strictEqual(P.runMaxMs({ incomeCentsPerHour: 5e6 }), 900000);
+  assert.strictEqual(P.runMaxMs({ incomeCentsPerHour: 4e7 }), 450000);
+  assert.strictEqual(P.runMaxMs({ incomeCentsPerHour: 1e10 }), 300000);
+  assert.strictEqual(P.runMaxMs({ incomeCentsPerHour: 1e10, held: false }), 900000);
+});
+
+t('itemValues: lots: stock fills the best bid first, the rest sells into the next lot, then base value or 0', () => {
+  const lots = { [WF]: [{ price: 100, amount: 10 }, { price: 300, amount: 5 }] };
+  const v = (stock, run = []) => P.itemValues({ catalog: C, bids: lots, runningInputs: run, stock: { [WF]: stock } })[WF];
+  assert.strictEqual(v(0), 300); assert.strictEqual(v(4), 300);
+  assert.strictEqual(v(5), 100); assert.strictEqual(v(14), 100);
+  assert.strictEqual(v(15), 0, 'every lot filled, nothing consumes it');
+  assert.strictEqual(v(15, [WF]), Math.max(0, C.items[WF].base_value), 'in use: base value');
+});
+
+t('candidates: the starters resolve by name', () => {
+  const live = P.candidates(base()).filter((c) => !c.dropped).map((c) => c.name);
+  assert.deepStrictEqual(live.sort(), ['Farm', 'Lumber Camp']);
+});
+
 console.log(failed ? failed + ' failed' : 'all passed');
 if (failed) process.exitCode = 1;
