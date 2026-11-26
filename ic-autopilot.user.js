@@ -47,7 +47,19 @@ try {
   const HAS_DOM = typeof document !== 'undefined' && !!document.body;
   if (W.idleCore?._unload) W.idleCore._unload();
   const store = (() => { try { return W.localStorage ?? null; } catch { return null; } })();
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  // Chrome may run timers in a tab hidden 5+ minutes only once a minute, but socket messages (2 ticks/s) still
+  // arrive, so every message also fires the timers that are due. after() is setTimeout with that rescue.
+  const due = new Set();
+  function after(ms, fn) {
+    const d = { at: Date.now() + ms, fn: () => { clearTimeout(t); due.delete(d); fn(); } };
+    const t = setTimeout(d.fn, ms);
+    due.add(d);
+    return () => { clearTimeout(t); due.delete(d); };
+  }
+  function runDue() { const now = Date.now(); for (const d of due) if (now >= d.at) { try { d.fn(); } catch (e) { console.error('[idleCore]', e); } } }
+  const sleep = (ms) => new Promise((r) => after(ms, r));
+  // setInterval with the same rescue; returns a stop function.
+  function every(ms, fn) { let stop = null; const run = () => { stop = after(ms, run); fn(); }; stop = after(ms, run); return () => stop(); }
   let unloaded = false;
 
   // ---- game state: one walk of the React fiber tree --------------------------
@@ -105,6 +117,7 @@ try {
   const wakers = new Set();
   function seeTick(t) { if (typeof t === 'number' && t > sock.tick) { sock.tick = t; sock.tickAt = Date.now(); } }
   function onMessage(e) {
+    runDue();
     if (typeof e.data !== 'string') return;
     sock.textMsgs++;
     try {
@@ -185,8 +198,8 @@ try {
   // Sleep that ends early when the server applies a player command (yours, or one you click yourself).
   function sleepWake(ms) {
     return new Promise((res) => {
-      const done = () => { clearTimeout(t); wakers.delete(done); res(); };
-      const t = setTimeout(done, ms);
+      const done = () => { cancel(); wakers.delete(done); res(); };
+      const cancel = after(ms, done);
       wakers.add(done);
     });
   }
@@ -610,17 +623,26 @@ body:has(>.idc-docked:not(.idc-ghost)) .idc-toasts{right:calc(var(--idc-dock,360
 
   // Panel shell: sticky header (drag, close; double-click minimizes), tabs, scrolling body, sticky footer ----------
   const livePanels = new Set();
+  // One page observer for every module (dock, chrome, Auto ship, Auto utilities): each subtree observer gets its own
+  // copy of every mutation record, and the game re-renders numbers on every tick. Subscribers run at most once a frame.
+  const domSubs = new Set();
+  let domObs = null, domQueued = false;
+  function onDom(fn) {
+    domSubs.add(fn);
+    if (!domObs) {
+      domObs = new MutationObserver(() => {
+        if (domQueued) return;
+        domQueued = true;
+        requestAnimationFrame(() => { domQueued = false; for (const f of [...domSubs]) { try { f(); } catch (e) { console.error('[idleCore]', e); } } });
+      });
+      domObs.observe(document.body, { childList: true, subtree: true });
+    }
+    return () => { domSubs.delete(fn); if (!domSubs.size) { domObs?.disconnect(); domObs = null; } };
+  }
   // React can drop or bring back the game's layout: re-place the panels whose docked state no longer matches it.
-  let dockObs = null;
+  let dockOff = null;
   function watchDock() {
-    if (dockObs) return;
-    let queued = false;
-    dockObs = new MutationObserver(() => {
-      if (queued) return;
-      queued = true;
-      requestAnimationFrame(() => { queued = false; const can = !!document.querySelector('.shell'); for (const p of livePanels) if (!p.state.min && p.el.classList.contains('idc-docked') !== can) p.place(); });
-    });
-    dockObs.observe(document.getElementById('root') || document.body, { childList: true, subtree: true });
+    dockOff ||= onDom(() => { const can = !!document.querySelector('.shell'); for (const p of livePanels) if (!p.state.min && p.el.classList.contains('idc-docked') !== can) p.place(); });
   }
   const motionOK = () => HAS_DOM && matchMedia('(prefers-reduced-motion: no-preference)').matches;
   const EASE = 'cubic-bezier(.2,.8,.2,1)';
@@ -781,11 +803,9 @@ body:has(>.idc-docked:not(.idc-ghost)) .idc-toasts{right:calc(var(--idc-dock,360
       get opener() { return chipEl?.isConnected ? chipEl : navEl; },
       mount() {
         dead = false; ensureStyle(); ensure();
-        let queued = false;
-        observer = new MutationObserver(() => { if (queued) return; queued = true; requestAnimationFrame(() => { queued = false; ensure(); }); });
-        observer.observe(document.getElementById('root') || document.body, { childList: true, subtree: true });
+        observer?.(); observer = onDom(ensure);
       },
-      unmount() { dead = true; observer?.disconnect(); observer = null; navEl?.remove(); chipEl?.remove(); navEl = chipEl = pillEl = chipDot = chipText = null; },
+      unmount() { dead = true; observer?.(); observer = null; navEl?.remove(); chipEl?.remove(); navEl = chipEl = pillEl = chipDot = chipText = null; },
       setPill(text, tone, hidden) { view.pill = { text, tone, hidden }; paint(); },
       setChip(text, tone, title) { view.chip = { text, tone, title }; paint(); },
       setOpen(b) { view.open = !!b; paint(); },
@@ -1034,7 +1054,7 @@ function resetSettings(name, { snapshot, reset, restore }) {
 }
 
 const ui = {
-  ensureStyle, ICONS, group, field, inputBox, createPanel, createChrome, createLogView, togglePanel,
+  ensureStyle, ICONS, group, field, inputBox, createPanel, createChrome, createLogView, togglePanel, onDom,
   fmt, short, parseAmount, setOn, setMsg, setTone,
   hero, rowList, stateLine, banner, disclosure,
   amountField, toggleField, segField, quickPicks, runModeSeg,
@@ -1083,15 +1103,26 @@ const ui = {
     smeltX3: '0,0:123:1 0,1:127:1 0,2:123:1 0,3:123:0 1,0:113:0 1,2:123:3 1,3:126:0 2,3:123:0 3,0:123:0 3,2:123:0 3,3:126:0 4,0:123:0 4,1:113:0 4,3:123:0 5,0:123:0 5,3:123:0 6,0:123:0 6,1:123:0 6,2:113:0 7,0:123:0 7,1:123:0 8,0:123:0 8,1:123:0 8,2:123:0 9,0:114:0 9,1:114:0 9,2:114:0',
   });
 
+  // ---- game numbers other modules share ------------------------------------------------------------------------------
+  // Courier allowance per run in CU: 10,000 + 5,000 per capacity level, at most 50,000 (the client's own formula, st.courier_levels.capacity).
+  const courierCU = (st = walk().st) => Math.min(50000, 10000 + Math.max(0, Number(st?.courier_levels?.capacity) || 0) * 5000);
+  // NPC power price multiplier from the world event in force: the client's event chip reads engine.worldEventAt(tick) and shows
+  // "NPC power x(100 + percent) / 100" when the event is an outage. 1 when there is none, or no engine / tick to ask.
+  function powerPriceMult(engine = walk().engine, tick = nowTick()) {
+    try {
+      const ev = tick > 0 && typeof engine?.worldEventAt === 'function' ? JSON.parse(engine.worldEventAt(tick)) : null;
+      return ev?.outage && Number.isFinite(ev.percent) ? Math.max(0, (100 + ev.percent) / 100) : 1;
+    } catch { return 1; }
+  }
 
   const titleTimer = HAS_DOM ? setInterval(applyTitle, 2000) : 0;
   addEventListener?.('pagehide', flushLedger);
 
   W.idleCore = {
     version: 1,
-    walk, sleep, sleepWake, waitConfirm, tune, markSend, lastRtt, nowTick, seeTick, sock, orderBook,
+    walk, sleep, every, sleepWake,waitConfirm, tune, markSend, lastRtt, nowTick, seeTick, sock, orderBook,
     h, makeDraggable, toast, ledger: ledgerApi, ui,
-    setBadge, notify, askNotify, notifyPerm, stopAll, reserves, floorDesigns,
+    setBadge, notify, askNotify, notifyPerm, stopAll, reserves, floorDesigns, courierCU, powerPriceMult,
     exportConfig, importConfig, exportFile, importFile, missingFields,
     _unload() {
       orderBook.release();
@@ -1102,7 +1133,7 @@ const ui = {
       if (HAS_DOM) removeEventListener('keydown', onKey, true);
       clearInterval(titleTimer);
       flushLedger();
-      if (HAS_DOM) { uiStyleEl?.remove(); toastBox?.remove(); uiStyleEl = toastBox = null; dockObs?.disconnect(); dockObs = null; }
+      if (HAS_DOM) { uiStyleEl?.remove(); toastBox?.remove(); uiStyleEl = toastBox = null; domObs?.disconnect(); domObs = null; domSubs.clear(); dockOff = null; }
     },
   };
 })();
@@ -1319,7 +1350,13 @@ try {
 
   // Frame CD weights, by item name (ids differ between catalogs).
   const FRAME_CD = { 'Wooden Frame': 2, 'Iron Frame': 4, 'Wired Frame': 8, 'Light Frame': 16, 'Machine Frame': 32, 'Automated Frame': 64, 'Smart Frame': 128 };
-  const STARTERS = [0, 10];
+  const STARTERS = { 'Lumber Camp': 0, Farm: 10 };   // by name, with the ids as fallback
+  // Per region (Heartland 0, Industrial Basin 1, Coastal Cities 2, Frontier 3; wiki regions-and-land.md): free acres at start
+  // and the first bought acre in cents. The state carries neither, so these are the wiki's numbers.
+  const STARTER_ACRES = [25, 0, 0, 0];
+  const FIRST_ACRE = [5000, 3500, 4500, 1500];
+  const starterAcres = (r) => STARTER_ACRES[r] ?? 0;
+  const firstAcre = (r) => FIRST_ACRE[r] ?? FIRST_ACRE[0];
   const dollars = (c) => '$' + (c / 100).toFixed(2);
 
   const normCache = new WeakMap();
@@ -1372,6 +1409,65 @@ try {
     return out;
   }
 
+  // Units owned per type for the price: groups and pools in every region plus the queues (the price counts them all).
+  function ownedAll({ st, catalog }) {
+    const out = { ...queued({ st, catalog }).owned };
+    const add = (b, n) => { out[b] = (out[b] ?? 0) + n; };
+    for (const g of Object.values(st.groups ?? {})) add(g.building, g.count);
+    for (const pool of Object.values(st.building_pool ?? {})) for (const [b, n] of Object.entries(pool ?? {})) add(b, n);
+    return out;
+  }
+
+  // Acres in one region: starter + bought, used by groups, the pool and both queues there.
+  function regionAcres({ st, catalog, region = 0 }) {
+    const C = normalize(catalog);
+    const ac = (b) => C.buildings[b]?.acres ?? 1;
+    let used = queued({ st, catalog: C, region }).acres;
+    for (const g of Object.values(st.groups ?? {})) if ((g.region ?? 0) === region) used += ac(g.building) * g.count;
+    for (const [b, n] of Object.entries(st.building_pool?.[region] ?? {})) used += ac(b) * n;
+    const owned = starterAcres(region) + (st.land_bought?.[region] ?? 0);
+    return { owned, used, free: Math.max(0, owned - used) };
+  }
+
+  // The region to farm in: a fixed id, or 'auto' = the region with the most free acres among those the corp holds land or
+  // buildings in. Heartland wins ties (and is the answer when nothing else is held).
+  function pickRegion({ st, catalog, choice = 'auto' }) {
+    if (choice !== 'auto') return Number(choice) || 0;
+    const held = new Set([0]);
+    for (const [r, n] of Object.entries(st.land_bought ?? {})) if (n > 0) held.add(Number(r));
+    for (const g of Object.values(st.groups ?? {})) held.add(g.region ?? 0);
+    for (const [r, pool] of Object.entries(st.building_pool ?? {})) if (Object.values(pool ?? {}).some((n) => n > 0)) held.add(Number(r));
+    let best = 0, bestFree = regionAcres({ st, catalog, region: 0 }).free;
+    for (const r of [...held].sort((a, b) => a - b)) {
+      const f = regionAcres({ st, catalog, region: r }).free;
+      if (f > bestFree) { best = r; bestFree = f; }
+    }
+    return best;
+  }
+
+  // Manual money floor ($). The default floor is capped at half the cash at start, so a young corp is not stopped at once;
+  // a floor you (or Autopilot) set is used as is.
+  const manualFloor = ({ minMoney, isDefault, moneyStart }) => (isDefault ? Math.min(minMoney, Math.max(0, moneyStart) / 2) : minMoney);
+
+  // The cheapest tech that can start now (prerequisite unlocked, not researching or queued): its CD cost is the target
+  // when CD Farm Auto runs on its own.
+  function nextLockedTech({ catalog, unlocked = [], research = null, queue = [] }) {
+    const C = normalize(catalog);
+    const have = new Set([...unlocked].map(Number));
+    const busy = new Set([research?.building, ...queue.map((q) => q.building)].filter((b) => b != null).map(Number));
+    const open = (catalog.techs ?? C.techs ?? []).filter((t) => !have.has(t.building) && !busy.has(t.building) && (t.requires == null || have.has(t.requires)));
+    const t = open.sort((a, b) => a.cost - b.cost || a.building - b.building)[0];
+    return t ? { b: t.building, name: C.buildings[t.building]?.name ?? 'building ' + t.building, cd: t.cost, prereqsMet: true, note: '' } : null;
+  }
+
+  // How long one run may hold Autopilot / Core plan (ms): 15 min up to $100k/h of income, shorter as income grows (the
+  // held engine's sales and purchases wait), never under 5 min. Nothing held: the full 15 min.
+  const RUN_MAX_MS = 900000, RUN_MIN_MS = 300000, HOLD_REF_CENTS_H = 1e7;
+  function runMaxMs({ incomeCentsPerHour = null, held = true } = {}) {
+    if (!held || !(incomeCentsPerHour > HOLD_REF_CENTS_H)) return RUN_MAX_MS;
+    return Math.max(RUN_MIN_MS, Math.round(RUN_MAX_MS * Math.sqrt(HOLD_REF_CENTS_H / incomeCentsPerHour)));
+  }
+
   const price = (baseCents, owned, i) => Math.floor(baseCents * (20 + owned + i) / 20);
   function batchCost(baseCents, owned, n) {
     let s = 0;
@@ -1390,12 +1486,20 @@ try {
     return s;
   }
 
-  // Best open bid, else base value while a running recipe consumes it, else 0.
-  function itemValues({ catalog, bids = {}, runningInputs = [] }) {
+  // What one more unit used up costs: the bid it would have been sold into, else base value while a running recipe consumes
+  // it, else 0. bids[item] is a price per unit (any depth) or a list of lots [{ price per unit, amount }]: with `stock`, the
+  // stock fills the best lots first, so the marginal unit sells into the first lot the stock does not fill (none left: 0).
+  function itemValues({ catalog, bids = {}, runningInputs = [], stock = {} }) {
     const C = normalize(catalog);
     const inUse = new Set([...runningInputs].map(Number));
+    const atDepth = (b, have) => {
+      if (!Array.isArray(b)) return b ?? 0;
+      let left = Math.max(0, have);
+      for (const l of [...b].sort((x, y) => y.price - x.price)) { if (left < l.amount) return l.price; left -= l.amount; }
+      return 0;
+    };
     const out = {};
-    for (const it of Object.values(C.items)) out[it.id] = Math.max(bids[it.id] ?? 0, inUse.has(it.id) ? it.base_value : 0);
+    for (const it of Object.values(C.items)) out[it.id] = Math.max(atDepth(bids[it.id], stock[it.id] ?? 0), inUse.has(it.id) ? it.base_value : 0);
     return out;
   }
 
@@ -1419,7 +1523,8 @@ try {
 
   function candidates(input) {
     const C = normalize(input.catalog);
-    const unlocked = new Set([...(input.unlocked ?? []), ...STARTERS].map(Number));
+    const starters = Object.entries(STARTERS).map(([name, fb]) => Object.values(C.buildings).find((b) => b.name === name)?.id ?? fb);
+    const unlocked = new Set([...(input.unlocked ?? []), ...starters].map(Number));
     const usable = input.usableAcres ?? 0;
     return Object.values(C.buildings).sort((a, b) => a.id - b.id).map((bld) => {
       const items = (bld.build_items ?? []).map(({ item, amount }) => ({ item, amount }));
@@ -1599,7 +1704,7 @@ try {
     return (h >>> 0).toString(36);
   }
 
-  core.planner = { normalize, cdOf, secsOf, queued, price, batchCost, acrePrice, landCost, itemValues, surplus, itemOk, candidates, plan, gates, land, signature, FRAME_CD };
+  core.planner = { normalize, cdOf, secsOf, queued, ownedAll, regionAcres, pickRegion, starterAcres, firstAcre, manualFloor, nextLockedTech, runMaxMs, price, batchCost, acrePrice, landCost, itemValues, surplus, itemOk, candidates, plan, gates, land, signature, FRAME_CD };
 })();
 } catch (e) { console.error('[IdleCorp] planner failed to load:', e); }
 // @@END planner
@@ -1776,20 +1881,22 @@ try {
     else { window.cdFarm.stop(); window.cdFarm.panel(false); }
   }
 
-  const REGION = 0;        // Heartland
   const MONEY = 0;         // items[0], cents
   const CD = 24;           // items[24], Construction Data
-  // Buildings the farm can cycle: money only (no build items), 1 acre and 1 CD each, same price curve.
+  // Buildings the farm can cycle: money only (no build items), 1 acre and 1 CD each, same price curve. Id and base price are
+  // read from the catalog by name (syncIds); these numbers are the fallback.
   const BUILDINGS = [
     { id: 0, name: 'Lumber Camp', plural: 'camps', base: 41 },
     { id: 10, name: 'Farm', plural: 'farms', base: 41 },
   ];
-  const STARTER_ACRES = 25;
+  const isBuilding = (v) => v === 'auto' || v === 'cheapest' || BUILDINGS.some((b) => b.id === v);
+  let RETAIL = 38;   // Retail Store (by name from the catalog; this id is the fallback)
   const RATE_WINDOW_MS = 15 * 60 * 1000;
 
 
   const cfg = {
-    building: 'auto',      // 'auto': the planner picks types and batch every cycle; or an id to cycle: 0 Lumber Camp, 10 Farm
+    building: 'auto',      // 'auto': the planner picks types and batch every cycle; 'cheapest': Lumber Camp or Farm, whichever costs less at start; or an id: 0 Lumber Camp, 10 Farm
+    region: 'auto',        // 'auto': the region you hold with the most free acres (Heartland on a tie); or 0 Heartland, 1 Industrial Basin, 2 Coastal Cities, 3 Frontier
     batch: 10,             // max buildings per cycle
     fullBatch: false,      // true: only build when all `batch` camps fit (land + money); never a smaller batch
     cycles: Infinity,      // stop after this many cycles
@@ -1807,6 +1914,7 @@ try {
     pace: 'balanced',      // Auto: 'thrifty' | 'balanced' | 'fast' (how much waiting for CD costs)
     land: 'plan',          // Auto: 'off' | 'plan' (acres only inside Autopilot's own land plan) | max $ per acre
     autoStart: true,       // Auto: start by itself when the engine needs CD (switched off when you press Stop)
+    solo: false,           // Auto: with Autopilot and Core plan off and no Target CD, farm for the cheapest tech that can start next
     autoFloor: 0,          // Auto: money floor ($) on top of Autopilot's power-bill floor
     maxTypes: 2,           // Auto: building types per cycle (each adds a Buy and a Demolish round trip)
     cmdsPerMin: 20,        // command budget per rolling minute (shared pacer)
@@ -1839,7 +1947,31 @@ try {
 
   // The building the farm cycles. A run (even an interrupted one) keeps the building it started with,
   // so changing the setting can never make cleanup touch the wrong buildings.
-  const farmId = () => { const b = runBuilding(); return typeof b === 'number' ? b : 0; };   // Auto: the shared read() just looks at Lumber Camps
+  const farmId = () => { const b = runBuilding(); return typeof b === 'number' ? b : b === 'cheapest' ? cheaperId() : BUILDINGS[0].id; };   // Auto: the shared read() just looks at Lumber Camps
+  // Lumber Camp or Farm, whichever is cheaper now: the price is base x (20 + owned) / 20, owned counting every region and both queues.
+  function cheaperId() {
+    const { st, catalog } = core.walk();
+    if (!st || !catalog) return BUILDINGS[0].id;
+    const own = PL().ownedAll({ st, catalog });
+    return [...BUILDINGS].sort((a, b) => a.base * (20 + (own[a.id] ?? 0)) - b.base * (20 + (own[b.id] ?? 0)))[0].id;
+  }
+  // The region a run uses is fixed when it starts (stats.region; a run saved before regions existed was in Heartland), so cleanup
+  // never looks at another region's pool. With no run on, it is cfg.region ('auto': PL().pickRegion).
+  function region(st, catalog) {
+    if (running || active || resumable) return stats.region ?? 0;
+    if (!st) ({ st, catalog } = core.walk());
+    return st && catalog ? PL().pickRegion({ st, catalog, choice: cfg.region }) : 0;
+  }
+  const pickRegionNow = () => { const { st, catalog } = core.walk(true); return st && catalog ? PL().pickRegion({ st, catalog, choice: cfg.region }) : 0; };
+  // Ids by name from the catalog (once per catalog), with the numbers above as the fallback.
+  const synced = new WeakSet();
+  function syncIds(catalog) {
+    if (synced.has(catalog)) return;
+    synced.add(catalog);
+    const byName = (n) => (catalog.buildings ?? []).find((b) => b.name === n);
+    for (const b of BUILDINGS) { const x = byName(b.name); if (x) { b.id = x.id; b.base = x.cost / 100; } }
+    RETAIL = byName('Retail Store')?.id ?? RETAIL;
+  }
   const isAuto = () => runBuilding() === 'auto';
   const bld = () => BUILDINGS.find((b) => b.id === farmId()) ?? BUILDINGS[0];
   const unitRefund = () => bld().base / 2; // demolish refunds 50% of base ($)
@@ -1865,45 +1997,44 @@ try {
 
   function campCost(owned, n) {
     let c = 0;
-    for (let i = 0; i < n; i++) c += bld().base * (20 + owned + i) / 20;
+    const base = bld().base;
+    for (let i = 0; i < n; i++) c += base * (20 + owned + i) / 20;
     return c;
   }
 
-  const moneyFloor = () => (cfg.budget === 'income' ? Math.max(cfg.minMoney, stats.moneyStart) : cfg.minMoney);
+  // stats.scaleFloor: the run started on the default floor (nobody set one), so it is capped by the cash at start (PL().manualFloor).
+  const baseFloor = (scale, moneyStart) => PL().manualFloor({ minMoney: cfg.minMoney, isDefault: scale, moneyStart });
+  const moneyFloor = () => { const f = baseFloor(!!stats.scaleFloor, stats.moneyStart); return cfg.budget === 'income' ? Math.max(f, stats.moneyStart) : f; };
 
   // Live snapshot. Every decision in the script goes through this.
   function read(fresh = false) {
     const { ws, st, catalog } = core.walk(fresh);
     if (!st || !catalog) return null;
-    const C = PL().normalize(catalog);
-    const regionPool = st.building_pool?.[REGION] ?? {};
-    const unassignedCamps = regionPool[farmId()] ?? 0;
+    syncIds(catalog);
+    const R = region(st, catalog);
+    const id = farmId();
+    const unassignedCamps = st.building_pool?.[R]?.[id] ?? 0;
     // Queued builds and demolitions count in the price and hold acres: a queued demolition keeps its acre until it finishes.
-    const q = PL().queued({ st, catalog, region: REGION });
+    const q = PL().queued({ st, catalog, region: R });
+    const ra = PL().regionAcres({ st, catalog, region: R });
+    let campsInGroups = 0;
+    for (const g of Object.values(st.groups)) if (g.building === id) campsInGroups += g.count;   // every region: the price counts them all
 
-    let campsInGroups = 0, acresUsed = q.acres;
-    for (const g of Object.values(st.groups)) {
-      if ((g.region ?? REGION) !== REGION) continue;
-      if (g.building === farmId()) campsInGroups += g.count;
-      acresUsed += C.buildings[g.building].acres * g.count;
-    }
-    for (const [b, n] of Object.entries(regionPool)) acresUsed += C.buildings[b].acres * n;
-
-    const acresOwned = STARTER_ACRES + (st.land_bought?.[REGION] ?? 0);
+    const acresOwned = ra.owned, acresUsed = ra.used, freeAcres = ra.free;
     const money = (st.items?.[MONEY] ?? 0) / 100;
-    const ownedCamps = campsInGroups + unassignedCamps + (q.owned[farmId()] ?? 0);
-    const freeAcres = Math.max(0, acresOwned - acresUsed);
+    const ownedCamps = PL().ownedAll({ st, catalog })[id] ?? 0;
     const usableAcres = Math.max(0, freeAcres - cfg.reserveAcres);
-    // 'income' keeps the money you have at Start; with no run on, that is the money now (stats.moneyStart is from the last run).
-    const floor = cfg.budget === 'income' && !(running || active || resumable) ? Math.max(cfg.minMoney, money) : moneyFloor();
+    // With no run on, the floor is what a run started now would use ('income' keeps the money you have at Start).
+    const f0 = baseFloor(cfg.minMoney === DEFAULTS.minMoney, money);
+    const floor = !(running || active || resumable) ? (cfg.budget === 'income' ? Math.max(f0, money) : f0) : moneyFloor();
 
     let affordable = 0;
     while (affordable < cfg.batch && money - campCost(ownedCamps, affordable + 1) >= floor) affordable++;
     const nextBatch = Math.min(cfg.batch, usableAcres, affordable);
-    const sec = PL().secsOf(C, farmId());
+    const sec = PL().secsOf(catalog, id);
 
     return {
-      money, cd: st.items?.[CD] ?? 0,
+      money, cd: st.items?.[CD] ?? 0, region: R,
       unassignedCamps, campsInGroups, ownedCamps,
       acresOwned, acresUsed, freeAcres, usableAcres, moneyFloor: floor,
       nextBatch, nextBatchCost: campCost(ownedCamps, nextBatch),
@@ -1961,9 +2092,9 @@ try {
   // Returns the observed money change (includes passive income during the wait).
   async function demolish(n, { count = true } = {}) {
     await jitter();
-    const r0 = mustRead();
+    const r0 = mustRead(true);
     inFlight = { action: 'demolish', amount: n, at: Date.now() }; save();
-    const d = send({ type: 'DemolishBuilding', building: farmId(), amount: n, region: REGION });
+    const d = send({ type: 'DemolishBuilding', building: farmId(), amount: n, region: region() });
     const r1 = await waitConfirm((r) => r.unassignedCamps <= r0.unassignedCamps - n, d);
     if (!r1) throw new Error(`demolish of ${n} not confirmed`);
     if (count) stats.refunded += n * unitRefund();
@@ -2041,10 +2172,10 @@ try {
     phase = 'building';
     await jitter();
     if (!running) return 'stop'; // stopped during the wait; nothing sent yet
-    const rb = mustRead();       // fresh baseline after the wait
+    const rb = mustRead(true);   // fresh baseline after the wait
     if (rb.nextBatch < n) { phase = 'waiting: money or land changed'; return 'wait'; } // the plan above no longer fits
     inFlight = { action: 'build', amount: n, at: Date.now() }; save();
-    const d = send({ type: 'BuyBuilding', building: farmId(), amount: n, region: REGION });
+    const d = send({ type: 'BuyBuilding', building: farmId(), amount: n, region: region() });
     const r1 = await waitConfirm((r) => r.unassignedCamps >= rb.unassignedCamps + n, d, read, cfg.timeoutMs + Math.ceil((n * rb.buildSec + rb.queue.build) * 1500));
     if (!r1) {
       const r = mustRead();
@@ -2118,13 +2249,13 @@ try {
     fast: { mult: 1, minUnits: 1, maxHours: 1 },         // as fast as cash and acres allow
   };
   const PL = () => core.planner;
-  const FIRST_ACRE = 5000;
   const MIN_FLOOR_C = 10000;          // Auto never spends the last $100, whatever the other floors say
   let graceMs = 2000;                 // a timed-out Demolish gets this long to land before the retry looks again
   let waitMaxMs = 600000;             // a run waits this long for cash/items inside the run, then ends and lets Autopilot go
-  const RUN_MAX_MS = 900000;          // a run ends after 15 min so Autopilot gets its turn (sales, power, resuming groups); the controller restarts it
-  let segStart = 0;                   // when this run segment began (a start or a resume): RUN_MAX_MS counts from here, so time spent interrupted does not end a resumed run
-  const ERR_COOLDOWN_MS = 300000;     // after an error stop: 5 min, doubling, off after 3 in a row               // cents: first bought acre in Heartland
+  // A run ends after PL().runMaxMs (15 min, shorter at high income while it holds Autopilot / Core plan) so they get their turn
+  // (sales, power, resuming groups); the controller restarts it.
+  let segStart = 0;                   // when this run segment began (a start or a resume): the cap counts from here, so time spent interrupted does not end a resumed run
+  const ERR_COOLDOWN_MS = 300000;     // after an error stop: 5 min, doubling, off after 3 in a row
   const HIST_MS = 30 * 60 * 1000;        // window for income, organic CD, net supply
   const SAMPLE_MS = 5000;
   const BOOT_DELAY_MS = 15000;           // let the first snapshot and Autopilot settle before Auto starts itself
@@ -2149,11 +2280,12 @@ try {
 
   // Light state for confirming commands: no catalog needed.
   function readPool(fresh = false) {
-    const { ws, st } = core.walk(fresh);
+    const { ws, st, catalog } = core.walk(fresh);
     if (!st) return null;
+    const R = region(st, catalog);
     return {
-      ws, wsOpen: ws?.readyState === 1, pool: { ...(st.building_pool?.[REGION] ?? {}) }, money: st.items?.[MONEY] ?? 0, cd: st.items?.[CD] ?? 0,
-      landBought: st.land_bought?.[REGION] ?? 0, mutTick: st.ssi?.last_user_mutation_tick ?? 0,
+      ws, wsOpen: ws?.readyState === 1, pool: { ...(st.building_pool?.[R] ?? {}) }, money: st.items?.[MONEY] ?? 0, cd: st.items?.[CD] ?? 0,
+      landBought: st.land_bought?.[R] ?? 0, mutTick: st.ssi?.last_user_mutation_tick ?? 0,
     };
   }
 
@@ -2161,37 +2293,32 @@ try {
   function readAuto(fresh = false) {
     const { ws, st, catalog, deals } = core.walk(fresh);
     if (!st || !catalog || !PL()) return null;
+    syncIds(catalog);
+    const R = region(st, catalog);   // before `running` below shadows the run flag
     const cat = PL().normalize(catalog);
-    const pool = { ...(st.building_pool?.[REGION] ?? {}) };   // a copy: confirms compare against what it was before the command
-    const owned = { ...pool }, running = new Set(), recipes = [];
-    let acresUsed = 0;
-    for (const [b, n] of Object.entries(pool)) acresUsed += (cat.buildings[b]?.acres ?? 1) * n;
+    const pool = { ...(st.building_pool?.[R] ?? {}) };   // a copy: confirms compare against what it was before the command
+    // The price counts every unit in every region and both queues; acres, stock, bids and recipes are this region's.
+    const owned = PL().ownedAll({ st, catalog: cat }), running = new Set(), recipes = [];
     for (const g of Object.values(st.groups ?? {})) {
-      if ((g.region ?? REGION) !== REGION) continue;
-      owned[g.building] = (owned[g.building] ?? 0) + g.count;
-      acresUsed += (cat.buildings[g.building]?.acres ?? 1) * g.count;
-      if (g.paused) continue;
+      if ((g.region ?? 0) !== R || g.paused) continue;
       recipes.push(g.recipe);
       for (const i of cat.recipes[g.recipe]?.inputs ?? []) running.add(i.item);
     }
-    // Queued builds and demolitions count in the price and hold acres (see PL().queued).
-    const q = PL().queued({ st, catalog, region: REGION });
-    for (const [b, n] of Object.entries(q.owned)) owned[b] = (owned[b] ?? 0) + n;
-    acresUsed += q.acres;
-    // Best open bid per unit (side 'Sell' rows are bids you can sell into).
+    const q = PL().queued({ st, catalog: cat, region: R });
+    const ra = PL().regionAcres({ st, catalog: cat, region: R });
+    // Open bids per item as lots (per-unit price, amount); side 'Sell' rows are bids you can sell into.
     const bids = {};
-    for (const d of deals ?? []) if (d.region === REGION && d.side === 'Sell' && d.amount > 0) bids[d.item] = Math.max(bids[d.item] ?? 0, d.price / d.amount);
+    for (const d of deals ?? []) if (d.region === R && d.side === 'Sell' && d.amount > 0) (bids[d.item] ||= []).push({ price: d.price / d.amount, amount: d.amount });
     const unlocked = st.unlocked_buildings ?? [];
-    const landBought = st.land_bought?.[REGION] ?? 0;
-    const acresOwned = STARTER_ACRES + landBought;
+    const landBought = st.land_bought?.[R] ?? 0;
     return {
-      ws, wsOpen: ws?.readyState === 1, cat, pool, owned, running, recipes, bids, unlocked, landBought, acresOwned, acresUsed, queue: { build: q.build, demolish: q.demolish },
-      freeAcres: Math.max(0, acresOwned - acresUsed), stock: st.stock?.[REGION] ?? {},
+      ws, wsOpen: ws?.readyState === 1, cat, region: R, pool, owned, running, recipes, bids, unlocked, landBought, acresOwned: ra.owned, acresUsed: ra.used, queue: { build: q.build, demolish: q.demolish },
+      freeAcres: ra.free, stock: st.stock?.[R] ?? {},
       money: st.items?.[MONEY] ?? 0, cd: st.items?.[CD] ?? 0, retail: unlocked.includes(RETAIL) || (owned[RETAIL] ?? 0) > 0,
+      nextTech: cfg.solo ? PL().nextLockedTech({ catalog, unlocked, research: st.research, queue: st.research_queue ?? [] }) : null,
       mutTick: st.ssi?.last_user_mutation_tick ?? 0,
     };
   }
-  const RETAIL = 38;   // Retail Store
 
   // Items whose stock matters: the build items of every type that is not a starter.
   function watchItems(c) {
@@ -2279,10 +2406,13 @@ try {
     const sig = detectRegime(c, ap);
     const pace = PACE[cfg.pace] ?? PACE.balanced;
     const userTarget = Number.isFinite(cfg.targetCd) ? cfg.targetCd : null;
-    const next = userTarget == null ? ap?.nextTech : null;
+    // On its own (cfg.solo, nothing else live): the target is the cheapest tech that can start next (PL().nextLockedTech).
+    const live = othersBusy(), solo = userTarget == null && !live && cfg.solo;
+    const next = userTarget != null ? null : solo ? c.nextTech : ap?.nextTech;
     const need = userTarget ?? next?.cd ?? null;
-    const base = { c, ap, sig, need, pace };
-    if (userTarget == null && !othersBusy()) return { ...base, idle: true, gate: 'G0', reason: 'waiting for Autopilot or Core plan to run live (or set a Target CD)' };
+    const base = { c, ap, sig, need, next, pace };
+    if (userTarget == null && !live && !solo) return { ...base, idle: true, gate: 'G0', reason: 'waiting for Autopilot or Core plan to run live (or set a Target CD, or switch on Run without Autopilot)' };
+    if (solo && !next) return { ...base, idle: true, gate: 'G0', reason: 'no tech can start next' };
     const g = PL().gates({ need: need ?? 0, cd: c.cd, prereqsMet: next ? next.prereqsMet !== false : true, prereqNote: next?.note || 'its prerequisites', organicCdPerHour: hist.slopes.cd ?? null, maxHours: pace.maxHours });
     if (!g.run) return { ...base, idle: true, gate: g.gate, reason: g.reason };
 
@@ -2295,7 +2425,7 @@ try {
     for (const it of watchItems(c)) { const s = hist.slopes['s' + it]; if (s != null) netSupply[it] = s; burn[it] = Math.max(0, hist.slopes['u' + it] ?? 0); }
     const input = {
       catalog: c.cat, unlocked: c.unlocked, owned: c.owned, usableAcres: Math.max(0, c.freeAcres - cfg.reserveAcres), money: c.money, floor: floorC,
-      stock: c.stock, reserve: ap?.items ?? {}, netSupply, burn, itemValue: PL().itemValues({ catalog: c.cat, bids: c.bids, runningInputs: [...c.running] }),
+      stock: c.stock, reserve: ap?.items ?? {}, netSupply, burn, itemValue: PL().itemValues({ catalog: c.cat, bids: c.bids, runningInputs: [...c.running], stock: c.stock }),
       quarantine: activeQuarantine(), R: need - c.cd, T: t.T, TperType: t.perType, I, queue: c.queue, cdHave: c.cd,
       minUnits: recovering ? 1 : pace.minUnits, maxBatch: recovering ? 1 : cfg.batch, maxTypes: recovering ? 1 : cfg.maxTypes,
     };
@@ -2303,17 +2433,21 @@ try {
     const plan = PL().plan(input);
     reportDrops(plan);
 
-    // Land only matters while acres cap the batch. With no free acre at all, ask what one acre would buy.
+    // Land only matters while acres cap the batch. With no free acre at all, ask what one acre would buy. Only in Heartland: the
+    // state does not show a charter's acre cap, and land is never refunded.
     let landR = { buy: 0, note: '' };
-    if (plan.binding === 'acres' || plan.wait?.reason === 'no free acres above the spare') {
+    if (c.region === 0 && (plan.binding === 'acres' || plan.wait?.reason === 'no free acres above the spare')) {
       const p2 = plan.units.length ? plan : PL().plan({ ...input, usableAcres: 1 });
       const u = p2.units[0];
       if (u) {
-        const wallC = cfg.land === 'plan' ? (window.earlyGame?.cfg?.maxAcrePrice ?? 0) * 100 : Infinity;
+        // Autopilot's land wall when it is loaded; without it the payback test in PL().land decides (plus its cash floor).
+        const apWall = window.earlyGame?.cfg?.maxAcrePrice;
+        const wallC = cfg.land === 'plan' && apWall != null ? apWall * 100 : Infinity;
         const share = window.earlyGame?.cfg?.landCashShare ?? 0.02;   // Autopilot's own pace of land buying
+        const first = PL().firstAcre(c.region);
         landR = PL().land({
-          allow: cfg.land === 'plan' || cfg.land === 'off' ? cfg.land : cfg.land * 100, landBought: c.landBought, firstAcre: FIRST_ACRE, wall: wallC, paybackHours: 20,
-          hoursUntilBought: (k) => (income > 0 ? PL().landCost(FIRST_ACRE, c.landBought, k) / (income * share) : Infinity),
+          allow: cfg.land === 'plan' || cfg.land === 'off' ? cfg.land : cfg.land * 100, landBought: c.landBought, firstAcre: first, wall: wallC, paybackHours: 20,
+          hoursUntilBought: (k) => (income > 0 ? PL().landCost(first, c.landBought, k) / (income * share) : Infinity),
           plan: p2, unitNeed: { cd: u.cd, acres: c.cat.buildings[u.b].acres }, R: need - c.cd, T: t.T, I, money: c.money, floor: floorC,
         });
       }
@@ -2364,9 +2498,9 @@ try {
     const rb = readAuto(true);
     if (!rb) throw new ConnError('game state not found');
     // Land is never refunded: send only if nothing moved since the plan and the floor still holds.
-    if (rb.landBought !== ev.c.landBought || rb.money - ev.land.priceCents < ev.floorC) return;
+    if (rb.region !== ev.c.region || rb.landBought !== ev.c.landBought || rb.money - ev.land.priceCents < ev.floorC) return;
     inFlight = { action: 'land', amount: k, at: Date.now() }; save();
-    const d = send({ type: 'BuyLand', amount: k, region: REGION });
+    const d = send({ type: 'BuyLand', amount: k, region: rb.region });
     const r1 = await waitConfirm((r) => r.landBought >= rb.landBought + k, d, readPool);
     inFlight = null;
     if (!r1) throw new Error(`land purchase of ${k} acre(s) not confirmed`);
@@ -2388,7 +2522,7 @@ try {
       // Never more than the farm holds: a first attempt that the server applied late must not make the retry eat your own buildings.
       const amt = Math.min(want, (r0.pool[b] ?? 0) - (stats.baseline?.[b] ?? 0));
       if (amt <= 0) return { ok: true, rtt: 0 };
-      const d = send({ type, building: b, amount: amt, region: REGION });
+      const d = send({ type, building: b, amount: amt, region: region() });
       if (await waitConfirm((r) => (r.pool[b] ?? 0) <= (r0.pool[b] ?? 0) - amt, d, readPool)) return { ok: true, rtt: core.lastRtt() ?? 0 };
     }
     return { ok: false, rtt: 0 };
@@ -2416,7 +2550,7 @@ try {
     lastEval = ev;
     if (ev.idle) return stopWith(ev.reason);
     if (netSpend() >= cfg.maxSpend) return stopWith(`reached max spend $${fmt(cfg.maxSpend)}`);
-    if (Date.now() - segStart > RUN_MAX_MS) return stopWith('giving Autopilot its turn');
+    if (Date.now() - segStart > PL().runMaxMs({ incomeCentsPerHour: ev.income, held: othersBusy() })) return stopWith('giving Autopilot its turn');
     if (cfg.dryRun) {
       // Nothing is sent, land included. Log the plan a few times, then end (a dry run must not hold Autopilot forever).
       const u = ev.plan.units;
@@ -2458,7 +2592,7 @@ try {
       if (halted) break;
       const base = rb.cat.buildings[u.b], owned = rb.owned[u.b] ?? 0;
       inFlight.units.push({ b: u.b, n: u.n }); save();   // from here on a reload or error counts these as possibly built
-      const d = send({ type: 'BuyBuilding', building: u.b, amount: u.n, region: REGION });
+      const d = send({ type: 'BuyBuilding', building: u.b, amount: u.n, region: region() });
       const bw0 = hr();
       // The game charges on the Buy, but refunds of queued demolishes and income keep landing until the build is done: read the
       // charge from the first state that has applied a player command since the send (the state's own mutation tick: the game can
@@ -2569,7 +2703,7 @@ try {
       }
       console.log(`[cdFarm] cleanup: demolishing ${extra} leftover ${base.name}`);
       await jitter();
-      const d = send({ type: 'DemolishBuilding', building: b, amount: extra, region: REGION });
+      const d = send({ type: 'DemolishBuilding', building: b, amount: extra, region: region() });
       const r1 = await waitConfirm((r) => (r.pool[b] ?? 0) <= (rp.pool[b] ?? 0) - extra, d, readPool);
       if (!r1) throw new Error(`cleanup demolish of ${extra} ${base.name} not confirmed`);
       const refund = Math.floor(base.cost / 2) * extra;
@@ -2613,14 +2747,16 @@ try {
     if (!r) return console.error('[cdFarm] game state not found');
     const miss = core.missingFields(core.walk(true).st, ['groups', 'items']);
     if (miss.length) return console.error('[cdFarm] the game state no longer has ' + miss.join(', ') + ': refusing to run (did the game update?)');
-    if (rest.building != null && rest.building !== 'auto' && !BUILDINGS.some((b) => b.id === rest.building)) {
-      return console.error(`[cdFarm] building must be 'auto' or one of: ${BUILDINGS.map((b) => `${b.id} (${b.name})`).join(', ')}`);
+    if (rest.building != null && !isBuilding(rest.building)) {
+      return console.error(`[cdFarm] building must be 'auto', 'cheapest' or one of: ${BUILDINGS.map((b) => `${b.id} (${b.name})`).join(', ')}`);
     }
+    if (rest.region != null && rest.region !== 'auto' && ![0, 1, 2, 3].includes(rest.region)) return console.error("[cdFarm] region must be 'auto' or 0-3");
     // runOnly: these settings are for this run only; yours come back when it stops.
     if (runOnly && !restoreCfg) restoreCfg = { ...cfg };
     // cycles and maxSpend apply to one run only; other settings are remembered.
     if (!resume) { cfg.cycles = Infinity; cfg.maxSpend = Infinity; }
     Object.assign(cfg, rest);
+    const scaleFloor = !('minMoney' in rest) && cfg.minMoney === DEFAULTS.minMoney;   // a floor passed in (Autopilot's booster) is never scaled
 
     active = true;
     running = true; stopReason = '';
@@ -2639,8 +2775,10 @@ try {
           await reconcile();
           r = mustRead();
         }
+        // Fix the building ('cheapest' resolves to one type now) and the region for the whole run, before resetting stats.
+        const building = cfg.building === 'cheapest' ? cheaperId() : cfg.building, reg = pickRegionNow();
         stats = freshStats();
-        stats.building = cfg.building;
+        stats.building = building; stats.region = reg; stats.scaleFloor = scaleFloor;
         r = mustRead(); // re-read: the pool count must be for the building this run uses
         Object.assign(stats, { cdStart: r.cd, moneyStart: r.money, startedAt: Date.now(), baselinePool: r.unassignedCamps, by: by || '' });
         stats.baseline = { ...(readPool()?.pool ?? {}) }; strikes = 0; recovering = 0; dryCycles = 0; waitSince = 0;
@@ -2889,7 +3027,7 @@ try {
   }
 
   // Floor the run would use if started now.
-  const plannedFloor = (r) => (cfg.budget === 'income' ? Math.max(cfg.minMoney, r.money) : cfg.minMoney);
+  const plannedFloor = (r) => r.moneyFloor;   // read() gives the floor a run started now would use
   const netPerCd = (r) => (campCost(r.ownedCamps, cfg.batch) - cfg.batch * unitRefund()) / cfg.batch;
 
 
@@ -2913,12 +3051,13 @@ try {
       out.push({ field: 'minMoney', level: 'error', text: `Only $${fmt(Math.max(0, room))} above the floor, and a batch costs $${fmt(batchCost)}. Spend down would stop right away.` });
     } else if (cfg.budget === 'floor' && room < batchCost) {
       out.push({ field: 'minMoney', level: 'warn', text: `It will wait until you earn $${fmt(batchCost - room)} more before the first batch.` });
-    } else if (cfg.budget === 'income' && cfg.minMoney > r.money) {
-      out.push({ field: 'minMoney', level: 'warn', text: `Money is below this floor; it will wait until money passes $${fmt(cfg.minMoney)}.` });
+    } else if (cfg.budget === 'income' && floor > r.money) {
+      out.push({ field: 'minMoney', level: 'warn', text: `Money is below this floor; it will wait until money passes $${fmt(floor)}.` });
     }
-    if (cfg.budget !== 'income' && cfg.minMoney < r.money * 0.1) {
-      out.push({ field: 'minMoney', level: 'warn', text: `Low floor: up to $${fmt(r.money - cfg.minMoney)} of your $${fmt(r.money)} can be spent.` });
+    if (cfg.budget !== 'income' && floor < r.money * 0.1) {
+      out.push({ field: 'minMoney', level: 'warn', text: `Low floor: up to $${fmt(r.money - floor)} of your $${fmt(r.money)} can be spent.` });
     }
+    if (floor < cfg.minMoney) out.push({ field: 'minMoney', level: 'warn', text: `The default floor is capped at half your cash: $${fmt(floor)}. Set a floor to use your own.` });
     return out;
   }
 
@@ -2938,14 +3077,14 @@ try {
     return parts.join(' ');
   }
 
-  const bldLabel = (id) => (id === 'auto' ? 'Auto' : BUILDINGS.find((b) => b.id === id)?.name ?? '');
+  const REGIONS = [{ id: 'auto', label: 'Auto' }, { id: 0, label: 'Heartland' }, { id: 1, label: 'Industrial Basin' }, { id: 2, label: 'Coastal Cities' }, { id: 3, label: 'Frontier' }];
   function autoRows() {
     const ev = lastEval, c = ev?.c, m = core.measure.snapshot();
     const rows = [['Mode', `Auto · ${cap(cfg.pace)}${cfg.autoStart ? '' : ' · off'}`]];
     rows.push(['Why', cap(running ? phase : (idleNote || (ev?.idle ? ev.reason : '') || stopReason || 'idle'))]);
-    if (ev?.need != null && c) rows.push(['Need', `${fmt(c.cd)} of ${fmt(ev.need)} CD${ev.ap?.nextTech ? ' (' + ev.ap.nextTech.name + ')' : ''}`]);
+    if (ev?.need != null && c) rows.push(['Need', `${fmt(c.cd)} of ${fmt(ev.need)} CD${ev.next ? ' (' + ev.next.name + ')' : ''}`]);
     if (ev?.plan?.units?.length) rows.push(['Next cycle', `${unitsText(ev.plan.units)} · ${fmt(ev.plan.cdTotal)} CD · $${fmt(ev.plan.netCents / 100)} net`]);
-    if (c) rows.push(['Free acres', `${c.freeAcres} of ${c.acresOwned} (${cfg.reserveAcres} spare)`]);
+    if (c) rows.push(['Free acres', `${c.freeAcres} of ${c.acresOwned} (${cfg.reserveAcres} spare)${c.region ? ' · ' + REGIONS[c.region + 1].label : ''}`]);
     if (ev?.floorC != null) rows.push(['Floor', `$${fmt(ev.floorC / 100)}`]);
     rows.push(['Cycles', `${fmt(stats.cycles)}${stats.built ? ` · +${fmt(stats.built)} CD` : ''}`], ['Net cost', stats.built ? `$${perCd()} / CD` : '—']);
     const rtt = m.rtt;
@@ -2991,7 +3130,9 @@ try {
 
     // ---- Settings tab
     refs.budget = K.segField('Budget', MODES, { get: () => cfg.budget, set: (id) => setCfg('budget', id), def: DEFAULTS.budget, describe: (v) => MODES.find((m) => m.id === v)?.desc || '' });
-    refs.building = K.segField('Building', [{ id: 'auto', label: 'Auto' }, ...BUILDINGS.map((b) => ({ id: b.id, label: b.name }))], { get: () => cfg.building, set: (id) => setCfg('building', id), def: DEFAULTS.building });
+    refs.building = K.segField('Building', [{ id: 'auto', label: 'Auto' }, { id: 'cheapest', label: 'Cheaper' }, ...BUILDINGS.map((b) => ({ id: b.id, label: b.name }))], { get: () => cfg.building, set: (id) => setCfg('building', id), def: DEFAULTS.building });
+    refs.region = K.segField('Region', REGIONS, { get: () => cfg.region, set: (id) => setCfg('region', id), def: DEFAULTS.region, describe: (v) => (v === 'auto' ? 'The region you hold with the most free acres; Heartland on a tie. Auto buys land only in Heartland.' : '') });
+    refs.solo = K.toggleField('Run without Autopilot', 'With Autopilot and Core plan off and no Target CD, farms CD for the cheapest tech you can research next.', { get: () => cfg.solo, set: (v) => { cfg.solo = v; save(); render(); }, def: DEFAULTS.solo });
     refs.pace = K.segField('Pace', [{ id: 'thrifty', label: 'Thrifty' }, { id: 'balanced', label: 'Balanced' }, { id: 'fast', label: 'Fast' }], { get: () => cfg.pace, set: (id) => setCfg('pace', id), def: DEFAULTS.pace, describe: (v) => PACE_DESC[v] || '' });
     refs.land = K.segField('Buy land', [{ id: 'off', label: 'Off' }, { id: 'plan', label: 'Within the plan' }], { get: () => (cfg.land === 'off' ? 'off' : 'plan'), set: (id) => setCfg('land', id), def: DEFAULTS.land, describe: (v) => (v === 'off' ? LAND_OFF : LAND_PLAN) });
     refs.floorPicks = K.quickPicks((v) => setCfg('minMoney', v));
@@ -3006,13 +3147,13 @@ try {
     refs.auto = K.toggleField('Resume after reload', 'Continues an interrupted run when the page loads again.', { get: () => cfg.autoResume, set: (v) => { cfg.autoResume = v; save(); render(); }, def: DEFAULTS.autoResume });
     refs.full = K.toggleField('Full batches only', '', { get: () => cfg.fullBatch, set: (v) => setCfg('fullBatch', v), def: DEFAULTS.fullBatch });
     refs.landMsg = h('div', { class: 'idc-msg', hidden: true });
-    refs.grpAuto = K.group('Auto', refs.autoOn.el, refs.pace.el, refs.land.el, refs.autoFloor.el);
+    refs.grpAuto = K.group('Auto', refs.autoOn.el, refs.solo.el, refs.pace.el, refs.land.el, refs.autoFloor.el);
     refs.grpBudget = K.group('Budget', refs.budget.el, refs.minMoney.el);
     refs.grpBatches = K.group('Batches', refs.full.el, refs.landMsg);
     const settings = K.settingsTab({
       lockText: 'Stop the farm to change settings.',
       groups: [K.group('Building', refs.building.el), refs.grpAuto, refs.grpBudget, K.group('Goal', refs.targetCd.el), refs.grpBatches],
-      advanced: K.disclosure('Advanced', [K.group(null, h('div', { class: 'idc-two' }, refs.batch.el, refs.reserveAcres.el), refs.maxSpendPerMin.el, refs.auto.el)],
+      advanced: K.disclosure('Advanced', [K.group(null, refs.region.el, h('div', { class: 'idc-two' }, refs.batch.el, refs.reserveAcres.el), refs.maxSpendPerMin.el, refs.auto.el)],
         { open: !!ui.advOpen, onToggle: (o) => { ui.advOpen = o; saveUi(); } }),
       backup: { onExport: () => core.exportFile(), onImport: () => core.importFile(), onReset: () => K.resetSettings('CD Farm', { snapshot: exportCfg, reset: resetCfg, restore: importCfg }) },
     });
@@ -3048,7 +3189,7 @@ try {
     let changed = 0;
     const count = (m) => { if (m) changed++; };
     count(refs.building.sync(bldText)); count(refs.budget.sync()); count(refs.pace.sync()); count(refs.land.sync());
-    count(refs.full.sync()); count(refs.auto.sync()); count(refs.autoOn.sync());
+    count(refs.full.sync()); count(refs.auto.sync()); count(refs.autoOn.sync()); count(refs.solo.sync()); count(refs.region.sync());
     refs.floorPicks.sync(FLOOR_ITEMS, cfg.minMoney);
     if (r) refs.targetPicks.sync(targetItems(r), cfg.targetCd);
     const issues = r && !busy && !auto ? checkPlan(r) : [];
@@ -3167,7 +3308,7 @@ try {
     if (running || active) throw new Error('stop the CD Farm run first');
     const applied = [], skipped = [];
     for (const [k, v] of Object.entries(o?.cfg ?? {})) {
-      if (k in cfg && !RUN_ONLY.includes(k) && (k === 'building' ? v === 'auto' || BUILDINGS.some((b) => b.id === v) : typeof v === typeof cfg[k] && !Number.isNaN(v)) && (k !== 'pace' || v in PACE) && (k !== 'land' || v === 'off' || v === 'plan') && (!['batch', 'maxTypes'].includes(k) || v >= 1)) { cfg[k] = v; applied.push(k); } else skipped.push(k);
+      if (k in cfg && !RUN_ONLY.includes(k) && (k === 'building' ? isBuilding(v) : k === 'region' ? v === 'auto' || [0, 1, 2, 3].includes(v) : typeof v === typeof cfg[k] && !Number.isNaN(v)) && (k !== 'pace' || v in PACE) && (k !== 'land' || v === 'off' || v === 'plan') && (!['batch', 'maxTypes'].includes(k) || v >= 1)) { cfg[k] = v; applied.push(k); } else skipped.push(k);
     }
     save(); render();
     return { applied, skipped };
@@ -3189,7 +3330,8 @@ try {
     get farmPool() { return Object.values(this.farmUnits).reduce((a, n) => a + n, 0); },
     // Unassigned buildings per type that belong to a running or interrupted run (Autopilot leaves them alone).
     get farmUnits() {
-      if (!(running || active || resumable)) return {};
+      // Callers compare this with the Heartland pool: a run in another region holds nothing there.
+      if (!(running || active || resumable) || region() !== 0) return {};
       const p = readPool();
       if (!p) return {};
       const out = {};
@@ -3211,7 +3353,7 @@ try {
     get stats() { return stats; },
     get building() { return farmId(); },    // id of the building the farm cycles (the run's own while one is on)
     _debug: () => ({ ...core.sock, ws: undefined, attached: !!core.sock.ws, inFlight, phase, active }),
-    _unload: () => { unloaded = true; running = false; clearInterval(ctlTimer); unmountUi(); },
+    _unload: () => { unloaded = true; running = false; ctlTimer?.(); ctlTimer = null; unmountUi(); },
   };
 
   // Wait for the game to render and connect before mounting or resuming.
@@ -3221,7 +3363,7 @@ try {
       await sleep(500);
     }
     mountUi();
-    ctlTimer = setInterval(() => controllerTick().catch((e) => console.error('[cdFarm]', e)), 2000);
+    ctlTimer = core.every(2000, () => controllerTick().catch((e) => console.error('[cdFarm]', e)));
     console.log('[cdFarm] ready. Open "CD Farm" in the sidebar, or use cdFarm.start() / cdFarm.stop()' + (resumable ? ' / cdFarm.resume()' : ''));
     if (resumable && cfg.autoResume) {
       while (!read()?.wsOpen) { if (unloaded) return; await sleep(500); }
@@ -3255,7 +3397,7 @@ try {
 // What it never sends: QueueResearch. The research queue is shared with the construction slot, and
 // Autopilot treats anything in it as "research busy", so a project is only ever started (StartResearch)
 // when that region's Lab slot is free. dryRun is on by default and is never remembered or imported:
-// nothing is sent until you turn it off and confirm the start.
+// nothing is sent until you turn it off and confirm the start. Opt-in keepLive: a Live run still going at a reload starts Live again.
 // @@MODULE lab
 try {
 (() => {
@@ -3292,9 +3434,10 @@ try {
   const MODE_IDS = ['process', 'modules', 'list'];
   const cfg = {
     mode: 'process',       // 'process' (focus 0) | 'modules' (focus 1) | 'list' (your own list)
-    tierMode: 'best',      // 'best' (highest tier you can pay for) | 1 | 2 | 3 (that tier only: waits, never falls back)
+    tierMode: 'best',      // 'best' (Tier I; a higher tier only out of surplus MD, see richOk) | 1 | 2 | 3 (that tier only: waits, never falls back)
     mdReserve: 5000,       // MD never spent below this
     autoClaim: true,       // claim finished results
+    keepLive: false,       // a Live run that was still running when the page reloaded starts Live again (off: it stays stopped)
     dryRun: true,          // log "would send ..." instead of sending (session-only: never remembered or imported)
     list: [],              // [{ product, focus: 0 | 1 | 2, tier: 'default' | 1 | 2 | 3 }], cycled in order
     intervalMs: 10000,     // look this often
@@ -3313,6 +3456,7 @@ try {
     tierMode: (v) => v === 'best' || v === 1 || v === 2 || v === 3,
     mdReserve: (v) => isNum(v) && v >= 0,
     autoClaim: (v) => typeof v === 'boolean',
+    keepLive: (v) => typeof v === 'boolean',
     list: (v) => Array.isArray(v) && v.length <= LIST_MAX && v.every(validEntry),
     intervalMs: (v) => isNum(v) && v >= 500 && v <= 600000,
     delayMs: (v) => isNum(v) && v >= 0 && v <= 60000,
@@ -3337,7 +3481,8 @@ try {
   let unloaded = false;
   function save() {
     if (unloaded) return;
-    try { store?.setItem(KEY, JSON.stringify({ cfg: persistable(), mem })); } catch {}
+    // live: a Live run is going (cleared when it stops; a reload does not stop it), for cfg.keepLive.
+    try { store?.setItem(KEY, JSON.stringify({ cfg: persistable(), mem, live: running && !cfg.dryRun })); } catch {}
   }
 
   // ---- the Lab, as the game state shows it ---------------------------------------------------
@@ -3408,14 +3553,24 @@ try {
   }
   const successPct = (tier, focus, bonus) => Math.min(95, Math.floor((TIERS[tier].base - 5 * focus) * (100 + bonus) / 100));
 
-  // Items the groups make now (output of each group's current recipe) that the Lab accepts.
+  // Items the unpaused groups make now (output of each group's current recipe) that the Lab accepts, with what that output is
+  // worth per tick at base value (cents): item -> value.
   function produced(st, ix) {
-    const out = new Set();
+    const out = new Map();
     for (const g of Object.values(st.groups ?? {})) {
-      if (g.recipe == null || !(g.count > 0)) continue;
-      for (const o of ix.recipes.get(g.recipe)?.outputs ?? []) if (ix.products.has(o.item)) out.add(o.item);
+      if (g.recipe == null || !(g.count > 0) || g.paused) continue;
+      const rc = ix.recipes.get(g.recipe);
+      for (const o of rc?.outputs ?? []) {
+        if (ix.products.has(o.item)) out.set(o.item, (out.get(o.item) ?? 0) + ix.products.get(o.item).base_value * o.amount * g.count / Math.max(1, rc.ticks || 1));
+      }
     }
     return out;
+  }
+  // Project hours for a product: clamp(4 x its fastest input-using recipe, 1 h, 12 h) (wiki research.md, Duration).
+  function projectHours(ix, id) {
+    let t = Infinity;
+    for (const r of ix.recipes.values()) if (r.inputs?.length && (r.outputs ?? []).some((o) => o.item === id) && r.ticks > 0) t = Math.min(t, r.ticks);
+    return Math.min(12, Math.max(1, Number.isFinite(t) ? 4 * t / 7200 : 1));
   }
   // Which project comes next: { product, focus, tier: 'default' | 1 | 2 | 3, index? } or { wait }.
   function pick(st, ix, c, counts, next) {
@@ -3430,14 +3585,16 @@ try {
       return { wait: 'no list entry is a qualifying product' };
     }
     const focus = c.mode === 'modules' ? 1 : 0;
-    const pool = [...produced(st, ix)];
+    const made = produced(st, ix), pool = [...made.keys()];
     if (!pool.length) {
       // Module fabrication doesn't care which product; Process study needs one the corp actually makes.
       const top = focus === 1 ? [...ix.products.values()].sort((a, b) => b.base_value - a.base_value || a.id - b.id)[0] : null;
       return top ? { product: top.id, focus, tier: 'default' } : { wait: 'no produced product qualifies' };
     }
-    // Fewest projects started so far; the pricier product on a tie.
-    pool.sort((a, b) => (counts[a] ?? 0) - (counts[b] ?? 0) || ix.products.get(b).base_value - ix.products.get(a).base_value || a - b);
+    // The most output value the corp makes per project hour; each project already started on a product divides its score
+    // (1 / (1 + started)), so the pick still rotates instead of studying one product forever.
+    const score = (id) => made.get(id) / projectHours(ix, id) / (1 + (counts[id] ?? 0));
+    pool.sort((a, b) => score(b) - score(a) || a - b);
     return { product: pool[0], focus, tier: 'default' };
   }
   // Why tier t (0-2) can't be paid now ('' = it can): its cost against what is left, with the reserve kept back.
@@ -3448,6 +3605,11 @@ try {
     if (have.md - k.md < reserve) return `MD ${fmt(have.md)} < ${fmt(k.md)} + reserve ${fmt(reserve)}`;
     return '';
   }
+  // 'best' tier: success per MD is 0.09% for Tier I, 0.007% for II, 0.0005% for III (90/1,000, 70/10,000, 50/100,000), so Tier I
+  // gives the most results per MD. A higher tier (rarer results) is taken only when the MD left above the reserve after paying is at
+  // least RICH x its cost, and it can pay its RD / Catalyst (the Catalyst has no other use).
+  const RICH = 10;
+  const richOk = (t, have, region, reserve) => t === 0 || (!shortfall(t, have, region, reserve) && have.md - TIERS[t].md >= reserve + RICH * TIERS[t].md);
 
   // The next step, from state alone: no I/O, no side effects (the test seam, also what the panel shows).
   // Returns { msg, kind, reason, ... } for the first thing to send, or { wait } when there is nothing to do,
@@ -3490,8 +3652,9 @@ try {
       if (p.wait) { row.wait = p.wait; continue; }
       const have = { md: left.md, rd: left.rd, cat: left.cat[r] ?? row.catalyst };
       const setting = p.tier === 'default' ? c.tierMode : p.tier;
-      const ladder = setting === 'best' || !TIERS[setting - 1] ? [2, 1, 0] : [setting - 1];
-      const tier = ladder.find((t) => !shortfall(t, have, r, c.mdReserve));
+      const best = setting === 'best' || !TIERS[setting - 1];
+      const ladder = best ? [2, 1, 0] : [setting - 1];
+      const tier = ladder.find((t) => !shortfall(t, have, r, c.mdReserve) && (!best || richOk(t, have, r, c.mdReserve)));
       if (tier === undefined) { row.wait = shortfall(ladder[ladder.length - 1], have, r, c.mdReserve); continue; }
       const k = TIERS[tier], pct = successPct(tier, p.focus, bonus);
       const label = `${pname(ix, p.product)} · ${focusName(p.focus)} · Tier ${k.name}`;
@@ -3559,9 +3722,9 @@ try {
   // Sleep that stop() (or unload) ends at once.
   let kick = null;
   const nap = (ms) => new Promise((res) => {
-    const t = setTimeout(done, ms);
-    function done() { clearTimeout(t); if (kick === done) kick = null; res(); }
+    function done() { if (kick === done) kick = null; res(); }
     kick = done;
+    sleep(ms).then(done);   // core.sleep: socket messages end it on time in a hidden tab
   });
   // Sends a command; returns the mutation-Diff count at send time.
   function send(msg) {
@@ -3683,7 +3846,7 @@ try {
     cool.clear(); sess.started = sess.claimed = 0;
     save();
     console.log(`[labRunner] start (${cfg.dryRun ? 'DRY RUN: start({ dryRun: false }) to send' : 'LIVE'})`);
-    core.ledger.add(TAG, 'info', `started (${cfg.dryRun ? 'dry run' : 'live'}): ${cfg.mode === 'list' ? 'custom list' : cfg.mode === 'modules' ? 'module fabrication' : 'process study'}, ${cfg.tierMode === 'best' ? 'best affordable tier' : 'Tier ' + TIERS[cfg.tierMode - 1].name}, keeps ${fmt(cfg.mdReserve)} MD`);
+    core.ledger.add(TAG, 'info', `started (${cfg.dryRun ? 'dry run' : 'live'}): ${cfg.mode === 'list' ? 'custom list' : cfg.mode === 'modules' ? 'module fabrication' : 'process study'}, ${cfg.tierMode === 'best' ? 'best value tier' : 'Tier ' + TIERS[cfg.tierMode - 1].name}, keeps ${fmt(cfg.mdReserve)} MD`);
     loop();
     render();
   }
@@ -3788,9 +3951,9 @@ try {
     { id: 'list', label: 'Custom list', desc: 'Your own list, in order, round and round. Entries that are not Lab products are skipped.' },
   ];
   const MODE_OPTS = MODES.map((m) => (m.id === 'modules' ? { ...m, full: 'Module fabrication' } : m));
-  const TIER_OPTS = [{ id: 'best', label: 'Best', full: 'Best affordable' }, { id: 1, label: 'I', full: 'Tier I' }, { id: 2, label: 'II', full: 'Tier II' }, { id: 3, label: 'III', full: 'Tier III' }];
+  const TIER_OPTS = [{ id: 'best', label: 'Best', full: 'Best value' }, { id: 1, label: 'I', full: 'Tier I' }, { id: 2, label: 'II', full: 'Tier II' }, { id: 3, label: 'III', full: 'Tier III' }];
   const TIER_DESC = {
-    best: 'Best affordable: Tier III with 100,000 MD and a Catalyst in that region, else II (10,000 MD + 5 RD), else I (1,000 MD). The reserve stays untouched.',
+    best: 'Best value: Tier I (1,000 MD), which gives the most results per MD. Tier II (10,000 MD + 5 RD) or III (100,000 MD + a Catalyst in that region) only when the MD left above the reserve after paying is at least 10 times its cost. The reserve stays untouched.',
     1: 'Tier I only (1,000 MD). Waits when it can\'t pay; never moves to another tier.',
     2: 'Tier II only (10,000 MD + 5 RD). Waits when it can\'t pay; never moves to another tier.',
     3: 'Tier III only (100,000 MD + a Catalyst in that region). Waits when it can\'t pay; never moves to another tier.',
@@ -3837,7 +4000,7 @@ try {
     const r = read();
     if (!r || cfg.list.length >= LIST_MAX) return;
     const ix = index(r.catalog);
-    const made = [...produced(r.st, ix)].map((id) => ix.products.get(id));
+    const made = [...produced(r.st, ix).keys()].map((id) => ix.products.get(id));
     const best = (made.length ? made : [...ix.products.values()]).sort((a, b) => b.base_value - a.base_value || a.id - b.id)[0];
     if (!best) return;
     refs.focusRow = [cfg.list.length, 'del'];
@@ -3918,6 +4081,7 @@ try {
       parse: (t) => parseField('mdReserve', t), format: (v) => fmt(v), get: () => cfg.mdReserve, set: (v) => setCfg('mdReserve', v), def: DEFAULTS.mdReserve, redraw: render,
     });
     refs.autoClaim = K.toggleField('Claim finished results', 'Claims the oldest waiting result first, one per check.', { get: () => cfg.autoClaim, set: (v) => setCfg('autoClaim', v), def: DEFAULTS.autoClaim });
+    refs.keepLive = K.toggleField('Stay Live after a reload', 'A Live run that is still going when the page reloads starts Live again (the same checks as Start live). Off: it stays stopped.', { get: () => cfg.keepLive, set: (v) => setCfg('keepLive', v), def: DEFAULTS.keepLive });
     refs.list = h('div', { class: 'idc-group' });
     refs.addBtn = h('button', { type: 'button', onclick: addEntry }, 'Add entry');
     refs.listNote = h('div', { class: 'idc-desc' });
@@ -3926,7 +4090,7 @@ try {
     const settings = K.settingsTab({
       lockText: 'Stop the live run to change settings.',
       tail: [K.group('Experimental', refs.dryRunSwitch.el)],
-      groups: [K.group('Research', refs.mode.el, refs.tier.el), refs.listBox, K.group('Spending', refs.reserve.el), K.group('Automation', refs.autoClaim.el)],
+      groups: [K.group('Research', refs.mode.el, refs.tier.el), refs.listBox, K.group('Spending', refs.reserve.el), K.group('Automation', refs.autoClaim.el, refs.keepLive.el)],
       backup: { onExport: () => core.exportFile(), onImport: () => core.importFile(), onReset: () => K.resetSettings('Lab', { snapshot: exportCfg, reset: resetCfg, restore: importCfg }) },
     });
     refs.settings = settings;
@@ -3964,7 +4128,7 @@ try {
 
     // Which settings differ from the defaults: a reset button on each field, a dot on the tab.
     let changed = 0;
-    for (const m of [refs.mode.sync(), refs.tier.sync(), refs.reserve.sync(), refs.autoClaim.sync()]) if (m) changed++;
+    for (const m of [refs.mode.sync(), refs.tier.sync(), refs.reserve.sync(), refs.autoClaim.sync(), refs.keepLive.sync()]) if (m) changed++;
     P.setTabBadge('settings', changed ? changed + ' setting' + (changed > 1 ? 's' : '') + ' changed from the defaults' : '');
 
     // Footer
@@ -4067,6 +4231,7 @@ try {
     }
     if (unloaded) return;
     mountUi();
+    if (cfg.keepLive && saved.live === true && !running) start({ dryRun: false });   // start() still refuses Live when the game data changed
     console.log('[labRunner] ready (dry run by default). Open "Lab" in the sidebar, or labRunner.status() / labRunner.start()');
   })();
 })();
@@ -4087,11 +4252,13 @@ try {
 //
 // Rules a job follows (autoSell._decide is the pure version of them, used by the tests):
 //   - hire must be null, as the game's Sell dialog sends it: the server silently ignores hire:false
-//   - one FillDeal per courier run: min(stock above "keep", one free courier load, what is left to sell, the lot)
+//   - one FillDeal per courier run: min(stock above "keep", one free courier load, what is left to sell, the lot). "keep" is at
+//     least what Autopilot / Core plan reserve of that item (core.reserves); the courier load counts capacity upgrades
+//   - when several jobs can ship, the one whose run is worth most goes first (unit price x units that run would carry)
 //   - nothing is sent while the courier is busy, the stock is short, or the game's own auto-ship runs on that bid
 //   - the job ends when the target is reached, or after 24 h with no bid that qualifies. When its bid is gone (filled,
-//     withdrawn, expired) it moves to the best open bid for the same item in the same region (highest unit price, never
-//     below the item's est. cost per unit, not one another job holds); with none it waits. A bid board that is not
+//     withdrawn, expired) it moves to the best open bid for the same item in the same region (most money per courier run, never
+//     below the item's est. cost per unit or 90% of the bid you picked, not one another job holds); with none it waits. A bid board that is not
 //     loaded (Market page not open) never ends a job, it only waits
 //   - every send must be confirmed by the server (next_shipment_id goes up); 5 unconfirmed sends in a row pause the job
 // Profit: every job shows an estimated profit (what it makes if it runs to its target or until the bid is used up) and the
@@ -4115,7 +4282,6 @@ try {
   const sleep = core.sleep;
 
   // ---- game facts ------------------------------------------------------------------------------
-  const COURIER_CU = 10000;                 // free courier allowance per run (upgrades are ignored: shipping less is safe)
   const REGION_NAMES = ['Heartland', 'Industrial Basin', 'Coastal Cities', 'Frontier'];
   const regionName = (r) => REGION_NAMES[r] ?? 'Region ' + r;
   const MAX_FAILS = 5;
@@ -4129,7 +4295,11 @@ try {
     if (catalog !== catRef) { catRef = catalog; itemMap = new Map((catalog?.items ?? []).map((i) => [i.id, i])); }
     return itemMap.get(id);
   }
-  const loadOf = (it) => Math.floor(COURIER_CU / Math.max(1, it?.cargo_weight || 1));
+  // One free courier run, with the capacity upgrades in st.courier_levels.
+  const loadOf = (it, st) => Math.floor((core.courierCU?.(st) ?? 10000) / Math.max(1, it?.cargo_weight || 1));
+  // What one courier run on a bid is worth (cents), the way jobs and replacement bids are ranked: a cheaper bid with a big lot
+  // can beat a dearer one that takes only a few units.
+  const runValue = (d, job, r) => (d.price / d.amount) * Math.min(loadOf(itemOf(r.catalog, d.item), r.st), d.amount, job.left ?? Infinity);
 
   // Estimated cost of one unit, in cents: the inputs of the recipe that makes it, at catalog base value (the cheapest recipe
   // when several make it). A recipe with several outputs shares its inputs by the outputs' base value. Raw materials have no
@@ -4223,18 +4393,21 @@ try {
       for (const d of r.deals) {
         if (d.side !== 'Sell' || d.item !== job.item || d.region !== job.region || r.taken?.has(d.id) || r.st.standing_fills?.[d.id]) continue;
         if (!(d.amount > 0) || (tick && d.expires_at && d.expires_at <= tick) || d.price / d.amount < floor) continue;
-        if (!best || d.price / d.amount > best.price / best.amount) best = d;
+        const v = runValue(d, job, r), bv = best && runValue(best, job, r);
+        if (!best || v > bv || (v === bv && d.price / d.amount > best.price / best.amount)) best = d;
       }
       return best ? { kind: 'switch', deal: best } : noBid('waiting for a ' + name + ' bid at ≥ ' + usd(floor) + ' in ' + regionName(job.region));
     }
     if (r.st.standing_fills?.[job.deal]) return { kind: 'wait', why: "the game's own auto-ship is running on this bid" };
     const it = itemOf(r.catalog, deal.item);
-    const load = loadOf(it);
+    const load = loadOf(it, r.st);
     const stock = r.st.stock?.[deal.region]?.[deal.item] ?? 0;
-    const spare = Math.floor(stock - job.keep);
+    // r.reserved: core.reserves.merged().items (cycle() reads it): what Autopilot / Core plan keep of each item is never sold.
+    const keep = Math.max(job.keep, Number(r.reserved?.[deal.item]) || 0);
+    const spare = Math.floor(stock - keep);
     const want = Math.min(load, job.left ?? Infinity, deal.amount);
     const n = Math.min(want, spare);
-    if (n < 1) return { kind: 'wait', why: 'waiting for ' + (it?.name ?? 'stock') + (job.keep ? ' above ' + num(job.keep) : '') + ' in stock', tone: 'muted' };
+    if (n < 1) return { kind: 'wait', why: 'waiting for ' + (it?.name ?? 'stock') + (keep ? ' above ' + num(keep) + (keep > job.keep ? ' (reserved)' : '') : '') + ' in stock', tone: 'muted' };
     if (job.fullLoads && n < want) return { kind: 'wait', why: 'waiting for a full load (' + num(n) + ' of ' + num(want) + ')', tone: 'muted' };
     const ready = r.st.courier_ready_at ?? 0;
     if (tick && tick < ready) return { kind: 'wait', why: 'courier ready in ' + Math.max(1, Math.ceil((ready - tick) / 2)) + ' s', tone: 'good' };
@@ -4307,8 +4480,13 @@ try {
     const r = read();
     if (!r) { for (const j of jobs.values()) { j.status = 'Waiting for the game'; j.tone = 'muted'; } return; }
     r.now = Date.now();
-    // Least recently served first, so jobs share the courier.
-    const order = [...jobs.values()].sort((a, z) => a.last - z.last || z.unit - a.unit);
+    r.reserved = core.reserves?.merged?.()?.items ?? {};
+    // The run worth most goes first (unit price x what one run carries); equal runs: least recently served, so they share the courier.
+    const runOf = (j) => {
+      const d = Array.isArray(r.deals) ? r.deals.find((x) => x.id === j.deal) : null;
+      return d?.side === 'Sell' && d.amount > 0 ? runValue(d, j, r) : 0;
+    };
+    const order = [...jobs.values()].map((j) => [j, runOf(j)]).sort((a, z) => z[1] - a[1] || a[0].last - z[0].last).map(([j]) => j);
     let sent = false;
     for (const job of order) {
       if (unloaded || !jobs.has(job.deal)) continue;
@@ -4497,7 +4675,7 @@ try {
     const unit = live ? live.price / live.amount : job.unit;
     const it = itemOf(r?.catalog, item);
     const name = it?.name ?? 'item ' + item;
-    const load = loadOf(it);
+    const load = loadOf(it, r?.st);
     const cpu = unitCost(r?.catalog, item);
 
     const total = h('input', { type: 'number', inputMode: 'numeric', min: '1', max: String(lot), value: String(job?.left ?? lot), 'aria-label': 'Total to sell' });
@@ -4580,14 +4758,13 @@ try {
     mounted = true;
     styleEl = h('style', { id: 'as-style' }, CSS);
     document.head.append(styleEl);
-    obs = new MutationObserver(renderAll);
-    obs.observe(document.body, { childList: true, subtree: true });
+    obs = core.ui.onDom(renderAll);
     tickTimer = setInterval(inject, 1000);
     inject();
   }
   function unmountUi() {
     mounted = false;
-    obs?.disconnect(); obs = null;
+    obs?.(); obs = null;
     clearInterval(tickTimer); clearTimeout(passTimer);
     closeMenu(false);
     styleEl?.remove(); panelEl?.remove(); styleEl = panelEl = null;
@@ -4628,11 +4805,13 @@ try {
 //   autoUtil.cfg                                                 // timings; autoUtil.conf: spare per utility, hold minutes
 //
 // What it follows (the game's own page shows the same numbers, except that bought contracts count their capacity less any shortfall; autoUtil._measure is the pure version, used by the tests):
-//   need = load (running groups' building draw + recipe draw) + power sold on contracts (the promised amount) + what stalled groups wait for
-//          - self-generated (generators, at the day/night rate) - storage that can discharge - bought on contracts
+//   need = load (running groups' building draw + recipe draw) + power sold on contracts (the promised amount) + lines out + what stalled
+//          groups wait for - self-generated (generators, at the day/night rate) - storage that can discharge (at most stored / ticks to
+//          the bill it pays for) - bought on contracts - lines in (transmission lines, power)
 //   The subscription is set to ceil(need) plus the spare you set (default 0), at most 200 MW / 500 kL, one region at a time.
 // Money rules, from how the game bills (power $10 per MW, water $4 per kL, every 10 minutes):
-//   - raising charges the extra level for the current period up front; lowering refunds nothing. So a raise is made at once,
+//   - raising charges the extra level for the current period up front; lowering refunds nothing. So a raise is made at once (one that
+//     only stalled groups need waits out the last 60 ticks before a bill, which would charge it again),
 //     but a lower only when the highest need of the last "hold" minutes (default 10) is below the level, and only in the minute
 //     before a bill, so the level never drops and has to be bought again inside one period. It never lowers the first hold minutes.
 //   - cash must cover the raise now AND the next bill, which is for the higher level (every subscription is billed together): a raise
@@ -4657,7 +4836,8 @@ try {
   const h = core.h;
 
   // ---- game facts (from the game's own bundle) -----------------------------------------------------------------
-  // rate: cents per unit per 10-minute bill; tile: the label of the tile the switch sits on.
+  // rate: cents per unit per 10-minute bill (power: times core.powerPriceMult() during an 'NPC power xN' event); tile: the label of
+  // the tile the switch sits on. max: the client's own caps (constants in its bundle, not in the game state).
   const UTILS = {
     power: { unit: 'MW', rate: 1000, max: 200, tile: 'Load', noun: 'grid service' },
     water: { unit: 'kL', rate: 400, max: 500, tile: 'Supply', noun: 'waterworks' },
@@ -4668,7 +4848,7 @@ try {
   const BILL_TICKS = 1200;                                   // a bill every 10 minutes at 2 ticks a second
   const INTANGIBLE = new Set([0, 24, 25, 26, 106, 107, 108, 109, 110, 111]);   // items held in st.items, not in stock
   const MAX_FAILS = 3;
-  const cfg = { cycleMs: 2000, confirmMs: 10000, backoffMs: 5000, lowerWindowTicks: 120 };   // timings; the tests shorten them
+  const cfg = { cycleMs: 2000, confirmMs: 10000, backoffMs: 5000, lowerWindowTicks: 120, raiseHoldTicks: 60 };   // timings; the tests shorten them. raiseHoldTicks: a raise only stalled groups need waits for the bill this close to it
   const conf = { power: { on: false, spare: 0 }, water: { on: false, spare: 0 }, holdMin: 10 };
   const REGION_NAMES = ['Heartland', 'Industrial Basin', 'Coastal Cities', 'Frontier'];
   const regionName = (r) => REGION_NAMES[r] ?? 'Region ' + r;
@@ -4696,11 +4876,15 @@ try {
   // ---- reading the game ----------------------------------------------------------------------------------------------
   let lastContracts = null;    // contracts are a prop of the page router: unreadable while a Corporation profile is open, so keep the last look
   function read(fresh = false) {
-    const { ws, st, catalog, contracts } = core.walk(fresh);
+    const { ws, st, catalog, contracts, engine } = core.walk(fresh);
     if (!st || !catalog) return null;
     core.seeTick(st.ssi?.last_user_mutation_tick);
     if (Array.isArray(contracts)) lastContracts = contracts;
-    return { st, catalog, contracts: lastContracts, ws, wsOpen: ws?.readyState === 1, tick: core.nowTick(), mutTick: st.ssi?.last_user_mutation_tick ?? 0 };
+    const tick = core.nowTick();
+    // Transmission lines: the client asks its engine for the flows (lineFlows, a BigInt tick) only when the state has lines.
+    let flows = [];
+    try { if ((st.lines ?? []).length && tick > 0 && typeof engine?.lineFlows === 'function') flows = JSON.parse(engine.lineFlows(BigInt(tick))) ?? []; } catch { flows = []; }
+    return { st, catalog, contracts: lastContracts, flows, ws, wsOpen: ws?.readyState === 1, tick, mutTick: st.ssi?.last_user_mutation_tick ?? 0, priceMult: core.powerPriceMult?.() ?? 1 };
   }
 
   const ixRef = new WeakMap();
@@ -4714,7 +4898,8 @@ try {
   // ---- what is needed (pure: no I/O) -----------------------------------------------------------------------------------
   // The page's numbers for one utility in one region. Returns what the groups draw, what is generated, stored or bought, what
   // stalled groups wait for, and need: the subscription that covers all of it (can be negative: the Corporation has a surplus).
-  function measure(util, region, st, catalog, tick, contracts) {
+  // flows: the engine's line flows [{ from, to, sent, delivered }] (power only): Lines in add supply, Lines out count as load, as on the page.
+  function measure(util, region, st, catalog, tick, contracts, flows = []) {
     const R = String(region), ix = idx(catalog);
     const have = st.subscriptions?.[R]?.[util] ?? 0;
     const groups = Object.values(st.groups ?? {}).filter((g) => (g.region ?? 0) === region);
@@ -4734,7 +4919,13 @@ try {
     const owned = (id) => (st.building_pool?.[R]?.[id] ?? 0) + groups.filter((g) => g.building === id).reduce((a, g) => a + g.count, 0);
     let dischargeCap = 0;
     for (const b of catalog.buildings ?? []) { const s = b.storage?.[util]; if (s) dischargeCap += (s.discharge_limit ?? 0) * owned(b.id); }
-    const discharge = Math.min(dischargeCap, st.stored?.[R]?.[util] ?? 0);
+    // Stored is in MW-ticks (7,200 = 1 MWh): count only the rate it can keep up until the next bill, so a Battery Bank that would run
+    // dry mid-period does not cut the subscription. Right after a bill that is stored / 1,200, and the hold window keeps that sample.
+    const stored = st.stored?.[R]?.[util] ?? 0, toBill = tick > 0 ? BILL_TICKS - (tick % BILL_TICKS) : 0;
+    const discharge = Math.min(dischargeCap, stored, toBill ? stored / toBill : stored);
+    const lines = util === 'power' && Array.isArray(flows) ? flows : [];
+    const lineIn = lines.filter((f) => f.to === region).reduce((a, f) => a + (Number(f.delivered) || 0), 0);
+    const lineOut = lines.filter((f) => f.from === region && f.delivered > 0).reduce((a, f) => a + (Number(f.sent) || 0), 0);
     const corp = st.ssi?.corp_id;
     const deal = (who, field) => (contracts ?? []).filter((c) => c.utility === util && c.region === region && c.state === 'Active' && c[who] === corp).reduce((a, c) => a + (c[field] ?? 0), 0);
     // A bought contract counts its whole capacity, less the part of what the buyer draws (up to the contract) that the seller is not
@@ -4744,7 +4935,7 @@ try {
     const imported = bought.reduce((a, c) => a + (c.amount ?? 0) - short(c), 0), sold = deal('seller', 'amount');
     // A group that could start but whose draw is more than the free capacity is stalled; it starts once that much more is free.
     // A group with no machines yet (equipped 0) cannot start whatever the power: the game calls it "unequipped", not stalled.
-    const free = Math.max(0, have + gen + discharge + imported - load - sold);
+    const free = Math.max(0, have + gen + discharge + imported + lineIn - load - sold - lineOut);
     let waiting = 0;
     for (const g of groups) {
       if (g.paused || g.equipped === 0 || (g.work ?? []).length) continue;
@@ -4754,7 +4945,7 @@ try {
       if (!rc || !(rc.inputs ?? []).every((i) => stockOf(i.item) >= i.amount)) continue;
       waiting += draw;
     }
-    return { util, region, have, load, sold, gen, discharge, imported, waiting, need: load + sold + waiting - gen - discharge - imported };
+    return { util, region, have, load, sold, gen, discharge, imported, lineIn, lineOut, waiting, need: load + sold + lineOut + waiting - gen - discharge - imported - lineIn };
   }
 
   // The level that covers a measurement: ceil(need) plus the spare (only when something needs it), over the cap flagged.
@@ -4765,16 +4956,21 @@ try {
   }
 
   // What the game bills at the next bill, all subscriptions together (cents).
-  function billsOf(st) {
+  // mult: the NPC power price multiplier (never below 1 here, so a misread can only make it more careful).
+  function billsOf(st, mult = 1) {
     let t = (st.isp ?? 0) * RATES.bandwidth;
-    for (const o of Object.values(st.subscriptions ?? {})) for (const [k, l] of Object.entries(o ?? {})) t += (l ?? 0) * (RATES[k] ?? 0);
+    for (const o of Object.values(st.subscriptions ?? {})) for (const [k, l] of Object.entries(o ?? {})) t += (l ?? 0) * (RATES[k] ?? 0) * (k === 'power' ? Math.max(1, mult) : 1);
     return t;
   }
 
   // What to do about one level. peak: the highest want over the hold window; observedMs: how long it has been watched;
   // ticksToBill: ticks until the next bill (null: unknown); bills: what that bill is now. Returns { kind: 'ok' | 'raise' | 'lower' | 'hold' | 'broke', ... }.
-  function decide({ util, have, want, peak, observedMs, holdMs, money, bills = 0, ticksToBill, canLower = true, lowerWindowTicks = cfg.lowerWindowTicks }) {
-    const rate = UTILS[util].rate;
+  // urgent: the want without what stalled groups wait for (null: all of it is urgent). mult: the NPC power price multiplier.
+  function decide({ util, have, want, peak, observedMs, holdMs, money, bills = 0, ticksToBill, canLower = true, lowerWindowTicks = cfg.lowerWindowTicks, urgent = null, mult = 1, raiseHoldTicks = cfg.raiseHoldTicks }) {
+    const rate = UTILS[util].rate * (util === 'power' ? Math.max(1, mult) : 1);
+    // A raise is charged up front for the period and the bill charges the level again: one only stalled groups need waits out the
+    // last raiseHoldTicks before the bill instead of paying twice for a few seconds.
+    if (want > have && urgent != null && urgent <= have && ticksToBill != null && ticksToBill < raiseHoldTicks) return { kind: 'hold', why: 'raising for stalled groups after the bill' };
     if (want > have) {
       // Each extra unit costs its rate now and again in the next bill: cash left after the bill as it is must pay both.
       const afford = have + Math.floor(Math.max(0, money - bills) / (2 * rate));
@@ -4794,7 +4990,7 @@ try {
   // ---- the engine --------------------------------------------------------------------------------------------------------
   const ctl = new Map();                 // util:region -> { samples: [{t, want}], first, fails, retryAt }
   const info = { power: [], water: [] }; // the last look, for the page
-  let loopTimer = 0, busy = false;
+  let loopTimer = null, busy = false;
   const anyOn = () => NAMES.some((u) => conf[u].on);
   const unit = (u) => UTILS[u].unit;
 
@@ -4846,15 +5042,17 @@ try {
     const key = util + ':' + region, u = UTILS[util];
     let c = ctl.get(key);
     if (!c) ctl.set(key, c = { samples: [], first: now, fails: 0, retryAt: 0 });
-    const m = measure(util, region, r.st, r.catalog, r.tick, r.contracts);
+    const m = measure(util, region, r.st, r.catalog, r.tick, r.contracts, r.flows);
     const { want, over } = wantOf(m, conf[util].spare);
+    const urgent = wantOf({ ...m, need: m.need - m.waiting }, conf[util].spare).want;
+    const mult = util === 'power' ? Math.max(1, r.priceMult ?? 1) : 1;
     const holdMs = conf.holdMin * 60000;
     c.samples.push({ t: now, want });
     while (c.samples.length > 1 && c.samples[0].t < now - holdMs) c.samples.shift();
     const peak = Math.max(...c.samples.map((s) => s.want));
-    const money = r.st.items?.[0] ?? 0, bills = billsOf(r.st);
+    const money = r.st.items?.[0] ?? 0, bills = billsOf(r.st, r.priceMult ?? 1);
     const ticksToBill = r.tick > 0 ? BILL_TICKS - (r.tick % BILL_TICKS) : null;
-    const d = decide({ util, have: m.have, want, peak, observedMs: now - c.first, holdMs, money, bills, ticksToBill, canLower: Array.isArray(r.contracts) });
+    const d = decide({ util, have: m.have, want, peak, observedMs: now - c.first, holdMs, money, bills, ticksToBill, canLower: Array.isArray(r.contracts), urgent, mult });
     const where = regionName(region);
     const row = { region, util, have: m.have, need: m.need, want, kind: d.kind };
     if (d.kind === 'raise' || d.kind === 'lower') {
@@ -4881,15 +5079,15 @@ try {
     }
     c.fails = 0; c.retryAt = 0;                                   // nothing to send: earlier failures are not "in a row" any more
     const lowNote = m.need < 0 ? ' (surplus ' + Math.round(-m.need) + ')' : '';
-    if (d.kind === 'broke') return { ...row, text: 'Needs ' + want + ' ' + unit(util) + ' but cash cannot cover the upfront ' + usd((want - m.have) * u.rate) + ' and the next bill', tone: 'warn' };
+    if (d.kind === 'broke') return { ...row, text: 'Needs ' + want + ' ' + unit(util) + ' but cash cannot cover the upfront ' + usd((want - m.have) * u.rate * mult) + ' and the next bill' + (mult > 1 ? ' (NPC power x' + mult + ')' : ''), tone: 'warn' };
     if (over) return { ...row, text: 'Needs ' + Math.ceil(over) + ' ' + unit(util) + ', the cap is ' + u.max, tone: 'warn' };
     if (d.kind === 'hold') return { ...row, text: 'Holding ' + m.have + ' ' + unit(util) + ': ' + d.why, tone: 'muted' };
     return { ...row, text: 'Following the load: ' + m.have + ' ' + unit(util) + ' for ' + Math.max(0, Math.ceil(m.need)) + ' needed' + lowNote, tone: 'muted' };
   }
 
   function ensureLoop() {
-    if (anyOn() && !loopTimer && !unloaded) { loopTimer = setInterval(step, cfg.cycleMs); }
-    else if (!anyOn() && loopTimer) { clearInterval(loopTimer); loopTimer = 0; }
+    if (anyOn() && !loopTimer && !unloaded) { loopTimer = core.every(cfg.cycleMs, step); }
+    else if (!anyOn() && loopTimer) { loopTimer(); loopTimer = null; }
   }
 
   function set(util, on) {
@@ -4953,14 +5151,13 @@ try {
     mounted = true;
     styleEl = h('style', { id: 'au-style' }, CSS);
     document.head.append(styleEl);
-    obs = new MutationObserver(renderAll);
-    obs.observe(document.body, { childList: true, subtree: true });
+    obs = core.ui.onDom(renderAll);
     tickTimer = setInterval(inject, 1000);
     inject();
   }
   function unmountUi() {
     mounted = false;
-    obs?.disconnect(); obs = null;
+    obs?.(); obs = null;
     clearInterval(tickTimer); clearTimeout(passTimer);
     styleEl?.remove(); styleEl = null;
     document.querySelectorAll('[data-au],[data-au-note]').forEach((e) => e.remove());
@@ -4974,7 +5171,7 @@ try {
     exportCfg: () => ({ cfg: persistable() }),
     importCfg(o) { const r = apply(o?.cfg ?? o); save(); ensureLoop(); renderAll(); return r; },
     _measure: measure, _want: wantOf, _decide: decide, _step: step, _info: info,
-    _unload() { unloaded = true; clearInterval(loopTimer); loopTimer = 0; if (mounted) unmountUi(); },
+    _unload() { unloaded = true; loopTimer?.(); loopTimer = null; if (mounted) unmountUi(); },
   };
 
   restore();
@@ -5469,7 +5666,7 @@ try {
   }
 
   const ledgerNote = (kind, text) => core.ledger.add(TAG, kind, text);
-  let running = false, stepping = false, loopTimer = 0, last = null, fails = 0, lastSig = '', lastWait = '', lastWouldAt = {}, stopReason = '';
+  let running = false, stepping = false, loopTimer = null, last = null, fails = 0, lastSig = '', lastWait = '', lastWouldAt = {}, stopReason = '';
   const holds = new Set();
 
   async function sendStep(st) {
@@ -5566,11 +5763,11 @@ try {
   }
   function stop() {
     if (!running) return status();
-    running = false; clearInterval(loopTimer); loopTimer = 0; clearLive(); dropLock(); cancelResume();
+    running = false; loopTimer?.(); loopTimer = null; clearLive(); dropLock(); cancelResume();
     ledgerNote('info', 'stopped');
     return status();
   }
-  function ensureLoop() { if (!loopTimer) loopTimer = setInterval(() => { step(); }, cfg.intervalMs); }
+  function ensureLoop() { if (!loopTimer) loopTimer = core.every(cfg.intervalMs, () => { step(); }); }
   async function hold(who) { holds.add(who); while (stepping) await core.sleep(25); }
   function release(who) { holds.delete(who); }
 
@@ -5651,7 +5848,7 @@ try {
     exportCfg() { return { cfg: Object.fromEntries(Object.entries(cfg).filter(([k]) => !SESSION_ONLY.includes(k))) }; },
     resetCfg() { Object.assign(cfg, DEFAULTS); save(); },
     _ifNeed: ifNeed, _view: view, _decide: decide, _step: step, _names: names, _startConditions: startConditions, _endConditions: endConditions, _nextUnlock: nextUnlock, _trackCash: trackCash, _cashTrend60: cashTrend60, _setPacer(p) { pacer = p; },
-    _unload() { unloaded = true; running = false; clearInterval(loopTimer); cancelResume(); loopTimer = 0; core.reserves?.unregister('corePlan'); dropLock(); removeEventListener?.('pagehide', dropLock); },
+    _unload() { unloaded = true; running = false; loopTimer?.(); cancelResume(); loopTimer = null; core.reserves?.unregister('corePlan'); dropLock(); removeEventListener?.('pagehide', dropLock); },
   };
 
   restore();
@@ -8759,6 +8956,7 @@ try {
     try {
       const out = s.engine.evaluateLayout(r, JSON.stringify(cells));
       const rate = (typeof out === 'string' ? JSON.parse(out) : out)?.fx?.rate ?? null;
+      if (scoreCache.size >= 20000) scoreCache.clear();   // bounded: a long session scores many distinct layouts
       scoreCache.set(k, rate);
       return rate;
     } catch { scorerBroken = true; return null; }

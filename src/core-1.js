@@ -11,7 +11,19 @@ try {
   const HAS_DOM = typeof document !== 'undefined' && !!document.body;
   if (W.idleCore?._unload) W.idleCore._unload();
   const store = (() => { try { return W.localStorage ?? null; } catch { return null; } })();
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  // Chrome may run timers in a tab hidden 5+ minutes only once a minute, but socket messages (2 ticks/s) still
+  // arrive, so every message also fires the timers that are due. after() is setTimeout with that rescue.
+  const due = new Set();
+  function after(ms, fn) {
+    const d = { at: Date.now() + ms, fn: () => { clearTimeout(t); due.delete(d); fn(); } };
+    const t = setTimeout(d.fn, ms);
+    due.add(d);
+    return () => { clearTimeout(t); due.delete(d); };
+  }
+  function runDue() { const now = Date.now(); for (const d of due) if (now >= d.at) { try { d.fn(); } catch (e) { console.error('[idleCore]', e); } } }
+  const sleep = (ms) => new Promise((r) => after(ms, r));
+  // setInterval with the same rescue; returns a stop function.
+  function every(ms, fn) { let stop = null; const run = () => { stop = after(ms, run); fn(); }; stop = after(ms, run); return () => stop(); }
   let unloaded = false;
 
   // ---- game state: one walk of the React fiber tree --------------------------
@@ -69,6 +81,7 @@ try {
   const wakers = new Set();
   function seeTick(t) { if (typeof t === 'number' && t > sock.tick) { sock.tick = t; sock.tickAt = Date.now(); } }
   function onMessage(e) {
+    runDue();
     if (typeof e.data !== 'string') return;
     sock.textMsgs++;
     try {
@@ -149,8 +162,8 @@ try {
   // Sleep that ends early when the server applies a player command (yours, or one you click yourself).
   function sleepWake(ms) {
     return new Promise((res) => {
-      const done = () => { clearTimeout(t); wakers.delete(done); res(); };
-      const t = setTimeout(done, ms);
+      const done = () => { cancel(); wakers.delete(done); res(); };
+      const cancel = after(ms, done);
       wakers.add(done);
     });
   }

@@ -232,17 +232,26 @@ body:has(>.idc-docked:not(.idc-ghost)) .idc-toasts{right:calc(var(--idc-dock,360
 
   // Panel shell: sticky header (drag, close; double-click minimizes), tabs, scrolling body, sticky footer ----------
   const livePanels = new Set();
+  // One page observer for every module (dock, chrome, Auto ship, Auto utilities): each subtree observer gets its own
+  // copy of every mutation record, and the game re-renders numbers on every tick. Subscribers run at most once a frame.
+  const domSubs = new Set();
+  let domObs = null, domQueued = false;
+  function onDom(fn) {
+    domSubs.add(fn);
+    if (!domObs) {
+      domObs = new MutationObserver(() => {
+        if (domQueued) return;
+        domQueued = true;
+        requestAnimationFrame(() => { domQueued = false; for (const f of [...domSubs]) { try { f(); } catch (e) { console.error('[idleCore]', e); } } });
+      });
+      domObs.observe(document.body, { childList: true, subtree: true });
+    }
+    return () => { domSubs.delete(fn); if (!domSubs.size) { domObs?.disconnect(); domObs = null; } };
+  }
   // React can drop or bring back the game's layout: re-place the panels whose docked state no longer matches it.
-  let dockObs = null;
+  let dockOff = null;
   function watchDock() {
-    if (dockObs) return;
-    let queued = false;
-    dockObs = new MutationObserver(() => {
-      if (queued) return;
-      queued = true;
-      requestAnimationFrame(() => { queued = false; const can = !!document.querySelector('.shell'); for (const p of livePanels) if (!p.state.min && p.el.classList.contains('idc-docked') !== can) p.place(); });
-    });
-    dockObs.observe(document.getElementById('root') || document.body, { childList: true, subtree: true });
+    dockOff ||= onDom(() => { const can = !!document.querySelector('.shell'); for (const p of livePanels) if (!p.state.min && p.el.classList.contains('idc-docked') !== can) p.place(); });
   }
   const motionOK = () => HAS_DOM && matchMedia('(prefers-reduced-motion: no-preference)').matches;
   const EASE = 'cubic-bezier(.2,.8,.2,1)';
@@ -403,11 +412,9 @@ body:has(>.idc-docked:not(.idc-ghost)) .idc-toasts{right:calc(var(--idc-dock,360
       get opener() { return chipEl?.isConnected ? chipEl : navEl; },
       mount() {
         dead = false; ensureStyle(); ensure();
-        let queued = false;
-        observer = new MutationObserver(() => { if (queued) return; queued = true; requestAnimationFrame(() => { queued = false; ensure(); }); });
-        observer.observe(document.getElementById('root') || document.body, { childList: true, subtree: true });
+        observer?.(); observer = onDom(ensure);
       },
-      unmount() { dead = true; observer?.disconnect(); observer = null; navEl?.remove(); chipEl?.remove(); navEl = chipEl = pillEl = chipDot = chipText = null; },
+      unmount() { dead = true; observer?.(); observer = null; navEl?.remove(); chipEl?.remove(); navEl = chipEl = pillEl = chipDot = chipText = null; },
       setPill(text, tone, hidden) { view.pill = { text, tone, hidden }; paint(); },
       setChip(text, tone, title) { view.chip = { text, tone, title }; paint(); },
       setOpen(b) { view.open = !!b; paint(); },

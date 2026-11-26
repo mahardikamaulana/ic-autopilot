@@ -23,9 +23,9 @@
     { id: 'list', label: 'Custom list', desc: 'Your own list, in order, round and round. Entries that are not Lab products are skipped.' },
   ];
   const MODE_OPTS = MODES.map((m) => (m.id === 'modules' ? { ...m, full: 'Module fabrication' } : m));
-  const TIER_OPTS = [{ id: 'best', label: 'Best', full: 'Best affordable' }, { id: 1, label: 'I', full: 'Tier I' }, { id: 2, label: 'II', full: 'Tier II' }, { id: 3, label: 'III', full: 'Tier III' }];
+  const TIER_OPTS = [{ id: 'best', label: 'Best', full: 'Best value' }, { id: 1, label: 'I', full: 'Tier I' }, { id: 2, label: 'II', full: 'Tier II' }, { id: 3, label: 'III', full: 'Tier III' }];
   const TIER_DESC = {
-    best: 'Best affordable: Tier III with 100,000 MD and a Catalyst in that region, else II (10,000 MD + 5 RD), else I (1,000 MD). The reserve stays untouched.',
+    best: 'Best value: Tier I (1,000 MD), which gives the most results per MD. Tier II (10,000 MD + 5 RD) or III (100,000 MD + a Catalyst in that region) only when the MD left above the reserve after paying is at least 10 times its cost. The reserve stays untouched.',
     1: 'Tier I only (1,000 MD). Waits when it can\'t pay; never moves to another tier.',
     2: 'Tier II only (10,000 MD + 5 RD). Waits when it can\'t pay; never moves to another tier.',
     3: 'Tier III only (100,000 MD + a Catalyst in that region). Waits when it can\'t pay; never moves to another tier.',
@@ -72,7 +72,7 @@
     const r = read();
     if (!r || cfg.list.length >= LIST_MAX) return;
     const ix = index(r.catalog);
-    const made = [...produced(r.st, ix)].map((id) => ix.products.get(id));
+    const made = [...produced(r.st, ix).keys()].map((id) => ix.products.get(id));
     const best = (made.length ? made : [...ix.products.values()]).sort((a, b) => b.base_value - a.base_value || a.id - b.id)[0];
     if (!best) return;
     refs.focusRow = [cfg.list.length, 'del'];
@@ -153,6 +153,7 @@
       parse: (t) => parseField('mdReserve', t), format: (v) => fmt(v), get: () => cfg.mdReserve, set: (v) => setCfg('mdReserve', v), def: DEFAULTS.mdReserve, redraw: render,
     });
     refs.autoClaim = K.toggleField('Claim finished results', 'Claims the oldest waiting result first, one per check.', { get: () => cfg.autoClaim, set: (v) => setCfg('autoClaim', v), def: DEFAULTS.autoClaim });
+    refs.keepLive = K.toggleField('Stay Live after a reload', 'A Live run that is still going when the page reloads starts Live again (the same checks as Start live). Off: it stays stopped.', { get: () => cfg.keepLive, set: (v) => setCfg('keepLive', v), def: DEFAULTS.keepLive });
     refs.list = h('div', { class: 'idc-group' });
     refs.addBtn = h('button', { type: 'button', onclick: addEntry }, 'Add entry');
     refs.listNote = h('div', { class: 'idc-desc' });
@@ -161,7 +162,7 @@
     const settings = K.settingsTab({
       lockText: 'Stop the live run to change settings.',
       tail: [K.group('Experimental', refs.dryRunSwitch.el)],
-      groups: [K.group('Research', refs.mode.el, refs.tier.el), refs.listBox, K.group('Spending', refs.reserve.el), K.group('Automation', refs.autoClaim.el)],
+      groups: [K.group('Research', refs.mode.el, refs.tier.el), refs.listBox, K.group('Spending', refs.reserve.el), K.group('Automation', refs.autoClaim.el, refs.keepLive.el)],
       backup: { onExport: () => core.exportFile(), onImport: () => core.importFile(), onReset: () => K.resetSettings('Lab', { snapshot: exportCfg, reset: resetCfg, restore: importCfg }) },
     });
     refs.settings = settings;
@@ -199,7 +200,7 @@
 
     // Which settings differ from the defaults: a reset button on each field, a dot on the tab.
     let changed = 0;
-    for (const m of [refs.mode.sync(), refs.tier.sync(), refs.reserve.sync(), refs.autoClaim.sync()]) if (m) changed++;
+    for (const m of [refs.mode.sync(), refs.tier.sync(), refs.reserve.sync(), refs.autoClaim.sync(), refs.keepLive.sync()]) if (m) changed++;
     P.setTabBadge('settings', changed ? changed + ' setting' + (changed > 1 ? 's' : '') + ' changed from the defaults' : '');
 
     // Footer

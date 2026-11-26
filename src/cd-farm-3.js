@@ -31,14 +31,16 @@
     if (!r) return console.error('[cdFarm] game state not found');
     const miss = core.missingFields(core.walk(true).st, ['groups', 'items']);
     if (miss.length) return console.error('[cdFarm] the game state no longer has ' + miss.join(', ') + ': refusing to run (did the game update?)');
-    if (rest.building != null && rest.building !== 'auto' && !BUILDINGS.some((b) => b.id === rest.building)) {
-      return console.error(`[cdFarm] building must be 'auto' or one of: ${BUILDINGS.map((b) => `${b.id} (${b.name})`).join(', ')}`);
+    if (rest.building != null && !isBuilding(rest.building)) {
+      return console.error(`[cdFarm] building must be 'auto', 'cheapest' or one of: ${BUILDINGS.map((b) => `${b.id} (${b.name})`).join(', ')}`);
     }
+    if (rest.region != null && rest.region !== 'auto' && ![0, 1, 2, 3].includes(rest.region)) return console.error("[cdFarm] region must be 'auto' or 0-3");
     // runOnly: these settings are for this run only; yours come back when it stops.
     if (runOnly && !restoreCfg) restoreCfg = { ...cfg };
     // cycles and maxSpend apply to one run only; other settings are remembered.
     if (!resume) { cfg.cycles = Infinity; cfg.maxSpend = Infinity; }
     Object.assign(cfg, rest);
+    const scaleFloor = !('minMoney' in rest) && cfg.minMoney === DEFAULTS.minMoney;   // a floor passed in (Autopilot's booster) is never scaled
 
     active = true;
     running = true; stopReason = '';
@@ -57,8 +59,10 @@
           await reconcile();
           r = mustRead();
         }
+        // Fix the building ('cheapest' resolves to one type now) and the region for the whole run, before resetting stats.
+        const building = cfg.building === 'cheapest' ? cheaperId() : cfg.building, reg = pickRegionNow();
         stats = freshStats();
-        stats.building = cfg.building;
+        stats.building = building; stats.region = reg; stats.scaleFloor = scaleFloor;
         r = mustRead(); // re-read: the pool count must be for the building this run uses
         Object.assign(stats, { cdStart: r.cd, moneyStart: r.money, startedAt: Date.now(), baselinePool: r.unassignedCamps, by: by || '' });
         stats.baseline = { ...(readPool()?.pool ?? {}) }; strikes = 0; recovering = 0; dryCycles = 0; waitSince = 0;

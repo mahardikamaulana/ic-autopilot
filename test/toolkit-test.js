@@ -210,6 +210,41 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     }
   });
 
+  await t('sleep / sleepWake / every: a socket message fires timers that are due (hidden-tab throttling)', async () => {
+    fresh();
+    class FakeWS { constructor() { this.readyState = 1; this.listeners = []; } addEventListener(_t, f) { this.listeners.push(f); } removeEventListener() {} }
+    globalThis.WebSocket = FakeWS;
+    const ws = new FakeWS();
+    const st = { groups: {}, stock: {}, ssi: {}, items: {} };
+    const fiber = { memoizedState: { memoizedState: { current: ws }, next: { memoizedState: st, next: null } }, memoizedProps: null, child: null, sibling: null };
+    globalThis.document = { body: {}, getElementById: (id) => (id === 'root' ? { __reactContainer$x: fiber } : null), title: 'x' };
+    // Hold back long timers the way a hidden tab does: anything over 1 s never fires on its own here.
+    const realST = globalThis.setTimeout;
+    globalThis.setTimeout = (fn, ms, ...a) => realST(fn, ms > 1000 ? 1e9 : ms, ...a);
+    (0, eval)(coreSrc);
+    const core = globalThis.idleCore;
+    try {
+      core.walk(true);
+      const msg = () => ws.listeners.forEach((f) => f({ data: '{"kind":"Diff","tick":1}' }));
+      let slept = false, woke = false, runs = 0;
+      core.sleep(1200).then(() => { slept = true; });
+      core.sleepWake(1200).then(() => { woke = true; });
+      const stop = core.every(1200, () => { runs++; });
+      msg(); await sleep(0);
+      assert.ok(!slept && !woke && runs === 0, 'nothing fires before it is due');
+      await new Promise((r) => realST(r, 1250)); msg(); await sleep(0);
+      assert.ok(slept && woke, 'sleep and sleepWake end on the first message after they are due');
+      assert.strictEqual(runs, 1, 'every() runs once');
+      msg(); assert.strictEqual(runs, 1, 'and is not due again right away');
+      stop(); await new Promise((r) => realST(r, 1250)); msg();
+      assert.strictEqual(runs, 1, 'a stopped every() never runs');
+    } finally {
+      globalThis.setTimeout = realST;
+      core._unload(); globalThis.idleCore = undefined;
+      delete globalThis.document; delete globalThis.WebSocket;
+    }
+  });
+
   await t('order book: off the Goods tab Autopilot waits (posts nothing) until a full-region board filter is answered, even by a book of only your own order; it releases only its own filter', async () => {
     fresh();
     class FakeWS { constructor() { this.readyState = 1; this.sent = []; this.ls = []; } addEventListener(_t, f) { this.ls.push(f); } removeEventListener() {} send(m) { this.sent.push(JSON.parse(m)); } emit(m) { for (const f of this.ls) f({ data: JSON.stringify(m) }); } }
@@ -462,10 +497,13 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
   const D = (lab, st, over = {}, mem = { counts: {}, next: 0 }) => lab._decide(st, board.catalog, { mode: 'process', tierMode: 'best', mdReserve: 5000, autoClaim: true, list: [], ...over }, mem);
   const startMsg = (product, context, tier, region) => ({ type: 'StartResearch', product, context, tier, region });
 
-  await t('Lab runner: picks the highest-value product the groups make, focus 0, at the best tier it can pay for', () => {
+  await t('Lab runner: picks the highest-value product the groups make, focus 0, at the best-value tier', () => {
     const { lab } = loadBoth();
     assert.strictEqual(lab.cfg.dryRun, true, 'dry run is the default');
     const st = labState();    // makes Planks, Iron Sheet, Wooden Frame, Iron Frame (and Wood, which is no product); 200,000 MD, 20 RD, a Catalyst in Heartland
+    // 'best' = value per MD: Tier III only with 10x its cost spare above the reserve (1,105,000), Tier II likewise (115,000)
+    assert.deepStrictEqual(D(lab, st).msg, startMsg(IRON_FRAME, 0, 1, 0), '200,000 MD is not enough surplus for Tier III');
+    st.items[25] = 1105000;
     assert.deepStrictEqual(D(lab, st).msg, startMsg(IRON_FRAME, 0, 2, 0));
     st.stock[0][63] = 0;      // no Catalyst: Tier III is out
     assert.deepStrictEqual(D(lab, st).msg, startMsg(IRON_FRAME, 0, 1, 0));
@@ -480,14 +518,17 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     assert.strictEqual(D(lab, none, { mode: 'modules' }).msg.product, itemId('Smart Frame'));
   });
 
-  await t('Lab runner: Process study rotates to the product started least, the dearest first on a tie', () => {
+  await t('Lab runner: Process study picks the most output value per project hour, each project started on a product dividing its score', () => {
     const { lab } = loadBoth();
     const st = labState(), mem = { counts: {}, next: 0 }, order = [];
     for (let i = 0; i < 5; i++) {
       const p = D(lab, st, {}, mem).msg.product;
       order.push(p); mem.counts[p] = (mem.counts[p] ?? 0) + 1;
     }
-    assert.deepStrictEqual(order, [IRON_FRAME, WOODEN_FRAME, IRON_SHEET, PLANKS, IRON_FRAME]);
+    // per tick at base value: Iron Frame 154,000/1,800 = 85.6, Wooden Frame 31.7, Iron Sheet 15.3, Planks 11.7; all 1 h projects
+    assert.deepStrictEqual(order, [IRON_FRAME, IRON_FRAME, WOODEN_FRAME, IRON_FRAME, IRON_FRAME]);
+    st.groups[4].paused = true;   // the Iron Frame group: a paused group's product is not studied
+    assert.strictEqual(D(lab, st).msg.product, WOODEN_FRAME);
   });
 
   await t('Lab runner: never spends into the MD reserve', () => {
@@ -499,14 +540,18 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     assert.match(d.wait, /MD 5,999 < 1,000 \+ reserve 5,000/);
     st.items[25] = 6000;
     assert.strictEqual(D(lab, st).msg.tier, 0, 'exactly the reserve left is fine');
-    // Bigger tiers count the reserve too: Tier II costs 10,000 and keeps 5,000
+    // 'best' takes a bigger tier only with 10x its cost left above the reserve: Tier II 10,000 + 5,000 + 100,000
     const rich = labState({ catalyst: {} });
-    rich.items[25] = 14999; assert.strictEqual(D(lab, rich).msg.tier, 0);
-    rich.items[25] = 15000; assert.strictEqual(D(lab, rich).msg.tier, 1);
-    // ... and so does Tier III: 100,000 + 5,000
+    rich.items[25] = 114999; assert.strictEqual(D(lab, rich).msg.tier, 0);
+    rich.items[25] = 115000; assert.strictEqual(D(lab, rich).msg.tier, 1);
+    // ... and Tier III: 100,000 + 5,000 + 1,000,000
     const cat = labState();
-    cat.items[25] = 104999; assert.strictEqual(D(lab, cat).msg.tier, 1);
-    cat.items[25] = 105000; assert.strictEqual(D(lab, cat).msg.tier, 2);
+    cat.items[25] = 1104999; assert.strictEqual(D(lab, cat).msg.tier, 1);
+    cat.items[25] = 1105000; assert.strictEqual(D(lab, cat).msg.tier, 2);
+    // A fixed tier still counts only its cost and the reserve
+    rich.items[25] = 15000; assert.strictEqual(D(lab, rich, { tierMode: 2 }).msg.tier, 1);
+    rich.items[25] = 14999; assert.strictEqual(D(lab, rich, { tierMode: 2 }).msg, undefined);
+    rich.items[25] = 15000;
     // The reserve is a setting: 13,000 leaves room for Tier I only; 0 spends everything
     assert.strictEqual(D(lab, rich, { mdReserve: 13000 }).msg.tier, 0);
     d = D(lab, rich, { mdReserve: 14500 });
@@ -552,14 +597,18 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     assert.strictEqual(d.regions[0].wait, 'Tier III needs a Catalyst in Heartland');
     const basin = labState({ labs: { 0: 1, 1: 1 }, catalyst: { 0: 1, 1: 0 } });
     assert.strictEqual(D(lab, basin, { tierMode: 3 }).regions[1].wait, 'Tier III needs a Catalyst in Industrial Basin');
-    // Best affordable: Heartland takes Tier II, Industrial Basin Tier III (its Catalyst, and MD that is still there)
+    // Best value with 200,000 MD: Tier II in both (Tier III would need 1,105,000)
     d = D(lab, st, { tierMode: 'best' });
-    assert.deepStrictEqual(d.actions.map((a) => [a.msg.region, a.msg.tier]), [[0, 1], [1, 2]]);
-    // MD for one Tier III only: the second Lab gets nothing, however many Catalysts there are
-    const one = labState({ labs: { 0: 1, 1: 1 }, catalyst: { 0: 1, 1: 1 }, md: 105000 });
+    assert.deepStrictEqual(d.actions.map((a) => [a.msg.region, a.msg.tier]), [[0, 1], [1, 1]]);
+    // Surplus for one Tier III only: the second Lab sees what is left and drops to Tier II
+    const one = labState({ labs: { 0: 1, 1: 1 }, catalyst: { 0: 1, 1: 1 }, md: 1105000 });
     d = D(lab, one);
-    assert.deepStrictEqual(d.actions.map((a) => [a.msg.region, a.msg.tier]), [[0, 2]]);
-    assert.match(d.regions[1].wait, /MD 5,000 < 1,000 \+ reserve 5,000/);
+    assert.deepStrictEqual(d.actions.map((a) => [a.msg.region, a.msg.tier]), [[0, 2], [1, 1]]);
+    // MD for one Tier I only: the second Lab waits
+    const poor = labState({ labs: { 0: 1, 1: 1 }, md: 6500 });
+    d = D(lab, poor);
+    assert.deepStrictEqual(d.actions.map((a) => [a.msg.region, a.msg.tier]), [[0, 0]]);
+    assert.match(d.regions[1].wait, /MD 5,500 < 1,000 \+ reserve 5,000/);
   });
 
   await t('Lab runner: a fixed tier that cannot be paid waits instead of falling back', () => {
@@ -731,14 +780,14 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       lab.start();
       await until(() => arrived.length >= 3);
       await sleep(120);     // anything more would show up
-      assert.deepStrictEqual(arrived.map((x) => x.msg), [{ type: 'ClaimResearch', tick: 40 }, startMsg(IRON_FRAME, 0, 2, 0), startMsg(WOODEN_FRAME, 0, 1, 1)]);
+      assert.deepStrictEqual(arrived.map((x) => x.msg), [{ type: 'ClaimResearch', tick: 40 }, startMsg(IRON_FRAME, 0, 1, 0), startMsg(IRON_FRAME, 0, 1, 1)]);
       assert.deepStrictEqual(arrived.map((x) => [x.pending, x.running]), [[1, 0], [0, 0], [0, 1]], 'claim applied before the first start, first start before the second');
       const lines = core.ledger.list().filter((e) => e.mod === 'LAB' && e.kind === 'action').map((e) => e.text);
       assert.strictEqual(lines.length, 3, lines.join(' | '));
       assert.match(lines[0], /^claimed Planks · Process study · Tier I: a Planks process$/);
-      assert.match(lines[1], /^started Iron Frame · Process study · Tier III in Heartland \(51% success\)$/);
-      assert.match(lines[2], /^started Wooden Frame · Process study · Tier II in Industrial Basin/);
-      assert.deepStrictEqual(lab.mem.counts, { [IRON_FRAME]: 1, [WOODEN_FRAME]: 1 });
+      assert.match(lines[1], /^started Iron Frame · Process study · Tier II in Heartland \(71% success\)$/);
+      assert.match(lines[2], /^started Iron Frame · Process study · Tier II in Industrial Basin/);
+      assert.deepStrictEqual(lab.mem.counts, { [IRON_FRAME]: 2 });
       // Both slots busy: it only watches.
       await sleep(120);
       assert.strictEqual(arrived.length, 3);
@@ -794,7 +843,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       const fails = core.ledger.list().filter((e) => e.mod === 'LAB' && e.kind === 'fail').map((e) => e.text);
       assert.strictEqual(fails.length, 2, fails.join(' | '));
       assert.match(fails[0], /^not confirmed: claim Planks · Process study · Tier I; trying again in 30 s$/);
-      assert.match(fails[1], /^not confirmed: start Iron Frame · Process study · Tier III in Heartland/);
+      assert.match(fails[1], /^not confirmed: start Iron Frame · Process study · Tier II in Heartland/);
       assert.ok(lab.running, 'two misses do not stop it');
       await halt(lab);
       assert.ok(!lab.running && !lab.active);
@@ -905,6 +954,47 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       // Other regions: stock and the sent region come from the bid, not from Heartland.
       const fr = asBase({ deals: [bid(1, COTTON, 100000, 150, { region: 3 })], st: { ...asBase().st, stock: { 0: { [COTTON]: 9999 }, 3: { [COTTON]: 40 } } } });
       assert.strictEqual(d(asJob({ region: 3 }), fr).n, 40);
+    } finally { as._unload(); globalThis.autoSell = undefined; globalThis.idleCore._unload(); globalThis.idleCore = undefined; }
+  });
+
+  await t('core.courierCU / core.powerPriceMult: capacity upgrades and the NPC power event, with safe fallbacks', () => {
+    fresh(); (0, eval)(coreSrc);
+    const core = globalThis.idleCore;
+    try {
+      assert.strictEqual(core.courierCU(), 10000, 'no game state: the base allowance');
+      assert.strictEqual(core.courierCU({}), 10000);
+      assert.strictEqual(core.courierCU({ courier_levels: {} }), 10000, 'live-stageB has courier_levels {}');
+      assert.strictEqual(core.courierCU({ courier_levels: { capacity: 2 } }), 20000, '+5,000 CU per level');
+      assert.strictEqual(core.courierCU({ courier_levels: { capacity: 20 } }), 50000, 'capped at 50,000');
+      const eng = (ev) => ({ worldEventAt: () => (typeof ev === 'function' ? ev() : JSON.stringify(ev)) });
+      assert.strictEqual(core.powerPriceMult(eng({ id: 1, outage: true, percent: 50, ends_at: 900 }), 100), 1.5, 'NPC power x1.5');
+      assert.strictEqual(core.powerPriceMult(eng({ id: 2, outage: false, percent: 20, region: 0, items: [1] }), 100), 1, 'a demand event is not a power price');
+      assert.strictEqual(core.powerPriceMult(eng(null), 100), 1, 'no event');
+      assert.strictEqual(core.powerPriceMult(eng(() => { throw new Error('wasm'); }), 100), 1, 'engine error');
+      assert.strictEqual(core.powerPriceMult(eng({ outage: true, percent: 50 }), 0), 1, 'tick unknown');
+      assert.strictEqual(core.powerPriceMult(), 1, 'no engine on the page');
+    } finally { core._unload(); globalThis.idleCore = undefined; }
+  });
+
+  await t('Auto ship: replacement bids rank by money per courier run, the load counts courier upgrades, and keep is at least what Autopilot reserves', () => {
+    fresh(); (0, eval)(coreSrc + '\n' + asSrc);
+    const as = globalThis.autoSell, d = as._decide;
+    try {
+      // Bid 1 is gone. Bid 2 pays more per unit but wants 10; bid 3 pays 150 for a full run: bid 3 is worth more per run.
+      const gone = asBase({ deals: [bid(2, COTTON, 10, 200), bid(3, COTTON, 100000, 150)] });
+      assert.deepStrictEqual([d(asJob(), gone).kind, d(asJob(), gone).deal.id], ['switch', 3]);
+      // With 10 left to sell, both runs carry 10: the dearer bid wins.
+      assert.strictEqual(d(asJob({ left: 10 }), gone).deal.id, 2);
+      // The 90% floor still holds: a big lot below 90% of the first bid is never taken.
+      const low = asBase({ deals: [bid(2, COTTON, 10, 200), bid(3, COTTON, 100000, 130)] });
+      assert.strictEqual(d(asJob(), low).deal.id, 2);
+      // Courier capacity level 2: twice the free load.
+      assert.strictEqual(d(asJob(), asBase({ st: { ...asBase().st, courier_levels: { capacity: 2 } } })).n, 2 * cottonLoad);
+      // Reserves: Autopilot keeps 4,800 Cotton, the job's own keep is 0.
+      assert.strictEqual(d(asJob(), asBase({ reserved: { [COTTON]: 4800 } })).n, 200, 'stock above the reserve only');
+      assert.match(d(asJob(), asBase({ reserved: { [COTTON]: 5000 } })).why, /above 5,000 \(reserved\)/);
+      assert.strictEqual(d(asJob({ keep: 4900 }), asBase({ reserved: { [COTTON]: 4800 } })).n, 100, 'the higher of the two');
+      assert.strictEqual(d(asJob(), asBase({ reserved: { [COTTON]: Infinity } })).kind, 'wait', 'an item reserved whole is never sold');
     } finally { as._unload(); globalThis.autoSell = undefined; globalThis.idleCore._unload(); globalThis.idleCore = undefined; }
   });
 
@@ -1338,10 +1428,14 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       assert.strictEqual(m('power', st, 25000).gen, Math.floor(72 * 25 / 100), 'night: 25%');
       assert.strictEqual(m('power', st, 28800 + 100).gen, 72, 'next day');
       delete st.groups[6];
-      st.building_pool = { 0: { [BATTERY]: 2 } }; st.stored = { 0: { power: 1000 } };
+      st.building_pool = { 0: { [BATTERY]: 2 } }; st.stored = { 0: { power: 100000 } };
       assert.strictEqual(m().discharge, 2 * 18, 'two Battery Banks can discharge 18 MW each');
+      st.stored = { 0: { power: 11000 } };
+      assert.strictEqual(m('power', st, 100).discharge, 10, 'only what lasts to the bill: 11,000 MW-ticks / 1,100 ticks');
+      assert.strictEqual(m('power', st, 0).discharge, 36, 'tick unknown: the old rule (discharge limit, held)');
+      st.stored = { 0: { power: 1000 } };
       st.stored = { 0: { power: 5 } };
-      assert.strictEqual(m().discharge, 5, 'never more than is held');
+      assert.strictEqual(m('power', st, 0).discharge, 5, 'never more than is held');
       st.building_pool = { 0: {} };
       const deals = [
         { utility: 'power', region: 0, state: 'Active', seller: 1, buyer: 9, amount: 8, delivered: 3 },
@@ -1518,6 +1612,30 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       assert.strictEqual(sent.length - before, 3, 'three tries, then it stops asking');
       assert.strictEqual(ut2.conf.power.on, false, 'switched off');
       assert.ok(core.ledger.list().some((e) => e.kind === 'fail' && /switched off/.test(e.text)));
+    } finally { unloadUt(); }
+  });
+
+  await t('Auto utilities: lines in/out, a raise only stalled groups need waits for the bill, NPC power price raises the cost', () => {
+    const { ut } = loadUt();
+    try {
+      const cat = board.catalog, chair = recOf(WORKSHOP).id;
+      const st = baseState();
+      st.subscriptions = { 0: { power: 0 } };
+      st.groups = { 1: run(WORKSHOP, 4, chair) };
+      const flows = [{ from: 1, to: 0, sent: 12, delivered: 10 }];
+      const m0 = ut._measure('power', 0, st, cat, 100, [], flows), m1 = ut._measure('power', 1, st, cat, 100, [], flows);
+      assert.deepStrictEqual([m0.lineIn, m0.need], [10, 4 - 10], 'Heartland: 10 MW arrive down the line');
+      assert.deepStrictEqual([m1.lineOut, m1.need], [12, 12], 'the sender counts what it sends, losses included');
+      assert.strictEqual(ut._measure('water', 0, st, cat, 100, [], flows).lineIn, 0, 'lines carry power only');
+      const d = (o) => ut._decide({ util: 'power', have: 5, want: 8, peak: 8, observedMs: 3600000, holdMs: 600000, money: 1e7, ticksToBill: 30, ...o });
+      assert.strictEqual(d({ urgent: 5 }).kind, 'hold', 'only stalled groups need it, 30 ticks before the bill');
+      assert.match(d({ urgent: 5 }).why, /after the bill/);
+      assert.strictEqual(d({ urgent: 8 }).kind, 'raise', 'running groups need it: at once');
+      assert.strictEqual(d({ urgent: 5, ticksToBill: 60 }).kind, 'raise', 'far enough from the bill');
+      assert.strictEqual(d({}).kind, 'raise', 'urgent unknown: at once');
+      assert.deepStrictEqual(d({ urgent: 8, money: 6000 }), { kind: 'raise', level: 8, partial: false }, '3 MW at $10 twice = $60');
+      assert.deepStrictEqual(d({ urgent: 8, money: 6000, mult: 2 }), { kind: 'raise', level: 6, partial: true }, 'NPC power x2: $60 pays 1 MW');
+      assert.deepStrictEqual(d({ urgent: 8, money: 6000, mult: 0.5 }), { kind: 'raise', level: 8, partial: false }, 'a cheaper price is never counted');
     } finally { unloadUt(); }
   });
 

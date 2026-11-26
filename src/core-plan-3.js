@@ -42,7 +42,7 @@
   }
 
   const ledgerNote = (kind, text) => core.ledger.add(TAG, kind, text);
-  let running = false, stepping = false, loopTimer = 0, last = null, fails = 0, lastSig = '', lastWait = '', lastWouldAt = {}, stopReason = '';
+  let running = false, stepping = false, loopTimer = null, last = null, fails = 0, lastSig = '', lastWait = '', lastWouldAt = {}, stopReason = '';
   const holds = new Set();
 
   async function sendStep(st) {

@@ -142,7 +142,7 @@
     const unit = live ? live.price / live.amount : job.unit;
     const it = itemOf(r?.catalog, item);
     const name = it?.name ?? 'item ' + item;
-    const load = loadOf(it);
+    const load = loadOf(it, r?.st);
     const cpu = unitCost(r?.catalog, item);
 
     const total = h('input', { type: 'number', inputMode: 'numeric', min: '1', max: String(lot), value: String(job?.left ?? lot), 'aria-label': 'Total to sell' });
@@ -225,14 +225,13 @@
     mounted = true;
     styleEl = h('style', { id: 'as-style' }, CSS);
     document.head.append(styleEl);
-    obs = new MutationObserver(renderAll);
-    obs.observe(document.body, { childList: true, subtree: true });
+    obs = core.ui.onDom(renderAll);
     tickTimer = setInterval(inject, 1000);
     inject();
   }
   function unmountUi() {
     mounted = false;
-    obs?.disconnect(); obs = null;
+    obs?.(); obs = null;
     clearInterval(tickTimer); clearTimeout(passTimer);
     closeMenu(false);
     styleEl?.remove(); panelEl?.remove(); styleEl = panelEl = null;

@@ -12,11 +12,13 @@
 //
 // Rules a job follows (autoSell._decide is the pure version of them, used by the tests):
 //   - hire must be null, as the game's Sell dialog sends it: the server silently ignores hire:false
-//   - one FillDeal per courier run: min(stock above "keep", one free courier load, what is left to sell, the lot)
+//   - one FillDeal per courier run: min(stock above "keep", one free courier load, what is left to sell, the lot). "keep" is at
+//     least what Autopilot / Core plan reserve of that item (core.reserves); the courier load counts capacity upgrades
+//   - when several jobs can ship, the one whose run is worth most goes first (unit price x units that run would carry)
 //   - nothing is sent while the courier is busy, the stock is short, or the game's own auto-ship runs on that bid
 //   - the job ends when the target is reached, or after 24 h with no bid that qualifies. When its bid is gone (filled,
-//     withdrawn, expired) it moves to the best open bid for the same item in the same region (highest unit price, never
-//     below the item's est. cost per unit, not one another job holds); with none it waits. A bid board that is not
+//     withdrawn, expired) it moves to the best open bid for the same item in the same region (most money per courier run, never
+//     below the item's est. cost per unit or 90% of the bid you picked, not one another job holds); with none it waits. A bid board that is not
 //     loaded (Market page not open) never ends a job, it only waits
 //   - every send must be confirmed by the server (next_shipment_id goes up); 5 unconfirmed sends in a row pause the job
 // Profit: every job shows an estimated profit (what it makes if it runs to its target or until the bid is used up) and the
@@ -40,7 +42,6 @@ try {
   const sleep = core.sleep;
 
   // ---- game facts ------------------------------------------------------------------------------
-  const COURIER_CU = 10000;                 // free courier allowance per run (upgrades are ignored: shipping less is safe)
   const REGION_NAMES = ['Heartland', 'Industrial Basin', 'Coastal Cities', 'Frontier'];
   const regionName = (r) => REGION_NAMES[r] ?? 'Region ' + r;
   const MAX_FAILS = 5;
@@ -54,7 +55,11 @@ try {
     if (catalog !== catRef) { catRef = catalog; itemMap = new Map((catalog?.items ?? []).map((i) => [i.id, i])); }
     return itemMap.get(id);
   }
-  const loadOf = (it) => Math.floor(COURIER_CU / Math.max(1, it?.cargo_weight || 1));
+  // One free courier run, with the capacity upgrades in st.courier_levels.
+  const loadOf = (it, st) => Math.floor((core.courierCU?.(st) ?? 10000) / Math.max(1, it?.cargo_weight || 1));
+  // What one courier run on a bid is worth (cents), the way jobs and replacement bids are ranked: a cheaper bid with a big lot
+  // can beat a dearer one that takes only a few units.
+  const runValue = (d, job, r) => (d.price / d.amount) * Math.min(loadOf(itemOf(r.catalog, d.item), r.st), d.amount, job.left ?? Infinity);
 
   // Estimated cost of one unit, in cents: the inputs of the recipe that makes it, at catalog base value (the cheapest recipe
   // when several make it). A recipe with several outputs shares its inputs by the outputs' base value. Raw materials have no
@@ -148,18 +153,21 @@ try {
       for (const d of r.deals) {
         if (d.side !== 'Sell' || d.item !== job.item || d.region !== job.region || r.taken?.has(d.id) || r.st.standing_fills?.[d.id]) continue;
         if (!(d.amount > 0) || (tick && d.expires_at && d.expires_at <= tick) || d.price / d.amount < floor) continue;
-        if (!best || d.price / d.amount > best.price / best.amount) best = d;
+        const v = runValue(d, job, r), bv = best && runValue(best, job, r);
+        if (!best || v > bv || (v === bv && d.price / d.amount > best.price / best.amount)) best = d;
       }
       return best ? { kind: 'switch', deal: best } : noBid('waiting for a ' + name + ' bid at ≥ ' + usd(floor) + ' in ' + regionName(job.region));
     }
     if (r.st.standing_fills?.[job.deal]) return { kind: 'wait', why: "the game's own auto-ship is running on this bid" };
     const it = itemOf(r.catalog, deal.item);
-    const load = loadOf(it);
+    const load = loadOf(it, r.st);
     const stock = r.st.stock?.[deal.region]?.[deal.item] ?? 0;
-    const spare = Math.floor(stock - job.keep);
+    // r.reserved: core.reserves.merged().items (cycle() reads it): what Autopilot / Core plan keep of each item is never sold.
+    const keep = Math.max(job.keep, Number(r.reserved?.[deal.item]) || 0);
+    const spare = Math.floor(stock - keep);
     const want = Math.min(load, job.left ?? Infinity, deal.amount);
     const n = Math.min(want, spare);
-    if (n < 1) return { kind: 'wait', why: 'waiting for ' + (it?.name ?? 'stock') + (job.keep ? ' above ' + num(job.keep) : '') + ' in stock', tone: 'muted' };
+    if (n < 1) return { kind: 'wait', why: 'waiting for ' + (it?.name ?? 'stock') + (keep ? ' above ' + num(keep) + (keep > job.keep ? ' (reserved)' : '') : '') + ' in stock', tone: 'muted' };
     if (job.fullLoads && n < want) return { kind: 'wait', why: 'waiting for a full load (' + num(n) + ' of ' + num(want) + ')', tone: 'muted' };
     const ready = r.st.courier_ready_at ?? 0;
     if (tick && tick < ready) return { kind: 'wait', why: 'courier ready in ' + Math.max(1, Math.ceil((ready - tick) / 2)) + ' s', tone: 'good' };
@@ -232,8 +240,13 @@ try {
     const r = read();
     if (!r) { for (const j of jobs.values()) { j.status = 'Waiting for the game'; j.tone = 'muted'; } return; }
     r.now = Date.now();
-    // Least recently served first, so jobs share the courier.
-    const order = [...jobs.values()].sort((a, z) => a.last - z.last || z.unit - a.unit);
+    r.reserved = core.reserves?.merged?.()?.items ?? {};
+    // The run worth most goes first (unit price x what one run carries); equal runs: least recently served, so they share the courier.
+    const runOf = (j) => {
+      const d = Array.isArray(r.deals) ? r.deals.find((x) => x.id === j.deal) : null;
+      return d?.side === 'Sell' && d.amount > 0 ? runValue(d, j, r) : 0;
+    };
+    const order = [...jobs.values()].map((j) => [j, runOf(j)]).sort((a, z) => z[1] - a[1] || a[0].last - z[0].last).map(([j]) => j);
     let sent = false;
     for (const job of order) {
       if (unloaded || !jobs.has(job.deal)) continue;
