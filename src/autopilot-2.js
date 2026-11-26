@@ -23,14 +23,25 @@
   // Everything decide() needs, from raw game state. Pure: also used by the offline simulator.
   function snapshot(st, rawCatalog, tickNow) {
     const catalog = normalize(rawCatalog);
+    resolveIds(catalog);
     const bld = (b) => catalog.buildings[b] ?? { name: `building ${b}`, cost: 0, acres: 1, build_items: [] };
     const recipe = (r) => catalog.recipes[r];
+    const allGroups = Object.values(st.groups ?? {});
     const groups = Object.entries(st.groups ?? {}).map(([id, g]) => ({ id: +id, ...g }))
       .filter((g) => (g.region ?? REGION) === REGION);
     const pool = st.building_pool?.[REGION] ?? {};
     const stock = st.stock?.[REGION] ?? {};
+    // Build / demolish queues (st.construction, patch 2026-11-24): every queued build and demolition, all regions, counts in
+    // the price, and this region's queued ones hold their acres. Without the planner (offline sim) the queues are not counted.
+    const q = (st.construction && core.planner?.queued?.({ st, catalog, region: REGION })) || { owned: {}, acres: 0 };
+    const queuedHere = {};
+    for (const x of st.construction?.builds ?? []) if ((x.region ?? REGION) === REGION) queuedHere[x.building] = (queuedHere[x.building] ?? 0) + x.count;
 
-    const owned = (b) => groups.filter((g) => g.building === b).reduce((a, g) => a + g.count, 0) + (pool[b] ?? 0);
+    // This region's buildings, counting queued builds (so a busy build queue is neither bought twice nor a failed build).
+    const owned = (b) => groups.filter((g) => g.building === b).reduce((a, g) => a + g.count, 0) + (pool[b] ?? 0) + (queuedHere[b] ?? 0);
+    // What the game prices the next one by: all regions, plus queued builds and demolitions (wiki formulas.md, Building cost).
+    const ownedAll = (b) => allGroups.filter((g) => g.building === b).reduce((a, g) => a + g.count, 0)
+      + Object.values(st.building_pool ?? {}).reduce((a, p) => a + (p?.[b] ?? 0), 0) + (q.owned[b] ?? 0);
     const equipped = (b) => groups.filter((g) => g.building === b).reduce((a, g) => a + (g.equipped ?? 0), 0);
     const running = (b, r) => groups.filter((g) => g.building === b && g.recipe === r).reduce((a, g) => a + g.count, 0);
     const runningEquipped = (b, r) => groups.filter((g) => g.building === b && g.recipe === r && !g.paused)
@@ -38,6 +49,7 @@
     let acresUsed = 0;
     for (const g of groups) acresUsed += bld(g.building).acres * g.count;
     for (const [b, n] of Object.entries(pool)) acresUsed += bld(+b).acres * n;
+    acresUsed += q.acres;
     const landBought = st.land_bought?.[REGION] ?? 0;
     const drawOf = (b) => bld(b).draws?.power ?? 0;
     const powerNeed = groups.filter((g) => !g.paused).reduce((a, g) => a + drawOf(g.building) * g.count, 0);
@@ -56,7 +68,7 @@
     const items = st.items ?? {};
     return {
       st, catalog, bld, recipe, groups, pool, stock, items, inbound, atExchange, autoDeliver, kitFor, landBought, acresUsed,
-      owned, equipped, running, runningEquipped, drawOf, powerNeed, powerHave, tickNow,
+      owned, ownedAll, equipped, running, runningEquipped, drawOf, powerNeed, powerHave, tickNow,
     };
   }
 
@@ -67,7 +79,7 @@
     const owe = (list, n) => { for (const k of list) kitOwed[k.item] = (kitOwed[k.item] ?? 0) + k.amount * n; };
     for (const g of groups) if (g.count > (g.equipped ?? 0)) owe(kitFor(g.building, g.recipe), g.count - (g.equipped ?? 0));
     // Items made at home by equipped, running groups; what they eat per minute; starved groups.
-    const madeHere = new Set(), eatPerMin = {}, starved = [];
+    const madeHere = new Set(), eatPerMin = {}, makePerMin = {}, starved = [];
     for (const g of groups) {
       if (!(g.equipped > 0) || g.paused || g.recipe == null) continue;
       const r = recipe(g.recipe);
@@ -75,10 +87,11 @@
       for (const o of r.outputs) madeHere.add(o.item);
       const rate = st.layouts?.[g.recipe]?.fx?.rate ?? 1; // runs per wave from the floorplan
       for (const i of r.inputs) eatPerMin[i.item] = (eatPerMin[i.item] ?? 0) + i.amount * g.equipped * rate * 120 / r.ticks;
+      for (const o of r.outputs) makePerMin[o.item] = (makePerMin[o.item] ?? 0) + o.amount * g.equipped * rate * 120 / r.ticks;
       if ((g.work ?? []).some((w) => w.inputs_pct != null && w.inputs_pct < 100)) starved.push(g);
     }
     Object.assign(s, {
-      kitOwed, madeHere, eatPerMin, starved,
+      kitOwed, madeHere, eatPerMin, makePerMin, starved,
       money: items[MONEY] ?? 0, cd: items[CD] ?? 0,
       // Regional stock first; global items (CD, MD, Logistics Data) live in items.
       has: (item) => stock[item] ?? items[item] ?? 0,
@@ -93,6 +106,8 @@
       courierFree: (s.tickNow === 0 || s.tickNow >= (st.courier_ready_at ?? 0)) && nowMs() >= courierHoldUntil,
       research: st.research, queue: st.research_queue ?? [],
       researchIdle: !st.research && !(st.research_queue ?? []).length,
+      // Premium corps can queue unlocks (QueueTech); only when the state carries both fields, else the old one-at-a-time path.
+      canQueue: !!st.premium && Array.isArray(st.research_queue),
       nextGroupId: st.next_group_id ?? 0,
       shipId: st.next_shipment_id ?? 0, standing: st.standing_fills ?? {},
       mutTick: st.ssi?.last_user_mutation_tick ?? 0,
@@ -129,7 +144,23 @@
 
   // ---- prices -----------------------------------------------------------------
 
-  const buildCost = (s, b) => Math.round(s.bld(b).cost * (20 + s.owned(b)) / 20);
+  const buildCost = (s, b) => Math.round(s.bld(b).cost * (20 + s.ownedAll(b)) / 20);
+  // Cents per minute one more building on recipe r earns at the current floor rate: outputs at the best Heartland bid (or base
+  // value while the corp eats the item itself), less its inputs at the same values. 0 = not known (no bid, nothing eats it).
+  function unitValue(s, item) {
+    let v = 0;
+    for (const d of s.deals ?? []) if (d.side === 'Sell' && d.item === item) v = Math.max(v, d.price / d.amount);
+    return Math.max(v, s.eatPerMin[item] > 0 ? s.catalog.items[item]?.base_value ?? 0 : 0);
+  }
+  function incomePerMin(s, r) {
+    const rc = r != null && s.recipe(r);
+    if (!rc) return 0;
+    const runs = (s.st.layouts?.[r]?.fx?.rate ?? 1) * 120 / rc.ticks;
+    let v = 0;
+    for (const o of rc.outputs) v += o.amount * unitValue(s, o.item);
+    for (const i of rc.inputs) v -= i.amount * unitValue(s, i.item);
+    return Math.max(0, v * runs);
+  }
   function acrePrice(n) { let p = FIRST_ACRE; for (let i = 0; i < n; i++) p = Math.floor(p * 41 / 40); return p; }
   function landCost(s, n) { let c = 0; for (let i = 0; i < n; i++) c += acrePrice(s.landBought + i); return c; }
   // No floor before anything draws power (the plan spends down to ~$18 at the start); then
@@ -163,7 +194,7 @@
   // Techs the plan spends CD on, in order (golden rule 5). `gate` adds extra conditions.
   const techPlan = () => [
     { b: B.SAWMILL, phase: 2 },
-    { b: B.WORKSHOP, phase: 3, gate: (s) => s.has(PLANKS) >= cfg.workshopPlanks || `need ${cfg.workshopPlanks} Planks on hand` },
+    { b: B.WORKSHOP, phase: 3, gate: workshopGate },
     { b: B.MINE, phase: 4 },
     { b: B.QUARRY, phase: 4 },
     { b: B.SMELTER, phase: 4 },
@@ -174,8 +205,33 @@
     ...(cfg.dispatchOffice ? [{ b: B.DISPATCH, phase: 5, optional: true }] : []),
   ];
 
+  // Workshop unlock: 205 Planks on hand, or the prototype in stock and the build Planks (+ kit) made by the Sawmills during the research.
+  function workshopGate(s) {
+    if (s.has(PLANKS) >= cfg.workshopPlanks) return true;
+    const proto = (s.bld(B.WORKSHOP).build_items ?? []).find((i) => i.item === PLANKS)?.amount ?? 0;
+    const tech = s.catalog.techs.find((t) => t.building === B.WORKSHOP);
+    const net = (s.makePerMin[PLANKS] ?? 0) - (s.eatPerMin[PLANKS] ?? 0);
+    if (tech && proto > 0 && s.has(PLANKS) >= proto && s.has(PLANKS) - proto + net * tech.ticks / 120 >= cfg.workshopPlanks - proto) return true;
+    return `need ${cfg.workshopPlanks} Planks on hand (or ${proto} and enough Sawmill output during the research)`;
+  }
+
+  // earlyGame.offline(): for a few minutes an idle research slot starts the longest plan unlock that is ready.
+  let longUnlockUntil = 0;
+  function longestReady(s) {
+    if (!s.researchIdle) return null;
+    let best = null;
+    for (const t of techPlan()) {
+      const tech = s.catalog.techs.find((x) => x.building === t.b);
+      if (!tech || s.unlocked(t.b) || s.cd < tech.cost || (tech.requires != null && !s.unlocked(tech.requires))) continue;
+      if ((t.gate ? t.gate(s) : true) !== true || (s.bld(t.b).build_items ?? []).some((i) => s.has(i.item) < i.amount)) continue;
+      if (!best || tech.ticks > best.ticks) best = { t, ticks: tech.ticks };
+    }
+    return best?.t ?? null;
+  }
+
   function nextTech(s) {
     if (coreOwns()) return null;   // unlocks are Core plan's after the hand-off (no StartTech, prototype parts or CD need from here)
+    if (nowMs() < longUnlockUntil) { const t = longestReady(s); if (t) return t; }
     for (const t of techPlan()) {
       if (s.unlocked(t.b)) continue;
       if (s.research?.building === t.b || s.queue.some((q) => q.building === t.b)) return null; // in progress
@@ -183,6 +239,12 @@
     }
     return null;
   }
+  // Premium: the next plan unlock that is neither running nor queued (QueueTech), while the queue has room (5 incl. the running one).
+  function nextQueueable(s) {
+    if (coreOwns() || !s.canQueue || s.researchIdle || 5 - s.queue.length - (s.research ? 1 : 0) <= 0) return null;
+    return techPlan().find((t) => !s.unlocked(t.b) && s.research?.building !== t.b && !s.queue.some((q) => q.building === t.b)) ?? null;
+  }
+  const pendingTech = (s, b) => s.research?.building === b || s.queue.some((q) => q.building === b);
 
   function sawTarget(s) {
     if (!(s.unlocked(B.WORKSHOP) || s.research?.building === B.WORKSHOP)) return s.totalBuildings >= 50 ? 3 : 1;
@@ -196,16 +258,32 @@
     return Math.max(cfg.sawmills, 2 * cfg.workshops, forDemand);
   }
 
+  // Iron / Coal Mines (like sawTarget): enough for what the planned Smelters eat on Iron Sheet at the current floor rates,
+  // at least cfg.ironMines / cfg.coalMines. Iron Sheet takes 10 ore + 5 coal per 180 s, a mine 2 per 120 s / 90 s: 4 / 2 at equal rates.
+  function mineTarget(s, r) {
+    const min = r === R.MINE_IRON ? cfg.ironMines : cfg.coalMines;
+    const sheet = s.recipe(R.IRON_SHEET), mine = s.recipe(r), out = mine?.outputs?.[0];
+    const per = out && sheet?.inputs.find((i) => i.item === out.item)?.amount;
+    if (!per) return min;
+    const rate = (x) => s.st.layouts?.[x]?.fx?.rate ?? 1;
+    const smelters = Math.max(cfg.smelters, s.running(B.SMELTER, R.IRON_SHEET));
+    const eat = smelters * rate(R.IRON_SHEET) * per / sheet.ticks, make = rate(r) * out.amount / mine.ticks;
+    return Math.max(min, Math.ceil(eat / make - 1e-9));
+  }
+  // Gold Mines: cfg.goldMines, or (Infinity = auto) up to GOLD_AUTO while a plan unlock still needs CD.
+  const GOLD_AUTO = 10;
+  const goldTarget = (s) => (Number.isFinite(cfg.goldMines) ? cfg.goldMines : techPlan().some((t) => !t.optional && !s.unlocked(t.b)) ? GOLD_AUTO : 0);
   function mineRecipe(s) {
-    if (s.running(B.MINE, R.MINE_IRON) < cfg.ironMines) return R.MINE_IRON;
-    if (s.running(B.MINE, R.MINE_COAL) < cfg.coalMines) return R.MINE_COAL;
-    return R.MINE_GOLD;
+    if (s.running(B.MINE, R.MINE_IRON) < mineTarget(s, R.MINE_IRON)) return R.MINE_IRON;
+    if (s.running(B.MINE, R.MINE_COAL) < mineTarget(s, R.MINE_COAL)) return R.MINE_COAL;
+    return s.running(B.MINE, R.MINE_GOLD) < goldTarget(s) ? R.MINE_GOLD : null;   // a Mine the plan doesn't need stays in the pool
   }
   const smelting = (s) => s.runningEquipped(B.SMELTER, R.IRON_SHEET) > 0;
+  // A Workshop the plan doesn't need stays in the pool for whichever group (Core plan's) wants it.
   function workshopRecipe(s) {
     if (s.running(B.WORKSHOP, R.FRAME_TIMBER) < cfg.workshops) return R.FRAME_TIMBER;
     if (smelting(s) && s.running(B.WORKSHOP, R.RIVET) < cfg.ironFrameWorkshops) return R.RIVET;
-    return R.FRAME_TIMBER;
+    return null;
   }
   // Kilns: Autopilot keeps cfg.kilns on Concrete; any other Kiln is Core plan's and stays unassigned.
   const kilnFree = (s) => Math.max(0, cfg.kilns - s.running(B.KILN, R.MIX_CONCRETE));
@@ -223,17 +301,17 @@
     const add = (b, recipe, target, have) => { if (s.unlocked(b) && have < target) out.push({ b, recipe, target, have }); };
     add(B.SAWMILL, R.SAW_PLANKS, sawTarget(s), s.owned(B.SAWMILL));
     add(B.WORKSHOP, R.FRAME_TIMBER, cfg.workshops, s.running(B.WORKSHOP, R.FRAME_TIMBER) + workshopPool(s, R.FRAME_TIMBER));
-    add(B.MINE, R.MINE_IRON, cfg.ironMines, s.running(B.MINE, R.MINE_IRON));
-    add(B.MINE, R.MINE_COAL, cfg.coalMines, s.running(B.MINE, R.MINE_COAL));
+    add(B.MINE, R.MINE_IRON, mineTarget(s, R.MINE_IRON), s.running(B.MINE, R.MINE_IRON));
+    add(B.MINE, R.MINE_COAL, mineTarget(s, R.MINE_COAL), s.running(B.MINE, R.MINE_COAL));
     add(B.QUARRY, R.LIMESTONE, cfg.quarries, s.owned(B.QUARRY));
     add(B.SMELTER, R.IRON_SHEET, cfg.smelters, s.owned(B.SMELTER));
     add(B.KILN, R.MIX_CONCRETE, cfg.kilns, s.owned(B.KILN));
     add(B.LAB, null, cfg.labs, s.owned(B.LAB)); // no recipe: Core plan's Lab group takes it from the pool
     // Phase 5: Iron Frames once Iron Sheet is being made.
     if (smelting(s)) add(B.WORKSHOP, R.RIVET, cfg.ironFrameWorkshops, s.running(B.WORKSHOP, R.RIVET) + workshopPool(s, R.RIVET));
-    const basicsDone = s.running(B.MINE, R.MINE_IRON) >= cfg.ironMines && s.running(B.MINE, R.MINE_COAL) >= cfg.coalMines
+    const basicsDone = s.running(B.MINE, R.MINE_IRON) >= mineTarget(s, R.MINE_IRON) && s.running(B.MINE, R.MINE_COAL) >= mineTarget(s, R.MINE_COAL)
       && s.owned(B.QUARRY) >= cfg.quarries;
-    if (basicsDone) add(B.MINE, R.MINE_GOLD, cfg.goldMines, s.running(B.MINE, R.MINE_GOLD));
+    if (basicsDone) add(B.MINE, R.MINE_GOLD, goldTarget(s), s.running(B.MINE, R.MINE_GOLD));
     return out;
   }
 
@@ -271,16 +349,16 @@
         return b.operations?.includes('Extract') ? unpack(core.floorDesigns.mineX3) : b.operations?.includes('Cultivate') ? X3_MERGE(122) : null;
       },
     },
-    { name: 'Saw x2', rate: 2, recipes: [R.SAW_PLANKS], // proven max on the 6x2 Sawmill
+    { name: 'Saw x2', rate: 2, recipes: ['Saw Planks'], // proven max on the 6x2 Sawmill
       cells: '0,0:123:1 0,1:123:0 1,0:123:0 1,1:126:0 2,0:123:0 2,1:123:0 3,0:114:0 3,1:114:0 5,0:123:0 5,1:123:0' },
-    { name: 'Smelt x3', rate: 3, recipes: [R.IRON_SHEET, 10, 11], // Iron, Steel, Aluminum Sheet
+    { name: 'Smelt x3', rate: 3, recipes: ['Roll Iron Sheet', 'Roll Steel Sheet', 'Draw Copper Wire'],
       cells: core.floorDesigns.smeltX3 },
-    { name: 'Kiln x3', rate: 3, recipes: [13, 14], cells: SMELT_X3 }, // Mix Concrete, Blow Glass
-    { name: 'Frame Timber x5', rate: 5, recipes: [R.FRAME_TIMBER], cells: WORKSHOP_V1 },
+    { name: 'Kiln x3', rate: 3, recipes: ['Mix Concrete', 'Blow Glass'], cells: SMELT_X3 }, // Mix Concrete, Blow Glass
+    { name: 'Frame Timber x5', rate: 5, recipes: ['Frame Timber'], cells: WORKSHOP_V1 },
     // Scored with the game's engine on 2026-11-22: x5 on Make Bookshelf / Table / Chair. Layouts are per recipe, so each gets its own
     // EditLayout; the live scorer (engineRate) still decides, the library rate is only a fallback when no scorer is reachable.
     { name: 'Workshop v1 x5', rate: 5, fits: (s, r) => (FURNITURE_V1.has(s.recipe(r)?.name) ? unpack(WORKSHOP_V1) : null) },
-    { name: 'Rivet x3', rate: 3, recipes: [R.RIVET], cells: RIVET_X3 },
+    { name: 'Rivet x3', rate: 3, recipes: ['Rivet Iron Frame'], cells: RIVET_X3 },
     // Scored x3 on Make Bench and Make Desk (2026-11-22).
     { name: 'Rivet x3 (two inputs)', rate: 3, fits: (s, r) => (FURNITURE_RIVET.has(s.recipe(r)?.name) ? unpack(RIVET_X3) : null) },
   ];
@@ -331,7 +409,7 @@
       const cur = { name: lay ? 'current plan' : 'default plan', rate: lay?.fx?.rate ?? (lay ? engineRate(s, r, lay.cells) : null) ?? 1, key: lay ? cellsKey(lay.cells) : null };
       const cands = [];
       for (const e of FLOOR_LIBRARY) {
-        const cells = e.fits ? e.fits(s, r) : e.recipes.includes(r) ? unpack(e.cells) : null;
+        const cells = e.fits ? e.fits(s, r) : e.recipes.includes(rc.name) ? unpack(e.cells) : null;
         if (cells) cands.push({ name: e.name, cells, known: e.rate });
       }
       for (const [name, d] of Object.entries(s.st.designs?.[r] ?? {})) cands.push({ name: `saved "${name}"`, cells: d.cells, known: d.fx?.rate ?? null });
@@ -403,22 +481,18 @@
     });
   }
 
-  // Plan done = Core game plan S2–S4, wiki/guides/core-game-plan.md 1.1.
+  // Plan done (the hand-off to Core plan): every plan unlock is in and the core buildings exist, whatever route the corp took.
+  // Frame Timber / Iron Frame running and 16 Iron Frames stay plan targets, not hand-off conditions.
+  const CORE_BUILDINGS = () => [B.SAWMILL, B.WORKSHOP, B.MINE, B.QUARRY, B.KILN, B.LAB];
   function planDone(s) {
-    return techPlan().every((t) => t.optional || s.unlocked(t.b))
-      && (!s.research || s.research.building === B.DISPATCH)
-      && s.running(B.WORKSHOP, R.FRAME_TIMBER) >= 1
-      && s.running(B.WORKSHOP, R.RIVET) >= cfg.ironFrameWorkshops
-      && s.owned(B.MINE) >= 1 && s.owned(B.QUARRY) >= 1
-      && s.owned(B.KILN) >= 1 && s.owned(B.LAB) >= 1
-      && s.has(IFRAME) >= 16;
+    return techPlan().every((t) => t.optional || s.unlocked(t.b)) && CORE_BUILDINGS().every((b) => s.owned(b) >= 1);
   }
 
   function phaseOf(s) {
+    if (planDone(s)) return 'done';   // first: a late corp may have demolished its camps or never smelted
     if (s.owned(B.CAMP) + s.owned(B.FARM) < 2) return 1;
     if (!s.unlocked(B.SAWMILL) || s.owned(B.SAWMILL) < 1 || s.acresUsed < STARTER_ACRES) return 2;
     if (!s.unlocked(B.WORKSHOP)) return 3;
-    if (!smelting(s)) return 4;
-    return planDone(s) ? 'done' : 5;
+    return smelting(s) ? 5 : 4;
   }
 

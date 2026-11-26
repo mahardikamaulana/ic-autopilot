@@ -31,20 +31,20 @@
 // interrupted CD Farm run, and hands its CD booster to CD Farm.
 //
 // Phases (each step is a check on live state, so it starts wherever the corp is):
-//   1-2  Lumber Camps + Farms (Cotton), always the cheaper; part loads until 25 acres are full
+//   1-2  Lumber Camps + Farms (Cotton), whichever pays back sooner; part loads until 25 acres are full
 //   2    Sawmill unlock + build (kit bought if needed); auto-ship Cotton
 //   all  every item's full courier loads above its reserve are sold, best-paying first (like
 //        auto-ship, for everything): Wood, Cotton, Gold Ore, surplus ore… never Planks or frames
 //   3    buy land, 3 Sawmills, Workshop unlock at 155 CD + 205 Planks
 //   4    2 Workshops on Frame Timber, 6 Sawmills, Mine → Quarry → Smelter;
-//        4 Iron + 2 Coal Mines, Limestone Quarry, Smelter on Iron Sheet, leftover frames → Gold Mines
+//        Iron + Coal Mines sized to the Smelter (4 + 2 at equal floors), Limestone Quarry, Smelter on Iron Sheet, leftover frames → Gold Mines
 //   5    Workshop on Rivet Iron Frame; unlock Factory → Kiln → Paper Mill → Manufacturing Lab
 //        (→ Dispatch Office if cfg.dispatchOffice). Never the Drafting Bureau.
 //        CD for these comes from Gold Mines and, when land gets too dear, the plan's
 //        build-and-demolish booster (tested on 1 building first, off if it doesn't work).
 //
 // Safety: one confirmed action at a time; failed actions back off (15 s → 10 min) so they
-// never block the rest; cash never drops below the power-bill floor; land walls; buy-price cap;
+// never block the rest; cash never drops below the power-bill floor; land walls (or payback); 360-acre cap; buy-price cap;
 // bill-paused groups resumed (groups you pause, any time, stay paused); waits through socket
 // drops; after a reload resumes as a DRY RUN (dryRun is never remembered); one copy per browser;
 // one buy order per item per 24 h; pauses while cdFarm runs; never sells Planks or frames;
@@ -53,7 +53,7 @@
 // else known rates) against a library of the best known designs plus your saved designs; the
 // best is applied automatically with EditLayout as soon as every part it adds (for every
 // building on the task) is in stock. Missing parts are bought only from the player market at
-// up to cfg.floorBuyUsd ($1) per unit, or ordered at that price.
+// up to cfg.floorBuyMult (1.5× base value) per unit, or ordered at that price.
 //   earlyGame.floors()             // table: task, buildings, current x, best x, parts, status
 // Offline test from a $100 start: bun test/early-game-sim.js [rich|live|chaos] [hours]
 
@@ -69,11 +69,14 @@ try {
   if (W.earlyGame) W.earlyGame._unload?.();
 
   const REGION = 0;                 // Heartland
-  const MONEY = 0, CD = 24, LD = 111;
-  const WOOD = 1, PLANKS = 9, COTTON = 76, WFRAME = 41, IFRAME = 42;
+  // Ids are resolved by name from the catalog (resolveIds, once per catalog object); these numbers are the fallback.
+  let MONEY = 0, CD = 24, LD = 111, MD = 25, RD = 26;
+  let WOOD = 1, PLANKS = 9, COTTON = 76, WFRAME = 41, IFRAME = 42;
   const STARTER_ACRES = 25;
+  const ACRE_CAP = 360;             // Heartland is always at the top charter level (wiki regions-and-land.md)
   const FIRST_ACRE = 5000;          // cents; next = floor(prev * 41 / 40)
   const COURIER_CU = 10000;
+  const courierCU = () => core.courierCU?.() ?? COURIER_CU;   // with courier capacity upgrades when the core knows them
   const MAX_POWER = 200;
 
   const B = {
@@ -84,18 +87,53 @@ try {
     FELL_WOOD: 0, MINE_IRON: 1, MINE_COAL: 2, LIMESTONE: 5, SAW_PLANKS: 8, IRON_SHEET: 9,
     FRAME_TIMBER: 37, RIVET: 38, GROW_COTTON: 79, MINE_GOLD: 95, MIX_CONCRETE: 13,
   };
-  const TASK = {
-    [B.CAMP]: R.FELL_WOOD, [B.FARM]: R.GROW_COTTON, [B.SAWMILL]: R.SAW_PLANKS,
-    [B.QUARRY]: R.LIMESTONE, [B.SMELTER]: R.IRON_SHEET,
+  const ID_NAMES = {
+    building: { CAMP: 'Lumber Camp', MINE: 'Mine', QUARRY: 'Quarry', SAWMILL: 'Sawmill', SMELTER: 'Smelter', KILN: 'Kiln', WORKSHOP: 'Workshop',
+      FARM: 'Farm', LAB: 'Manufacturing Lab', FACTORY: 'Factory', PAPER_MILL: 'Paper Mill', DISPATCH: 'Dispatch Office' },
+    recipe: { FELL_WOOD: 'Fell Wood', MINE_IRON: 'Mine Iron Ore', MINE_COAL: 'Mine Coal', LIMESTONE: 'Quarry Limestone', SAW_PLANKS: 'Saw Planks',
+      IRON_SHEET: 'Roll Iron Sheet', FRAME_TIMBER: 'Frame Timber', RIVET: 'Rivet Iron Frame', GROW_COTTON: 'Grow Cotton', MINE_GOLD: 'Mine Gold Ore', MIX_CONCRETE: 'Mix Concrete' },
+    item: { MONEY: 'Money', CD: 'Construction Data', LD: 'Logistics Data', MD: 'Manufacturing Data', RD: 'Research Data', WOOD: 'Wood', PLANKS: 'Planks',
+      COTTON: 'Cotton', WFRAME: 'Wooden Frame', IFRAME: 'Iron Frame' },
   };
-  const NAMES = {
-    [R.FELL_WOOD]: 'Fell Wood', [R.GROW_COTTON]: 'Grow Cotton', [R.SAW_PLANKS]: 'Planks',
-    [R.FRAME_TIMBER]: 'Frame Timber', [R.RIVET]: 'Iron Frames', [R.MINE_IRON]: 'Iron', [R.MINE_COAL]: 'Coal',
-    [R.MINE_GOLD]: 'Gold', [R.LIMESTONE]: 'Limestone', [R.IRON_SHEET]: 'Iron Sheet',
-    [R.MIX_CONCRETE]: 'Concrete',
-  };
-  // Items the plan makes itself: never bought for prototypes, never sold.
-  const HOME_MADE = [WOOD, PLANKS, WFRAME, IFRAME];
+  const FALLBACK = { building: { ...B }, recipe: { ...R }, item: { MONEY, CD, LD, MD, RD, WOOD, PLANKS, COTTON, WFRAME, IFRAME } };
+  let TASK, NAMES, HOME_MADE, NEVER_SELL;
+  function tables() {
+    TASK = {
+      [B.CAMP]: R.FELL_WOOD, [B.FARM]: R.GROW_COTTON, [B.SAWMILL]: R.SAW_PLANKS,
+      [B.QUARRY]: R.LIMESTONE, [B.SMELTER]: R.IRON_SHEET,
+    };
+    NAMES = {
+      [R.FELL_WOOD]: 'Fell Wood', [R.GROW_COTTON]: 'Grow Cotton', [R.SAW_PLANKS]: 'Planks',
+      [R.FRAME_TIMBER]: 'Frame Timber', [R.RIVET]: 'Iron Frames', [R.MINE_IRON]: 'Iron', [R.MINE_COAL]: 'Coal',
+      [R.MINE_GOLD]: 'Gold', [R.LIMESTONE]: 'Limestone', [R.IRON_SHEET]: 'Iron Sheet',
+      [R.MIX_CONCRETE]: 'Concrete',
+    };
+    // Items the plan makes itself: never bought for prototypes, never sold.
+    HOME_MADE = [WOOD, PLANKS, WFRAME, IFRAME];
+    // Never sold: what the plan builds with, and corp-wide data.
+    NEVER_SELL = [PLANKS, WFRAME, IFRAME, MONEY, CD, MD, RD, LD];
+  }
+  tables();
+  // Names not found in the catalog (their fallback number is used); checkGame reports them.
+  const idMissing = [];
+  let idsOf = null;   // the catalog the ids were last resolved from
+  function resolveIds(c) {
+    if (idsOf === c) return;
+    idsOf = c;
+    idMissing.length = 0;
+    const find = (kind, list, key) => {
+      const name = ID_NAMES[kind][key];
+      const x = Object.values(list ?? {}).find((o) => o?.name === name);
+      if (!x) idMissing.push(`${kind} "${name}"`);
+      return x ? x.id : FALLBACK[kind][key];
+    };
+    for (const k of Object.keys(B)) B[k] = find('building', c.buildings, k);
+    for (const k of Object.keys(R)) R[k] = find('recipe', c.recipes, k);
+    const it = {};
+    for (const k of Object.keys(ID_NAMES.item)) it[k] = find('item', c.items, k);
+    ({ MONEY, CD, LD, MD, RD, WOOD, PLANKS, COTTON, WFRAME, IFRAME } = it);
+    tables();
+  }
 
   const cfg = {
     dryRun: true,            // log actions instead of sending them
@@ -103,12 +141,15 @@ try {
     sawmills: 6,             // once the Workshop is unlocked (1 before, 3 from 50 buildings); at least 2 per Frame Timber Workshop
     workshops: 2,            // on Frame Timber
     ironFrameWorkshops: 1,   // Phase 5: on Rivet Iron Frame, once the Smelter runs
-    ironMines: 4, coalMines: 2, quarries: 1, smelters: 1, kilns: 1, labs: 1,
-    goldMines: Infinity,     // leftover frames → Gold Mines (+8 CD each; the CD source for Smelter and Phase 5)
+    ironMines: 1, coalMines: 1, // at least; more as the Smelters' Iron Ore / Coal use needs at the current floor rates (4 / 2 at equal rates)
+    quarries: 1, smelters: 1, kilns: 1, labs: 1,
+    goldMines: Infinity,     // leftover frames → Gold Mines (+8 CD each; the CD source for Smelter and Phase 5). Infinity = auto: up to GOLD_AUTO while a plan unlock is open
     dispatchOffice: false,   // Phase 5 optional unlock
     workshopPlanks: 205,     // planks before unlocking the Workshop (100 prototype + 100 build + 5 kit)
-    maxAcrePrice: 500,       // $: land wall for camps/farms once the Workshop unlock has started
-    maxAcrePriceEarly: 3000, // $: camps/farms before that (the plan pushes land until 155 CD)
+    landPaybackHours: 2,     // camps/farms/Gold Mines: land is also bought, above the walls below, while (acres + building) pay back from
+                             // the building's own live income within this many hours (payback alone ignores the CD they bring: slower in the sim)
+    maxAcrePrice: 500,       // $: land wall for camps/farms once the Workshop unlock has started, used when that income isn't known (no bid)
+    maxAcrePriceEarly: 3000, // $: camps/farms before that (the plan pushes land until 155 CD), same fallback
     maxAcrePriceCritical: 5000, // $: land for plan buildings (Sawmill, Workshop, Mines, Smelter) ...
     landCashShare: 0.02,     // ... or up to this share of cash per acre, whichever is higher (money sitting still is wasted)
     // CD booster (the plan's "build-and-demolish CD"): once the Workshop is unlocked, when a plan
@@ -131,13 +172,13 @@ try {
     buyKits: true,           // buy kit / prototype parts the corp can't make yet
     maxBuyPrice: 3,          // × base value: most paid per unit for those parts
     postBuyOrders: true,     // no seller at all → post a player buy order for the part ...
-    buyOrderUsd: 1,          // ... at this many $ per unit (money is escrowed; one open order per item)
+    buyOrderMult: 1.5,       // ... at this many × the item's base value per unit (money is escrowed; one open order per item)
     orderHoldHours: 24,      // never post another buy order for the same item within this time
     saveForCritical: true,   // stop buying camps/farms while saving for a ready plan building
     maxUnequippedCamps: 3,   // camps/farms waiting for their Wood kit before buying more
     resumePaused: true,      // resume powered groups paused by an unpaid bill
     floorUpgrades: true,     // switch tasks to the best-scoring known floorplan
-    floorBuyUsd: 1,          // missing floorplan parts: fill player sell orders at up to this many $ per unit,
+    floorBuyMult: 1.5,       // missing floorplan parts: fill player sell orders at up to this many × base value per unit,
                              // else post a buy order at this price (parts you don't make); 0 = never buy
     billHours: 1,            // cash floor = this many hours of power bills (min $100 once powered)
     maxActionsPerMin: 20,       // halved (down to a quarter) after an action the server doesn't apply

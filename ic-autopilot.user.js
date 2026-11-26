@@ -8056,20 +8056,20 @@ try {
 // interrupted CD Farm run, and hands its CD booster to CD Farm.
 //
 // Phases (each step is a check on live state, so it starts wherever the corp is):
-//   1-2  Lumber Camps + Farms (Cotton), always the cheaper; part loads until 25 acres are full
+//   1-2  Lumber Camps + Farms (Cotton), whichever pays back sooner; part loads until 25 acres are full
 //   2    Sawmill unlock + build (kit bought if needed); auto-ship Cotton
 //   all  every item's full courier loads above its reserve are sold, best-paying first (like
 //        auto-ship, for everything): Wood, Cotton, Gold Ore, surplus ore… never Planks or frames
 //   3    buy land, 3 Sawmills, Workshop unlock at 155 CD + 205 Planks
 //   4    2 Workshops on Frame Timber, 6 Sawmills, Mine → Quarry → Smelter;
-//        4 Iron + 2 Coal Mines, Limestone Quarry, Smelter on Iron Sheet, leftover frames → Gold Mines
+//        Iron + Coal Mines sized to the Smelter (4 + 2 at equal floors), Limestone Quarry, Smelter on Iron Sheet, leftover frames → Gold Mines
 //   5    Workshop on Rivet Iron Frame; unlock Factory → Kiln → Paper Mill → Manufacturing Lab
 //        (→ Dispatch Office if cfg.dispatchOffice). Never the Drafting Bureau.
 //        CD for these comes from Gold Mines and, when land gets too dear, the plan's
 //        build-and-demolish booster (tested on 1 building first, off if it doesn't work).
 //
 // Safety: one confirmed action at a time; failed actions back off (15 s → 10 min) so they
-// never block the rest; cash never drops below the power-bill floor; land walls; buy-price cap;
+// never block the rest; cash never drops below the power-bill floor; land walls (or payback); 360-acre cap; buy-price cap;
 // bill-paused groups resumed (groups you pause, any time, stay paused); waits through socket
 // drops; after a reload resumes as a DRY RUN (dryRun is never remembered); one copy per browser;
 // one buy order per item per 24 h; pauses while cdFarm runs; never sells Planks or frames;
@@ -8078,7 +8078,7 @@ try {
 // else known rates) against a library of the best known designs plus your saved designs; the
 // best is applied automatically with EditLayout as soon as every part it adds (for every
 // building on the task) is in stock. Missing parts are bought only from the player market at
-// up to cfg.floorBuyUsd ($1) per unit, or ordered at that price.
+// up to cfg.floorBuyMult (1.5× base value) per unit, or ordered at that price.
 //   earlyGame.floors()             // table: task, buildings, current x, best x, parts, status
 // Offline test from a $100 start: bun test/early-game-sim.js [rich|live|chaos] [hours]
 
@@ -8094,11 +8094,14 @@ try {
   if (W.earlyGame) W.earlyGame._unload?.();
 
   const REGION = 0;                 // Heartland
-  const MONEY = 0, CD = 24, LD = 111;
-  const WOOD = 1, PLANKS = 9, COTTON = 76, WFRAME = 41, IFRAME = 42;
+  // Ids are resolved by name from the catalog (resolveIds, once per catalog object); these numbers are the fallback.
+  let MONEY = 0, CD = 24, LD = 111, MD = 25, RD = 26;
+  let WOOD = 1, PLANKS = 9, COTTON = 76, WFRAME = 41, IFRAME = 42;
   const STARTER_ACRES = 25;
+  const ACRE_CAP = 360;             // Heartland is always at the top charter level (wiki regions-and-land.md)
   const FIRST_ACRE = 5000;          // cents; next = floor(prev * 41 / 40)
   const COURIER_CU = 10000;
+  const courierCU = () => core.courierCU?.() ?? COURIER_CU;   // with courier capacity upgrades when the core knows them
   const MAX_POWER = 200;
 
   const B = {
@@ -8109,18 +8112,53 @@ try {
     FELL_WOOD: 0, MINE_IRON: 1, MINE_COAL: 2, LIMESTONE: 5, SAW_PLANKS: 8, IRON_SHEET: 9,
     FRAME_TIMBER: 37, RIVET: 38, GROW_COTTON: 79, MINE_GOLD: 95, MIX_CONCRETE: 13,
   };
-  const TASK = {
-    [B.CAMP]: R.FELL_WOOD, [B.FARM]: R.GROW_COTTON, [B.SAWMILL]: R.SAW_PLANKS,
-    [B.QUARRY]: R.LIMESTONE, [B.SMELTER]: R.IRON_SHEET,
+  const ID_NAMES = {
+    building: { CAMP: 'Lumber Camp', MINE: 'Mine', QUARRY: 'Quarry', SAWMILL: 'Sawmill', SMELTER: 'Smelter', KILN: 'Kiln', WORKSHOP: 'Workshop',
+      FARM: 'Farm', LAB: 'Manufacturing Lab', FACTORY: 'Factory', PAPER_MILL: 'Paper Mill', DISPATCH: 'Dispatch Office' },
+    recipe: { FELL_WOOD: 'Fell Wood', MINE_IRON: 'Mine Iron Ore', MINE_COAL: 'Mine Coal', LIMESTONE: 'Quarry Limestone', SAW_PLANKS: 'Saw Planks',
+      IRON_SHEET: 'Roll Iron Sheet', FRAME_TIMBER: 'Frame Timber', RIVET: 'Rivet Iron Frame', GROW_COTTON: 'Grow Cotton', MINE_GOLD: 'Mine Gold Ore', MIX_CONCRETE: 'Mix Concrete' },
+    item: { MONEY: 'Money', CD: 'Construction Data', LD: 'Logistics Data', MD: 'Manufacturing Data', RD: 'Research Data', WOOD: 'Wood', PLANKS: 'Planks',
+      COTTON: 'Cotton', WFRAME: 'Wooden Frame', IFRAME: 'Iron Frame' },
   };
-  const NAMES = {
-    [R.FELL_WOOD]: 'Fell Wood', [R.GROW_COTTON]: 'Grow Cotton', [R.SAW_PLANKS]: 'Planks',
-    [R.FRAME_TIMBER]: 'Frame Timber', [R.RIVET]: 'Iron Frames', [R.MINE_IRON]: 'Iron', [R.MINE_COAL]: 'Coal',
-    [R.MINE_GOLD]: 'Gold', [R.LIMESTONE]: 'Limestone', [R.IRON_SHEET]: 'Iron Sheet',
-    [R.MIX_CONCRETE]: 'Concrete',
-  };
-  // Items the plan makes itself: never bought for prototypes, never sold.
-  const HOME_MADE = [WOOD, PLANKS, WFRAME, IFRAME];
+  const FALLBACK = { building: { ...B }, recipe: { ...R }, item: { MONEY, CD, LD, MD, RD, WOOD, PLANKS, COTTON, WFRAME, IFRAME } };
+  let TASK, NAMES, HOME_MADE, NEVER_SELL;
+  function tables() {
+    TASK = {
+      [B.CAMP]: R.FELL_WOOD, [B.FARM]: R.GROW_COTTON, [B.SAWMILL]: R.SAW_PLANKS,
+      [B.QUARRY]: R.LIMESTONE, [B.SMELTER]: R.IRON_SHEET,
+    };
+    NAMES = {
+      [R.FELL_WOOD]: 'Fell Wood', [R.GROW_COTTON]: 'Grow Cotton', [R.SAW_PLANKS]: 'Planks',
+      [R.FRAME_TIMBER]: 'Frame Timber', [R.RIVET]: 'Iron Frames', [R.MINE_IRON]: 'Iron', [R.MINE_COAL]: 'Coal',
+      [R.MINE_GOLD]: 'Gold', [R.LIMESTONE]: 'Limestone', [R.IRON_SHEET]: 'Iron Sheet',
+      [R.MIX_CONCRETE]: 'Concrete',
+    };
+    // Items the plan makes itself: never bought for prototypes, never sold.
+    HOME_MADE = [WOOD, PLANKS, WFRAME, IFRAME];
+    // Never sold: what the plan builds with, and corp-wide data.
+    NEVER_SELL = [PLANKS, WFRAME, IFRAME, MONEY, CD, MD, RD, LD];
+  }
+  tables();
+  // Names not found in the catalog (their fallback number is used); checkGame reports them.
+  const idMissing = [];
+  let idsOf = null;   // the catalog the ids were last resolved from
+  function resolveIds(c) {
+    if (idsOf === c) return;
+    idsOf = c;
+    idMissing.length = 0;
+    const find = (kind, list, key) => {
+      const name = ID_NAMES[kind][key];
+      const x = Object.values(list ?? {}).find((o) => o?.name === name);
+      if (!x) idMissing.push(`${kind} "${name}"`);
+      return x ? x.id : FALLBACK[kind][key];
+    };
+    for (const k of Object.keys(B)) B[k] = find('building', c.buildings, k);
+    for (const k of Object.keys(R)) R[k] = find('recipe', c.recipes, k);
+    const it = {};
+    for (const k of Object.keys(ID_NAMES.item)) it[k] = find('item', c.items, k);
+    ({ MONEY, CD, LD, MD, RD, WOOD, PLANKS, COTTON, WFRAME, IFRAME } = it);
+    tables();
+  }
 
   const cfg = {
     dryRun: true,            // log actions instead of sending them
@@ -8128,12 +8166,15 @@ try {
     sawmills: 6,             // once the Workshop is unlocked (1 before, 3 from 50 buildings); at least 2 per Frame Timber Workshop
     workshops: 2,            // on Frame Timber
     ironFrameWorkshops: 1,   // Phase 5: on Rivet Iron Frame, once the Smelter runs
-    ironMines: 4, coalMines: 2, quarries: 1, smelters: 1, kilns: 1, labs: 1,
-    goldMines: Infinity,     // leftover frames → Gold Mines (+8 CD each; the CD source for Smelter and Phase 5)
+    ironMines: 1, coalMines: 1, // at least; more as the Smelters' Iron Ore / Coal use needs at the current floor rates (4 / 2 at equal rates)
+    quarries: 1, smelters: 1, kilns: 1, labs: 1,
+    goldMines: Infinity,     // leftover frames → Gold Mines (+8 CD each; the CD source for Smelter and Phase 5). Infinity = auto: up to GOLD_AUTO while a plan unlock is open
     dispatchOffice: false,   // Phase 5 optional unlock
     workshopPlanks: 205,     // planks before unlocking the Workshop (100 prototype + 100 build + 5 kit)
-    maxAcrePrice: 500,       // $: land wall for camps/farms once the Workshop unlock has started
-    maxAcrePriceEarly: 3000, // $: camps/farms before that (the plan pushes land until 155 CD)
+    landPaybackHours: 2,     // camps/farms/Gold Mines: land is also bought, above the walls below, while (acres + building) pay back from
+                             // the building's own live income within this many hours (payback alone ignores the CD they bring: slower in the sim)
+    maxAcrePrice: 500,       // $: land wall for camps/farms once the Workshop unlock has started, used when that income isn't known (no bid)
+    maxAcrePriceEarly: 3000, // $: camps/farms before that (the plan pushes land until 155 CD), same fallback
     maxAcrePriceCritical: 5000, // $: land for plan buildings (Sawmill, Workshop, Mines, Smelter) ...
     landCashShare: 0.02,     // ... or up to this share of cash per acre, whichever is higher (money sitting still is wasted)
     // CD booster (the plan's "build-and-demolish CD"): once the Workshop is unlocked, when a plan
@@ -8156,13 +8197,13 @@ try {
     buyKits: true,           // buy kit / prototype parts the corp can't make yet
     maxBuyPrice: 3,          // × base value: most paid per unit for those parts
     postBuyOrders: true,     // no seller at all → post a player buy order for the part ...
-    buyOrderUsd: 1,          // ... at this many $ per unit (money is escrowed; one open order per item)
+    buyOrderMult: 1.5,       // ... at this many × the item's base value per unit (money is escrowed; one open order per item)
     orderHoldHours: 24,      // never post another buy order for the same item within this time
     saveForCritical: true,   // stop buying camps/farms while saving for a ready plan building
     maxUnequippedCamps: 3,   // camps/farms waiting for their Wood kit before buying more
     resumePaused: true,      // resume powered groups paused by an unpaid bill
     floorUpgrades: true,     // switch tasks to the best-scoring known floorplan
-    floorBuyUsd: 1,          // missing floorplan parts: fill player sell orders at up to this many $ per unit,
+    floorBuyMult: 1.5,       // missing floorplan parts: fill player sell orders at up to this many × base value per unit,
                              // else post a buy order at this price (parts you don't make); 0 = never buy
     billHours: 1,            // cash floor = this many hours of power bills (min $100 once powered)
     maxActionsPerMin: 20,       // halved (down to a quarter) after an action the server doesn't apply
@@ -8343,14 +8384,25 @@ try {
   // Everything decide() needs, from raw game state. Pure: also used by the offline simulator.
   function snapshot(st, rawCatalog, tickNow) {
     const catalog = normalize(rawCatalog);
+    resolveIds(catalog);
     const bld = (b) => catalog.buildings[b] ?? { name: `building ${b}`, cost: 0, acres: 1, build_items: [] };
     const recipe = (r) => catalog.recipes[r];
+    const allGroups = Object.values(st.groups ?? {});
     const groups = Object.entries(st.groups ?? {}).map(([id, g]) => ({ id: +id, ...g }))
       .filter((g) => (g.region ?? REGION) === REGION);
     const pool = st.building_pool?.[REGION] ?? {};
     const stock = st.stock?.[REGION] ?? {};
+    // Build / demolish queues (st.construction, patch 2026-11-24): every queued build and demolition, all regions, counts in
+    // the price, and this region's queued ones hold their acres. Without the planner (offline sim) the queues are not counted.
+    const q = (st.construction && core.planner?.queued?.({ st, catalog, region: REGION })) || { owned: {}, acres: 0 };
+    const queuedHere = {};
+    for (const x of st.construction?.builds ?? []) if ((x.region ?? REGION) === REGION) queuedHere[x.building] = (queuedHere[x.building] ?? 0) + x.count;
 
-    const owned = (b) => groups.filter((g) => g.building === b).reduce((a, g) => a + g.count, 0) + (pool[b] ?? 0);
+    // This region's buildings, counting queued builds (so a busy build queue is neither bought twice nor a failed build).
+    const owned = (b) => groups.filter((g) => g.building === b).reduce((a, g) => a + g.count, 0) + (pool[b] ?? 0) + (queuedHere[b] ?? 0);
+    // What the game prices the next one by: all regions, plus queued builds and demolitions (wiki formulas.md, Building cost).
+    const ownedAll = (b) => allGroups.filter((g) => g.building === b).reduce((a, g) => a + g.count, 0)
+      + Object.values(st.building_pool ?? {}).reduce((a, p) => a + (p?.[b] ?? 0), 0) + (q.owned[b] ?? 0);
     const equipped = (b) => groups.filter((g) => g.building === b).reduce((a, g) => a + (g.equipped ?? 0), 0);
     const running = (b, r) => groups.filter((g) => g.building === b && g.recipe === r).reduce((a, g) => a + g.count, 0);
     const runningEquipped = (b, r) => groups.filter((g) => g.building === b && g.recipe === r && !g.paused)
@@ -8358,6 +8410,7 @@ try {
     let acresUsed = 0;
     for (const g of groups) acresUsed += bld(g.building).acres * g.count;
     for (const [b, n] of Object.entries(pool)) acresUsed += bld(+b).acres * n;
+    acresUsed += q.acres;
     const landBought = st.land_bought?.[REGION] ?? 0;
     const drawOf = (b) => bld(b).draws?.power ?? 0;
     const powerNeed = groups.filter((g) => !g.paused).reduce((a, g) => a + drawOf(g.building) * g.count, 0);
@@ -8376,7 +8429,7 @@ try {
     const items = st.items ?? {};
     return {
       st, catalog, bld, recipe, groups, pool, stock, items, inbound, atExchange, autoDeliver, kitFor, landBought, acresUsed,
-      owned, equipped, running, runningEquipped, drawOf, powerNeed, powerHave, tickNow,
+      owned, ownedAll, equipped, running, runningEquipped, drawOf, powerNeed, powerHave, tickNow,
     };
   }
 
@@ -8387,7 +8440,7 @@ try {
     const owe = (list, n) => { for (const k of list) kitOwed[k.item] = (kitOwed[k.item] ?? 0) + k.amount * n; };
     for (const g of groups) if (g.count > (g.equipped ?? 0)) owe(kitFor(g.building, g.recipe), g.count - (g.equipped ?? 0));
     // Items made at home by equipped, running groups; what they eat per minute; starved groups.
-    const madeHere = new Set(), eatPerMin = {}, starved = [];
+    const madeHere = new Set(), eatPerMin = {}, makePerMin = {}, starved = [];
     for (const g of groups) {
       if (!(g.equipped > 0) || g.paused || g.recipe == null) continue;
       const r = recipe(g.recipe);
@@ -8395,10 +8448,11 @@ try {
       for (const o of r.outputs) madeHere.add(o.item);
       const rate = st.layouts?.[g.recipe]?.fx?.rate ?? 1; // runs per wave from the floorplan
       for (const i of r.inputs) eatPerMin[i.item] = (eatPerMin[i.item] ?? 0) + i.amount * g.equipped * rate * 120 / r.ticks;
+      for (const o of r.outputs) makePerMin[o.item] = (makePerMin[o.item] ?? 0) + o.amount * g.equipped * rate * 120 / r.ticks;
       if ((g.work ?? []).some((w) => w.inputs_pct != null && w.inputs_pct < 100)) starved.push(g);
     }
     Object.assign(s, {
-      kitOwed, madeHere, eatPerMin, starved,
+      kitOwed, madeHere, eatPerMin, makePerMin, starved,
       money: items[MONEY] ?? 0, cd: items[CD] ?? 0,
       // Regional stock first; global items (CD, MD, Logistics Data) live in items.
       has: (item) => stock[item] ?? items[item] ?? 0,
@@ -8413,6 +8467,8 @@ try {
       courierFree: (s.tickNow === 0 || s.tickNow >= (st.courier_ready_at ?? 0)) && nowMs() >= courierHoldUntil,
       research: st.research, queue: st.research_queue ?? [],
       researchIdle: !st.research && !(st.research_queue ?? []).length,
+      // Premium corps can queue unlocks (QueueTech); only when the state carries both fields, else the old one-at-a-time path.
+      canQueue: !!st.premium && Array.isArray(st.research_queue),
       nextGroupId: st.next_group_id ?? 0,
       shipId: st.next_shipment_id ?? 0, standing: st.standing_fills ?? {},
       mutTick: st.ssi?.last_user_mutation_tick ?? 0,
@@ -8449,7 +8505,23 @@ try {
 
   // ---- prices -----------------------------------------------------------------
 
-  const buildCost = (s, b) => Math.round(s.bld(b).cost * (20 + s.owned(b)) / 20);
+  const buildCost = (s, b) => Math.round(s.bld(b).cost * (20 + s.ownedAll(b)) / 20);
+  // Cents per minute one more building on recipe r earns at the current floor rate: outputs at the best Heartland bid (or base
+  // value while the corp eats the item itself), less its inputs at the same values. 0 = not known (no bid, nothing eats it).
+  function unitValue(s, item) {
+    let v = 0;
+    for (const d of s.deals ?? []) if (d.side === 'Sell' && d.item === item) v = Math.max(v, d.price / d.amount);
+    return Math.max(v, s.eatPerMin[item] > 0 ? s.catalog.items[item]?.base_value ?? 0 : 0);
+  }
+  function incomePerMin(s, r) {
+    const rc = r != null && s.recipe(r);
+    if (!rc) return 0;
+    const runs = (s.st.layouts?.[r]?.fx?.rate ?? 1) * 120 / rc.ticks;
+    let v = 0;
+    for (const o of rc.outputs) v += o.amount * unitValue(s, o.item);
+    for (const i of rc.inputs) v -= i.amount * unitValue(s, i.item);
+    return Math.max(0, v * runs);
+  }
   function acrePrice(n) { let p = FIRST_ACRE; for (let i = 0; i < n; i++) p = Math.floor(p * 41 / 40); return p; }
   function landCost(s, n) { let c = 0; for (let i = 0; i < n; i++) c += acrePrice(s.landBought + i); return c; }
   // No floor before anything draws power (the plan spends down to ~$18 at the start); then
@@ -8483,7 +8555,7 @@ try {
   // Techs the plan spends CD on, in order (golden rule 5). `gate` adds extra conditions.
   const techPlan = () => [
     { b: B.SAWMILL, phase: 2 },
-    { b: B.WORKSHOP, phase: 3, gate: (s) => s.has(PLANKS) >= cfg.workshopPlanks || `need ${cfg.workshopPlanks} Planks on hand` },
+    { b: B.WORKSHOP, phase: 3, gate: workshopGate },
     { b: B.MINE, phase: 4 },
     { b: B.QUARRY, phase: 4 },
     { b: B.SMELTER, phase: 4 },
@@ -8494,8 +8566,33 @@ try {
     ...(cfg.dispatchOffice ? [{ b: B.DISPATCH, phase: 5, optional: true }] : []),
   ];
 
+  // Workshop unlock: 205 Planks on hand, or the prototype in stock and the build Planks (+ kit) made by the Sawmills during the research.
+  function workshopGate(s) {
+    if (s.has(PLANKS) >= cfg.workshopPlanks) return true;
+    const proto = (s.bld(B.WORKSHOP).build_items ?? []).find((i) => i.item === PLANKS)?.amount ?? 0;
+    const tech = s.catalog.techs.find((t) => t.building === B.WORKSHOP);
+    const net = (s.makePerMin[PLANKS] ?? 0) - (s.eatPerMin[PLANKS] ?? 0);
+    if (tech && proto > 0 && s.has(PLANKS) >= proto && s.has(PLANKS) - proto + net * tech.ticks / 120 >= cfg.workshopPlanks - proto) return true;
+    return `need ${cfg.workshopPlanks} Planks on hand (or ${proto} and enough Sawmill output during the research)`;
+  }
+
+  // earlyGame.offline(): for a few minutes an idle research slot starts the longest plan unlock that is ready.
+  let longUnlockUntil = 0;
+  function longestReady(s) {
+    if (!s.researchIdle) return null;
+    let best = null;
+    for (const t of techPlan()) {
+      const tech = s.catalog.techs.find((x) => x.building === t.b);
+      if (!tech || s.unlocked(t.b) || s.cd < tech.cost || (tech.requires != null && !s.unlocked(tech.requires))) continue;
+      if ((t.gate ? t.gate(s) : true) !== true || (s.bld(t.b).build_items ?? []).some((i) => s.has(i.item) < i.amount)) continue;
+      if (!best || tech.ticks > best.ticks) best = { t, ticks: tech.ticks };
+    }
+    return best?.t ?? null;
+  }
+
   function nextTech(s) {
     if (coreOwns()) return null;   // unlocks are Core plan's after the hand-off (no StartTech, prototype parts or CD need from here)
+    if (nowMs() < longUnlockUntil) { const t = longestReady(s); if (t) return t; }
     for (const t of techPlan()) {
       if (s.unlocked(t.b)) continue;
       if (s.research?.building === t.b || s.queue.some((q) => q.building === t.b)) return null; // in progress
@@ -8503,6 +8600,12 @@ try {
     }
     return null;
   }
+  // Premium: the next plan unlock that is neither running nor queued (QueueTech), while the queue has room (5 incl. the running one).
+  function nextQueueable(s) {
+    if (coreOwns() || !s.canQueue || s.researchIdle || 5 - s.queue.length - (s.research ? 1 : 0) <= 0) return null;
+    return techPlan().find((t) => !s.unlocked(t.b) && s.research?.building !== t.b && !s.queue.some((q) => q.building === t.b)) ?? null;
+  }
+  const pendingTech = (s, b) => s.research?.building === b || s.queue.some((q) => q.building === b);
 
   function sawTarget(s) {
     if (!(s.unlocked(B.WORKSHOP) || s.research?.building === B.WORKSHOP)) return s.totalBuildings >= 50 ? 3 : 1;
@@ -8516,16 +8619,32 @@ try {
     return Math.max(cfg.sawmills, 2 * cfg.workshops, forDemand);
   }
 
+  // Iron / Coal Mines (like sawTarget): enough for what the planned Smelters eat on Iron Sheet at the current floor rates,
+  // at least cfg.ironMines / cfg.coalMines. Iron Sheet takes 10 ore + 5 coal per 180 s, a mine 2 per 120 s / 90 s: 4 / 2 at equal rates.
+  function mineTarget(s, r) {
+    const min = r === R.MINE_IRON ? cfg.ironMines : cfg.coalMines;
+    const sheet = s.recipe(R.IRON_SHEET), mine = s.recipe(r), out = mine?.outputs?.[0];
+    const per = out && sheet?.inputs.find((i) => i.item === out.item)?.amount;
+    if (!per) return min;
+    const rate = (x) => s.st.layouts?.[x]?.fx?.rate ?? 1;
+    const smelters = Math.max(cfg.smelters, s.running(B.SMELTER, R.IRON_SHEET));
+    const eat = smelters * rate(R.IRON_SHEET) * per / sheet.ticks, make = rate(r) * out.amount / mine.ticks;
+    return Math.max(min, Math.ceil(eat / make - 1e-9));
+  }
+  // Gold Mines: cfg.goldMines, or (Infinity = auto) up to GOLD_AUTO while a plan unlock still needs CD.
+  const GOLD_AUTO = 10;
+  const goldTarget = (s) => (Number.isFinite(cfg.goldMines) ? cfg.goldMines : techPlan().some((t) => !t.optional && !s.unlocked(t.b)) ? GOLD_AUTO : 0);
   function mineRecipe(s) {
-    if (s.running(B.MINE, R.MINE_IRON) < cfg.ironMines) return R.MINE_IRON;
-    if (s.running(B.MINE, R.MINE_COAL) < cfg.coalMines) return R.MINE_COAL;
-    return R.MINE_GOLD;
+    if (s.running(B.MINE, R.MINE_IRON) < mineTarget(s, R.MINE_IRON)) return R.MINE_IRON;
+    if (s.running(B.MINE, R.MINE_COAL) < mineTarget(s, R.MINE_COAL)) return R.MINE_COAL;
+    return s.running(B.MINE, R.MINE_GOLD) < goldTarget(s) ? R.MINE_GOLD : null;   // a Mine the plan doesn't need stays in the pool
   }
   const smelting = (s) => s.runningEquipped(B.SMELTER, R.IRON_SHEET) > 0;
+  // A Workshop the plan doesn't need stays in the pool for whichever group (Core plan's) wants it.
   function workshopRecipe(s) {
     if (s.running(B.WORKSHOP, R.FRAME_TIMBER) < cfg.workshops) return R.FRAME_TIMBER;
     if (smelting(s) && s.running(B.WORKSHOP, R.RIVET) < cfg.ironFrameWorkshops) return R.RIVET;
-    return R.FRAME_TIMBER;
+    return null;
   }
   // Kilns: Autopilot keeps cfg.kilns on Concrete; any other Kiln is Core plan's and stays unassigned.
   const kilnFree = (s) => Math.max(0, cfg.kilns - s.running(B.KILN, R.MIX_CONCRETE));
@@ -8543,17 +8662,17 @@ try {
     const add = (b, recipe, target, have) => { if (s.unlocked(b) && have < target) out.push({ b, recipe, target, have }); };
     add(B.SAWMILL, R.SAW_PLANKS, sawTarget(s), s.owned(B.SAWMILL));
     add(B.WORKSHOP, R.FRAME_TIMBER, cfg.workshops, s.running(B.WORKSHOP, R.FRAME_TIMBER) + workshopPool(s, R.FRAME_TIMBER));
-    add(B.MINE, R.MINE_IRON, cfg.ironMines, s.running(B.MINE, R.MINE_IRON));
-    add(B.MINE, R.MINE_COAL, cfg.coalMines, s.running(B.MINE, R.MINE_COAL));
+    add(B.MINE, R.MINE_IRON, mineTarget(s, R.MINE_IRON), s.running(B.MINE, R.MINE_IRON));
+    add(B.MINE, R.MINE_COAL, mineTarget(s, R.MINE_COAL), s.running(B.MINE, R.MINE_COAL));
     add(B.QUARRY, R.LIMESTONE, cfg.quarries, s.owned(B.QUARRY));
     add(B.SMELTER, R.IRON_SHEET, cfg.smelters, s.owned(B.SMELTER));
     add(B.KILN, R.MIX_CONCRETE, cfg.kilns, s.owned(B.KILN));
     add(B.LAB, null, cfg.labs, s.owned(B.LAB)); // no recipe: Core plan's Lab group takes it from the pool
     // Phase 5: Iron Frames once Iron Sheet is being made.
     if (smelting(s)) add(B.WORKSHOP, R.RIVET, cfg.ironFrameWorkshops, s.running(B.WORKSHOP, R.RIVET) + workshopPool(s, R.RIVET));
-    const basicsDone = s.running(B.MINE, R.MINE_IRON) >= cfg.ironMines && s.running(B.MINE, R.MINE_COAL) >= cfg.coalMines
+    const basicsDone = s.running(B.MINE, R.MINE_IRON) >= mineTarget(s, R.MINE_IRON) && s.running(B.MINE, R.MINE_COAL) >= mineTarget(s, R.MINE_COAL)
       && s.owned(B.QUARRY) >= cfg.quarries;
-    if (basicsDone) add(B.MINE, R.MINE_GOLD, cfg.goldMines, s.running(B.MINE, R.MINE_GOLD));
+    if (basicsDone) add(B.MINE, R.MINE_GOLD, goldTarget(s), s.running(B.MINE, R.MINE_GOLD));
     return out;
   }
 
@@ -8591,16 +8710,16 @@ try {
         return b.operations?.includes('Extract') ? unpack(core.floorDesigns.mineX3) : b.operations?.includes('Cultivate') ? X3_MERGE(122) : null;
       },
     },
-    { name: 'Saw x2', rate: 2, recipes: [R.SAW_PLANKS], // proven max on the 6x2 Sawmill
+    { name: 'Saw x2', rate: 2, recipes: ['Saw Planks'], // proven max on the 6x2 Sawmill
       cells: '0,0:123:1 0,1:123:0 1,0:123:0 1,1:126:0 2,0:123:0 2,1:123:0 3,0:114:0 3,1:114:0 5,0:123:0 5,1:123:0' },
-    { name: 'Smelt x3', rate: 3, recipes: [R.IRON_SHEET, 10, 11], // Iron, Steel, Aluminum Sheet
+    { name: 'Smelt x3', rate: 3, recipes: ['Roll Iron Sheet', 'Roll Steel Sheet', 'Draw Copper Wire'],
       cells: core.floorDesigns.smeltX3 },
-    { name: 'Kiln x3', rate: 3, recipes: [13, 14], cells: SMELT_X3 }, // Mix Concrete, Blow Glass
-    { name: 'Frame Timber x5', rate: 5, recipes: [R.FRAME_TIMBER], cells: WORKSHOP_V1 },
+    { name: 'Kiln x3', rate: 3, recipes: ['Mix Concrete', 'Blow Glass'], cells: SMELT_X3 }, // Mix Concrete, Blow Glass
+    { name: 'Frame Timber x5', rate: 5, recipes: ['Frame Timber'], cells: WORKSHOP_V1 },
     // Scored with the game's engine on 2026-11-22: x5 on Make Bookshelf / Table / Chair. Layouts are per recipe, so each gets its own
     // EditLayout; the live scorer (engineRate) still decides, the library rate is only a fallback when no scorer is reachable.
     { name: 'Workshop v1 x5', rate: 5, fits: (s, r) => (FURNITURE_V1.has(s.recipe(r)?.name) ? unpack(WORKSHOP_V1) : null) },
-    { name: 'Rivet x3', rate: 3, recipes: [R.RIVET], cells: RIVET_X3 },
+    { name: 'Rivet x3', rate: 3, recipes: ['Rivet Iron Frame'], cells: RIVET_X3 },
     // Scored x3 on Make Bench and Make Desk (2026-11-22).
     { name: 'Rivet x3 (two inputs)', rate: 3, fits: (s, r) => (FURNITURE_RIVET.has(s.recipe(r)?.name) ? unpack(RIVET_X3) : null) },
   ];
@@ -8651,7 +8770,7 @@ try {
       const cur = { name: lay ? 'current plan' : 'default plan', rate: lay?.fx?.rate ?? (lay ? engineRate(s, r, lay.cells) : null) ?? 1, key: lay ? cellsKey(lay.cells) : null };
       const cands = [];
       for (const e of FLOOR_LIBRARY) {
-        const cells = e.fits ? e.fits(s, r) : e.recipes.includes(r) ? unpack(e.cells) : null;
+        const cells = e.fits ? e.fits(s, r) : e.recipes.includes(rc.name) ? unpack(e.cells) : null;
         if (cells) cands.push({ name: e.name, cells, known: e.rate });
       }
       for (const [name, d] of Object.entries(s.st.designs?.[r] ?? {})) cands.push({ name: `saved "${name}"`, cells: d.cells, known: d.fx?.rate ?? null });
@@ -8723,23 +8842,19 @@ try {
     });
   }
 
-  // Plan done = Core game plan S2–S4, wiki/guides/core-game-plan.md 1.1.
+  // Plan done (the hand-off to Core plan): every plan unlock is in and the core buildings exist, whatever route the corp took.
+  // Frame Timber / Iron Frame running and 16 Iron Frames stay plan targets, not hand-off conditions.
+  const CORE_BUILDINGS = () => [B.SAWMILL, B.WORKSHOP, B.MINE, B.QUARRY, B.KILN, B.LAB];
   function planDone(s) {
-    return techPlan().every((t) => t.optional || s.unlocked(t.b))
-      && (!s.research || s.research.building === B.DISPATCH)
-      && s.running(B.WORKSHOP, R.FRAME_TIMBER) >= 1
-      && s.running(B.WORKSHOP, R.RIVET) >= cfg.ironFrameWorkshops
-      && s.owned(B.MINE) >= 1 && s.owned(B.QUARRY) >= 1
-      && s.owned(B.KILN) >= 1 && s.owned(B.LAB) >= 1
-      && s.has(IFRAME) >= 16;
+    return techPlan().every((t) => t.optional || s.unlocked(t.b)) && CORE_BUILDINGS().every((b) => s.owned(b) >= 1);
   }
 
   function phaseOf(s) {
+    if (planDone(s)) return 'done';   // first: a late corp may have demolished its camps or never smelted
     if (s.owned(B.CAMP) + s.owned(B.FARM) < 2) return 1;
     if (!s.unlocked(B.SAWMILL) || s.owned(B.SAWMILL) < 1 || s.acresUsed < STARTER_ACRES) return 2;
     if (!s.unlocked(B.WORKSHOP)) return 3;
-    if (!smelting(s)) return 4;
-    return planDone(s) ? 'done' : 5;
+    return smelting(s) ? 5 : 4;
   }
 
 // continues the autopilot closure from autopilot-2.js (same try / IIFE)
@@ -8769,27 +8884,33 @@ try {
       { msg: { type: 'SetRecipe', group: id, recipe: r }, until: (x) => x.st.groups[id]?.recipe === r });
   }
 
-  // Sellers of an item, cheapest first, under the price cap, big enough for `amount`.
+  // Sellers of an item, cheapest first, under the price cap. A lot smaller than `amount` is bought whole (n), so several
+  // small lots add up: each is its own action and the next decision buys the rest.
   function sellersOf(s, item, amount) {
     const it = s.catalog.items[item] ?? {};
     const cap = (it.base_value || 0) * cfg.maxBuyPrice;
     return [
-      ...s.deals.filter((d) => d.side === 'Buy' && d.item === item && d.amount >= amount)
-        .map((d) => ({ key: `fill:${d.id}`, unit: d.price / d.amount, msg: { type: 'FillDeal', deal: d.id, amount, hire: null, region: REGION, courier: true } })),
+      ...s.deals.filter((d) => d.side === 'Buy' && d.item === item && d.amount > 0).map((d) => {
+        const n = Math.min(amount, d.amount);
+        return { key: `fill:${d.id}`, n, unit: d.price / d.amount, msg: { type: 'FillDeal', deal: d.id, amount: n, hire: null, region: REGION, courier: true } };
+      }),
       // A player fill lands at the Exchange, no shipment (the client sends courier:false since 2026-11-25); withdrawActions brings it home.
-      ...s.orders.filter((o) => o.side === 'Sell' && o.item === item && o.amount >= amount)
-        .map((o) => ({ key: `order:${o.id}`, unit: o.unit_price * 1.02, msg: { type: 'FillOrder', order: o.id, amount, hire: null, region: REGION, courier: false } })),
+      ...s.orders.filter((o) => o.side === 'Sell' && o.item === item && o.amount > 0).map((o) => {
+        const n = Math.min(amount, o.amount);
+        return { key: `order:${o.id}`, n, unit: o.unit_price * 1.02, msg: { type: 'FillOrder', order: o.id, amount: n, hire: null, region: REGION, courier: false } };
+      }),
     ].filter((o) => !cap || o.unit <= cap).sort((a, z) => a.unit - z.unit);
   }
+  // Buy order / floor part price: a cfg multiple of the item's base value, in cents (at least 1 cent).
+  const priceCents = (s, item, mult) => Math.max(1, Math.round((s.catalog.items[item]?.base_value ?? 0) * mult));
 
-  // One open player buy order per item, at `usd` per unit; none again within orderHoldHours
+  // One open player buy order per item, at `unit` cents per unit; none again within orderHoldHours
   // unless the last one was seen filled. Yields an action or a wait.
-  function* postBuyOrder(s, item, amount, usdPerUnit, why) {
+  function* postBuyOrder(s, item, amount, unit, why) {
     const mine = s.myOrders.find((o) => o.side === 'Buy' && o.item === item);
     if (mine) { yield { wait: `${why}: your buy order for ${mine.amount} @ ${usd(mine.unit_price)} is waiting for a player` }; return; }
     const since = nowMs() - (posted[item] ?? -Infinity);
     if (since < cfg.orderHoldHours * 3600000) { yield { wait: `${why}: buy order posted ${Math.round(since / 60000)} min ago, waiting for a player` }; return; }
-    const unit = Math.max(1, Math.round(usdPerUnit * 100)); // cents
     if (!cfg.postBuyOrders || s.money - unit * amount * 1.02 < moneyFloor(s)) return;
     const n0 = s.myOrders.length;
     yield withMeta({ item }, act(`post:${item}`, `${why}: post a buy order for ${amount} ${iname(s, item)} @ ${usd(unit)} (escrows ${usd(unit * amount)})`,
@@ -8797,16 +8918,16 @@ try {
         until: (x) => x.myOrders.length > n0 || x.myOrders.some((o) => o.side === 'Buy' && o.item === item) }));
   }
 
-  // Floorplan parts from the player market only, at up to cfg.floorBuyUsd per unit (2% fee
+  // Floorplan parts from the player market only, at up to cfg.floorBuyMult × base value per unit (2% fee
   // included): cheapest sell orders first, part-filling small ones. With no such seller, a buy
   // order at that price for parts you don't make (home-made parts just build up).
   function* floorPartBuys(s, item, need, why) {
-    if (!(cfg.floorBuyUsd > 0) || need <= 0) return;
+    if (!(cfg.floorBuyMult > 0) || need <= 0) return;
     s.bookWanted = true;   // the loop subscribes to the player order book (core.orderBook.need)
     if (!s.ordersKnown) { yield { wait: `${why}: player order book not loaded yet` }; return; }
     const it = s.catalog.items[item] ?? {};
-    const amount = Math.max(1, Math.min(Math.ceil(need), Math.floor(COURIER_CU / (it.cargo_weight || 1))));
-    const cap = cfg.floorBuyUsd * 100;
+    const amount = Math.max(1, Math.min(Math.ceil(need), Math.floor(courierCU() / (it.cargo_weight || 1))));
+    const cap = priceCents(s, item, cfg.floorBuyMult);
     const offers = s.orders.filter((o) => o.side === 'Sell' && o.item === item && o.unit_price * 1.02 <= cap)
       .sort((a, z) => a.unit_price - z.unit_price);
     for (const o of offers) {
@@ -8817,28 +8938,28 @@ try {
       yield act(`order:${o.id}`, `${why}: buy ${n} ${iname(s, item)} from a player @ ${usd(o.unit_price)} (lands at the Exchange)`,
         { msg: { type: 'FillOrder', order: o.id, amount: n, hire: null, region: REGION, courier: false }, until: (x) => x.atExchange(item) > u0 || x.money < m0 - cost / 2 });
     }
-    if (!s.madeHere.has(item)) yield* postBuyOrder(s, item, amount, cfg.floorBuyUsd, why);
+    if (!s.madeHere.has(item)) yield* postBuyOrder(s, item, amount, cap, why);
   }
 
   // Buy actions (one per seller, best first) for `need` of an item, capped at one courier load.
   function* buyActions(s, item, need, why) {
     const it = s.catalog.items[item] ?? {};
-    const amount = Math.max(1, Math.min(Math.ceil(need), Math.floor(COURIER_CU / (it.cargo_weight || 1))));
+    const amount = Math.max(1, Math.min(Math.ceil(need), Math.floor(courierCU() / (it.cargo_weight || 1))));
     s.bookWanted = true;
     if (!s.dealsKnown) { yield { wait: `${why}: market board not loaded (open the Market page once)` }; return; }
     if (!s.ordersKnown) { yield { wait: `${why}: player order book not loaded yet` }; return; }
     const offers = sellersOf(s, item, amount);
     if (!offers.length) {
-      yield* postBuyOrder(s, item, amount, cfg.buyOrderUsd, `no seller for ${iname(s, item)}`);
+      yield* postBuyOrder(s, item, amount, priceCents(s, item, cfg.buyOrderMult), `no seller for ${iname(s, item)}`);
       yield { wait: `no seller for ${Math.ceil(need)} ${iname(s, item)} under ${cfg.maxBuyPrice}× base (buy it by hand)` };
       return;
     }
     for (const o of offers) {
-      const cost = Math.ceil(o.unit * amount);
-      if (s.money - cost < moneyFloor(s)) { yield { wait: `${why}: need ${usd(cost)} for ${amount} ${iname(s, item)}` }; return; }
+      const cost = Math.ceil(o.unit * o.n);
+      if (s.money - cost < moneyFloor(s)) { yield { wait: `${why}: need ${usd(cost)} for ${o.n} ${iname(s, item)}` }; return; }
       if (o.msg.courier && !s.courierFree) { yield { wait: `courier busy (${courierEta(s)}): ${why}` }; return; }
       const id0 = s.shipId, m0 = s.money, u0 = s.atExchange(item);
-      yield act(o.key, `${why}: buy ${amount} ${iname(s, item)} for ~${usd(cost)}`,
+      yield act(o.key, `${why}: buy ${o.n} ${iname(s, item)} for ~${usd(cost)}`,
         { msg: o.msg, until: (x) => x.shipId > id0 || x.atExchange(item) > u0 || x.money < m0 - cost / 2 });
     }
   }
@@ -8853,7 +8974,7 @@ try {
   // Auto-deliver on for this region it ships them itself.
   function* withdrawActions(s, item, want, why) {
     if (s.autoDeliver) return;
-    const load = Math.floor(COURIER_CU / (s.catalog.items[item]?.cargo_weight || 1));
+    const load = Math.floor(courierCU() / (s.catalog.items[item]?.cargo_weight || 1));
     const n = Math.min(s.atExchange(item), Math.ceil(want - s.has(item) - (s.inbound[item] ?? 0)), load);
     if (!(n > 0)) return;
     if (!s.courierFree) { yield { wait: `courier busy (${courierEta(s)}): ${why}: withdraw ${n} ${iname(s, item)} from the Exchange` }; return; }
@@ -8910,13 +9031,20 @@ try {
     return Math.min(cfg.boosterAcres, s.freeAcres);
   }
 
-  function buildSteps(s, b, why, maxAcre) {
+  // r (a recipe): land for this building only while (acres + building) pay back from its own income within
+  // cfg.landPaybackHours; with that income unknown (no bid), the old maxAcre wall. r null: maxAcre only (plan buildings).
+  // orWall: either rule is enough (Gold Mines are bought for their CD as much as for their ore).
+  function buildSteps(s, b, why, maxAcre, r = null, orWall = false) {
     const needAcres = Math.max(0, s.bld(b).acres - (s.freeAcres - boosterAcresHeld(s)));
     const floor = moneyFloor(s, s.drawOf(b));
     if (needAcres > 0) {
-      const top = acrePrice(s.landBought + needAcres - 1);
-      if (top > maxAcre * 100) return { wait: `${why}: next acre ${usd(top)} is above the ${usd(maxAcre * 100)} land wall`, wall: true };
+      if (s.acresOwned + needAcres > ACRE_CAP) return { wait: `${why}: Heartland is at its ${ACRE_CAP}-acre cap`, wall: true };
       const lc = landCost(s, needAcres);
+      const inc = r == null ? 0 : incomePerMin(s, r);
+      const top = acrePrice(s.landBought + needAcres - 1);
+      const h = inc > 0 ? (lc + buildCost(s, b)) / inc / 60 : Infinity;
+      if (inc > 0 && !orWall && h > cfg.landPaybackHours) return { wait: `${why}: ${needAcres} acre(s) + ${bname(s, b)} would pay back in ${h.toFixed(1)} h (limit ${cfg.landPaybackHours} h)`, wall: true };
+      if ((!(inc > 0) || orWall) && h > cfg.landPaybackHours && top > maxAcre * 100) return { wait: `${why}: next acre ${usd(top)} is above the ${usd(maxAcre * 100)} land wall`, wall: true };
       if (s.money - lc - buildCost(s, b) < floor) return { wait: `${why}: saving for ${needAcres} acre(s) + ${bname(s, b)} (${usd(lc + buildCost(s, b))})`, money: true };
       const l0 = s.landBought;
       return act('land', `${why}: buy ${needAcres} acre(s) for ${usd(lc)}`,
@@ -8996,23 +9124,26 @@ try {
     }
 
     // 6. Next plan tech.
+    // Premium with research_queue in the state: while the slot is busy, the next unlock is queued (QueueTech) instead of waiting.
     const nt = nextTech(s);
-    if (nt) {
-      const tech = s.catalog.techs.find((t) => t.building === nt.b);
-      const proto = s.bld(nt.b).build_items ?? [];
-      const why = `unlock ${bname(s, nt.b)}`;
+    const qt = nt ? null : nextQueueable(s);
+    const t6 = nt ?? qt;
+    if (t6) {
+      const tech = s.catalog.techs.find((t) => t.building === t6.b);
+      const proto = s.bld(t6.b).build_items ?? [];
+      const why = `${qt ? 'queue' : 'unlock'} ${bname(s, t6.b)}`;
       if (!tech) yield { wait: `${why}: not in the tech tree` };
-      else if (!s.researchIdle) yield { wait: `${why}: research slot busy` };
-      else if (tech.requires != null && !s.unlocked(tech.requires)) yield { wait: `${why}: needs ${bname(s, tech.requires)} first` };
+      else if (!s.researchIdle && !qt) yield { wait: `${why}: research slot busy` };
+      else if (tech.requires != null && !s.unlocked(tech.requires) && !(qt && pendingTech(s, tech.requires))) yield { wait: `${why}: needs ${bname(s, tech.requires)} first` };
       else if (s.cd < tech.cost) yield { wait: `${why}: ${s.cd} / ${tech.cost} CD` };
       else {
-        const gate = nt.gate ? nt.gate(s) : true;
+        const gate = t6.gate ? t6.gate(s) : true;
         const lack = proto.filter((i) => s.has(i.item) < i.amount);
         if (gate !== true) yield { wait: `${why}: ${gate}` };
         else if (lack.length) yield { wait: `${why}: need ${lack.map((i) => `${Math.ceil(i.amount - s.has(i.item))} more ${iname(s, i.item)}${whyNoneMade(s, i.item)}`).join(', ')}` };
         else {
-          yield act(`tech:${nt.b}`, `${why} (${tech.cost} CD${proto.length ? ' + ' + proto.map((i) => `${i.amount} ${iname(s, i.item)}`).join(', ') : ''})`,
-            { msg: { type: 'StartTech', building: nt.b, region: REGION }, until: (x) => x.research?.building === nt.b || x.unlocked(nt.b) });
+          yield act(`tech:${t6.b}`, `${why} (${tech.cost} CD${proto.length ? ' + ' + proto.map((i) => `${i.amount} ${iname(s, i.item)}`).join(', ') : ''})`,
+            { msg: { type: qt ? 'QueueTech' : 'StartTech', building: t6.b, region: REGION }, until: (x) => pendingTech(x, t6.b) || x.unlocked(t6.b) });
         }
       }
     }
@@ -9033,9 +9164,10 @@ try {
       if (short) { yield { wait: `${label}: waiting for ${iname(s, short.item)}${whyNoneMade(s, short.item)}` }; continue; }
       if (s.owned(t.b) > s.equipped(t.b)) { yield { wait: `${label}: a ${bname(s, t.b)} is still waiting for its floor kit` }; continue; }
       // One-off plan buildings take land at any price they can afford; only the open-ended
-      // Gold Mines are held to the land wall.
-      const wall = t.recipe === R.MINE_GOLD ? Math.max(cfg.maxAcrePriceCritical, s.money / 100 * cfg.landCashShare) : Infinity;
-      const a = buildSteps(s, t.b, label, wall);
+      // Gold Mines are held to the land wall or land payback, whichever allows more.
+      const gold = t.recipe === R.MINE_GOLD;
+      const wall = gold ? Math.max(cfg.maxAcrePriceCritical, s.money / 100 * cfg.landCashShare) : Infinity;
+      const a = buildSteps(s, t.b, label, wall, gold ? R.MINE_GOLD : null, gold);
       if (a.steps) { yield a; continue; }
       if (a.money && cfg.saveForCritical) { yield { ...a, final: true }; return; }
       yield a;
@@ -9044,13 +9176,16 @@ try {
     // 9. CD booster.
     yield* boosterActions(s, nt);
 
-    // 10. Cheaper of Lumber Camp / Farm (tie → camp).
+    // 10. Lumber Camp or Farm: the one whose next building (and its acres) pays back sooner from live income per acre
+    // (best bid × output × floor rate). Its price climbs with each one owned, so the two alternate. No income known → the cheaper; tie → camp.
     if (farmInfo()?.resumable) { yield { wait: 'camps/farms wait: CD Farm has an interrupted run (resume or discard it in CD Farm)' }; return; }
-    const b =buildCost(s, B.FARM) < buildCost(s, B.CAMP) ? B.FARM : B.CAMP;
+    const payback = (x) => { const inc = incomePerMin(s, TASK[x]); return inc > 0 ? (buildCost(s, x) + s.bld(x).acres * acrePrice(s.landBought)) / inc : Infinity; };
+    const pf = payback(B.FARM), pc = payback(B.CAMP);
+    const b = pf < pc || (pf === pc && buildCost(s, B.FARM) < buildCost(s, B.CAMP)) ? B.FARM : B.CAMP;
     const unequipped = s.owned(B.CAMP) + s.owned(B.FARM) - s.equipped(B.CAMP) - s.equipped(B.FARM);
     if (unequipped >= cfg.maxUnequippedCamps) { yield { wait: `${unequipped} camps/farms still waiting for their Wood kit` }; return; }
     const workshopStarted = s.unlocked(B.WORKSHOP) || s.research?.building === B.WORKSHOP;
-    yield buildSteps(s, b, `${bname(s, b)} #${s.owned(b) + 1}`, workshopStarted ? cfg.maxAcrePrice : cfg.maxAcrePriceEarly);
+    yield buildSteps(s, b, `${bname(s, b)} #${s.owned(b) + 1}`, workshopStarted ? cfg.maxAcrePrice : cfg.maxAcrePriceEarly, TASK[b], true);
   }
 
   function* boosterActions(s, nt) {
@@ -9064,6 +9199,7 @@ try {
     if (s.money < cfg.boosterMinCash * 100) return;
     if (s.freeAcres < 1) {
       const want = Math.max(1, cfg.boosterAcres);
+      if (s.acresOwned + want > ACRE_CAP) return;
       // A few acres bought once and reused for every cycle: allowed up to 10% of cash per acre.
       const cap = Math.max(cfg.maxAcrePriceCritical, s.money / 100 * Math.max(cfg.landCashShare, 0.1)) * 100;
       if (acrePrice(s.landBought + want - 1) > cap) { yield { wait: `CD booster: next acre ${usd(acrePrice(s.landBought))} above the land wall` }; return; }
@@ -9100,7 +9236,7 @@ try {
 
   function* sellActions(s) {
     if (!s.dealsKnown) { yield { wait: 'selling: market board not loaded (open the Market page once)' }; return; }
-    const load = (item) => Math.floor(COURIER_CU / (s.catalog.items[item]?.cargo_weight || 1));
+    const load = (item) => Math.floor(courierCU() / (s.catalog.items[item]?.cargo_weight || 1));
     const bids = (item) => s.deals.filter((d) => d.side === 'Sell' && d.item === item)
       .sort((a, z) => z.price / z.amount - a.price / a.amount);
 
@@ -9142,8 +9278,6 @@ try {
         { msg: { type: 'FillDeal', deal: d.id, amount: n, hire: null, region: REGION, courier: true }, until: (x) => x.shipId > id0 });
     }
   }
-  // Never sold: what the plan builds with, and corp-wide data.
-  const NEVER_SELL = [PLANKS, WFRAME, IFRAME, MONEY, CD, 25, 26, LD];
 
   // First candidate action not cooling down. Waits are collected; a final wait (saving for a
   // plan building) stops the search so camps don't eat the money.
@@ -9306,6 +9440,8 @@ try {
     if (!fell || !Array.isArray(fell.inputs) || !Array.isArray(fell.outputs) || typeof fell.ticks !== 'number') bad.push('Fell Wood recipe changed');
     if (typeof c.items[WOOD]?.base_value !== 'number') bad.push('Wood has no base_value');
     if (typeof s.st.items?.[MONEY] !== 'number') bad.push('money is not items[0]');
+    // Every building, recipe and item id the plan uses is found by name in the catalog (resolveIds in snapshot()).
+    if (idMissing.length) bad.push('not in the catalog: ' + idMissing.join(', '));
     return bad;
   }
   // Why Live must not run right now ('' = fine). Dry runs and the offline sim (no DOM) are never blocked.
@@ -9542,11 +9678,11 @@ try {
       ...techPlan().map((t) => [`P${t.phase} unlock ${bname(s, t.b)}`, techState(t.b)]),
       row('Sawmills', s.owned(B.SAWMILL), sawTarget(s)),
       row('Workshops (Frame Timber)', s.running(B.WORKSHOP, R.FRAME_TIMBER), cfg.workshops),
-      row('Iron Mines', s.running(B.MINE, R.MINE_IRON), cfg.ironMines),
-      row('Coal Mines', s.running(B.MINE, R.MINE_COAL), cfg.coalMines),
+      row('Iron Mines', s.running(B.MINE, R.MINE_IRON), mineTarget(s, R.MINE_IRON)),
+      row('Coal Mines', s.running(B.MINE, R.MINE_COAL), mineTarget(s, R.MINE_COAL)),
       row('Limestone Quarries', s.owned(B.QUARRY), cfg.quarries),
       row('Smelters', s.owned(B.SMELTER), cfg.smelters),
-      row('Gold Mines', s.running(B.MINE, R.MINE_GOLD), cfg.goldMines),
+      row('Gold Mines', s.running(B.MINE, R.MINE_GOLD), goldTarget(s)),
       row('Workshops (Iron Frames)', s.running(B.WORKSHOP, R.RIVET), cfg.ironFrameWorkshops),
       ['Planks / Wooden / Iron Frames', `${Math.floor(s.has(PLANKS))} / ${Math.floor(s.has(WFRAME))} / ${Math.floor(s.has(IFRAME))}`],
       ['Unequipped (no kit)', s.groups.filter((g) => g.count > (g.equipped ?? 0)).map((g) => `${g.name} ${g.count - (g.equipped ?? 0)}`).join(', ') || '—'],
@@ -9577,9 +9713,11 @@ try {
     return rows;
   }
 
-  // "Before you go offline": keep `hours` of power bills, and say what to check.
+  // "Before you go offline": keep `hours` of power bills, start the longest plan unlock that is ready, and say what to check.
+  // The unlock goes through the loop (all guards, dry run sends nothing) in the next 10 minutes; nothing is sent from here.
   function offline(hours = 8) {
     cfg.billHours = Math.max(1, hours); save();
+    longUnlockUntil = nowMs() + 600000;
     const s = read();
     if (!s) return console.error('[earlyGame] game state not found');
     const need = moneyFloor(s);
@@ -9588,7 +9726,7 @@ try {
       `\n  • power ${s.powerHave} MW → keep ${usd(need)} for bills (have ${usd(s.money)})${s.money < need ? '  ⚠ NOT ENOUGH: powered groups will pause' : ' ✓'}` +
       '\n  • the script now never spends below that, until the page reloads (earlyGame.cfg.billHours = 1 to undo)' +
       "\n  • auto-ship and selling stop while you're offline; stock piles up (24 h cap on the free plan)" +
-      `\n  • research: ${s.research ? `${bname(s, s.research.building)} running ✓` : nt ? `idle — next is ${bname(s, nt.b)} (start a long unlock before leaving)` : 'idle'}`);
+      `\n  • research: ${s.research ? `${bname(s, s.research.building)} running ✓` : nt ? `idle — ${running ? `Autopilot starts ${bname(s, nt.b)} (the longest ready unlock)` : `next is ${bname(s, nt.b)} (start a long unlock before leaving)`}` : 'idle'}`);
   }
 
 
@@ -9613,10 +9751,11 @@ try {
   const FIELDS = {
     workshops: { kind: 'count', label: 'Frame Timber Workshops', min: 0, max: 50 },
     sawmills: { kind: 'count', label: 'Sawmills (at least)', min: 0, max: 200 },
-    ironMines: { kind: 'count', label: 'Iron Mines', min: 0, max: 100 },
-    coalMines: { kind: 'count', label: 'Coal Mines', min: 0, max: 100 },
-    goldMines: { kind: 'count', label: 'Gold Mines', min: 0, optional: true, empty: 'No limit' },
+    ironMines: { kind: 'count', label: 'Iron Mines (at least)', min: 0, max: 100 },
+    coalMines: { kind: 'count', label: 'Coal Mines (at least)', min: 0, max: 100 },
+    goldMines: { kind: 'count', label: 'Gold Mines', min: 0, optional: true, empty: 'Auto' },
     ironFrameWorkshops: { kind: 'count', label: 'Iron Frame Workshops', min: 0, max: 50 },
+    landPaybackHours: { kind: 'count', label: 'Land pays back within', min: 0, max: 1000, unit: 'h' },
     maxAcrePriceEarly: { kind: 'money', label: 'Land wall, early', min: 0 },
     maxAcrePrice: { kind: 'money', label: 'Land wall, later', min: 0 },
     boosterBatch: { kind: 'count', label: 'Booster batch', min: 1, max: 100 },
@@ -9631,15 +9770,15 @@ try {
     woodReserve: { kind: 'count', label: 'Wood never sold below', min: 0, max: 1000000 },
     sellKeepMinutes: { kind: 'count', label: 'Keep minutes of use', min: 0, max: 1440, unit: 'min' },
     maxBuyPrice: { kind: 'mult', label: 'Max buy price (× base)', min: 0.1, max: 100, unit: '×' },
-    floorBuyUsd: { kind: 'usd', label: 'Floor parts, $ per unit', min: 0, max: 1000 },
-    buyOrderUsd: { kind: 'usd', label: 'Buy order, $ per unit', min: 0.01, max: 1000 },
+    floorBuyMult: { kind: 'mult', label: 'Floor parts, max × base', min: 0, max: 100, unit: '×' },
+    buyOrderMult: { kind: 'mult', label: 'Buy order price (× base)', min: 0.1, max: 100, unit: '×' },
     orderHoldHours: { kind: 'count', label: 'Order hold', min: 0, max: 720, unit: 'h' },
     maxActionsPerMin: { kind: 'count', label: 'Max actions per minute', min: 1, max: 60 },
     intervalMs: { kind: 'count', label: 'Check every', min: 500, max: 60000, unit: 'ms' },
     maxIdleMs: { kind: 'count', label: 'Slowest idle check', min: 500, max: 120000, unit: 'ms' },
     stallMinutes: { kind: 'count', label: 'Stall alert after', min: 0, max: 600, unit: 'min' },
   };
-  const ADV_FIELDS = ['quarries', 'smelters', 'maxAcrePriceCritical', 'landCashShare', 'boosterAcres', 'woodReserve', 'sellKeepMinutes', 'maxBuyPrice', 'floorBuyUsd', 'buyOrderUsd', 'orderHoldHours', 'maxActionsPerMin', 'intervalMs', 'maxIdleMs', 'stallMinutes'];
+  const ADV_FIELDS = ['quarries', 'smelters', 'maxAcrePriceCritical', 'landCashShare', 'boosterAcres', 'woodReserve', 'sellKeepMinutes', 'maxBuyPrice', 'floorBuyMult', 'buyOrderMult', 'orderHoldHours', 'maxActionsPerMin', 'intervalMs', 'maxIdleMs', 'stallMinutes'];
   const CHECKS = [
     ['sellAll', 'Sell spare full courier loads'],
     ['cdBooster', 'CD booster (build + demolish)'],
@@ -9717,8 +9856,8 @@ try {
       tail: [K.group('Experimental', refs.dryRunSwitch.el)],
       groups: [
         K.group('Build targets', mk('div', { class: 'idc-two' }, ...amount('workshops', 'sawmills', 'ironMines', 'coalMines', 'goldMines', 'ironFrameWorkshops'))),
-        K.group('Land price limits', mk('div', { class: 'idc-two' }, ...amount('maxAcrePriceEarly', 'maxAcrePrice')),
-          mk('div', { class: 'idc-desc' }, 'The most per acre Autopilot will pay for land, early on and later.')),
+        K.group('Land price limits', mk('div', { class: 'idc-two' }, ...amount('landPaybackHours', 'maxAcrePriceEarly', 'maxAcrePrice')),
+          mk('div', { class: 'idc-desc' }, 'Camps, farms and Gold Mines get land while it and the building pay back from their own income within this time; with no bid for what they make, the walls (most per acre, early on and later) apply.')),
         K.group('CD booster', mk('div', { class: 'idc-two' }, ...amount('boosterBatch', 'boosterMinCash', 'boosterKeepCash')), tog('cdBooster')),
         K.group('Automation', ...['sellAll', 'floorUpgrades', 'buyKits', 'postBuyOrders', 'dispatchOffice', 'autoResume'].map(tog)),
         K.group('Power bills', K.field('Going offline: keep power bills for', mk('div', { class: 'idc-inline' }, refs.hours.box, offBtn), refs.billNow)),
@@ -9956,7 +10095,7 @@ try {
     // Pure pieces for the offline simulator.
     _core: {
       checkGame, watchStall, stalledNow: () => stalled, resetWatch: () => { stalled = ''; prog.at = 0; lastPhase = null; },
-      snapshot: fullSnapshot, normalize, decide, checklist, phaseOf, finish, observe, userPaused, billPaused, floorTable, bomOf, transferMsg,
+      snapshot: fullSnapshot, normalize, decide, checklist, phaseOf, planDone, mineTarget, goldTarget, incomePerMin, buildCost, buildSteps, sellersOf, priceCents, idMissing, finish, observe, userPaused, billPaused, floorTable, bomOf, transferMsg,
       setClock: (fn) => { nowMs = fn; courierHoldUntil = 0; courierMisses = 0; cooldowns.clear(); successes.clear(); failures.clear(); for (const k in boosterLeft) delete boosterLeft[k]; },
     },
     _unload: () => {
