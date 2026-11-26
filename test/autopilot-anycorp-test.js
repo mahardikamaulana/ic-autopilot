@@ -113,6 +113,12 @@ t('land: payback from live income allows land above the wall; no bid → the wal
   const tiny = snap(st, [{ id: 9, side: 'Sell', item: I('Wood'), amount: 5, price: 5 * 1000, region: 0, expires_at: 99999999 }]);
   assert.strictEqual(k.incomePerMin(tiny, R('Fell Wood')), 0, 'a shallow bid is not income');
   assert.ok(k.buildSteps(tiny, camp, 'camp', 500, R('Fell Wood'), true).wall, 'shallow bid: the wall');
+  // a bid one new camp's hour would fit, but the 40 running camps already fill it: still no income
+  st.groups = { 6: { building: camp, count: 40, equipped: 40, recipe: R('Fell Wood'), region: 0, name: 'camps' } };
+  const mid = snap(st, [{ id: 9, side: 'Sell', item: I('Wood'), amount: 1000, price: 1000 * 1000, region: 0, expires_at: 99999999 }]);
+  assert.ok(mid.makePerMin[I('Wood')] > 0);
+  assert.strictEqual(k.incomePerMin(mid, R('Fell Wood')), 0, 'the existing camps fill the bid');
+  st.groups = {};
   ap.cfg.landPaybackHours = 1000;
   assert.ok(k.buildSteps(s, camp, 'camp', 500, R('Fell Wood')).steps, 'payback-only rule');
   st.land_bought[0] = 335;

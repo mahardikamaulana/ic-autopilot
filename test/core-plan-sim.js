@@ -174,8 +174,8 @@ const fastPacer = () => ({ beforeCommand: async () => { }, noteConfirm() { }, no
 
   await t('any corp: Plan done stands for S2-S4, Stage B from the research queue, prices count every region + the queues, live Cotton income', () => {
     const { cp } = load();
-    // a corp that finished the early plan its own way: no Frame Timber group, few Iron Frames, Factory / Paper Mill never unlocked
-    const st = stageA(); delete st.groups[3]; st.stock[0][I('Iron Frame')] = 4; st.unlocked_buildings = st.unlocked_buildings.filter((b) => b !== B('Factory') && b !== B('Paper Mill'));
+    // a corp that finished the early plan its own way: no Kiln, no Frame Timber group, few Iron Frames, Factory / Paper Mill never unlocked
+    const st = stageA(); delete st.groups[8]; delete st.groups[3]; st.stock[0][I('Iron Frame')] = 4; st.unlocked_buildings = st.unlocked_buildings.filter((b) => b !== B('Factory') && b !== B('Paper Mill'));
     const d = cp._decide(view(cp, st), ctxOf({ planDone: true }));
     assert.deepStrictEqual(d.S.slice(1, 4).map((c) => c.ok), [true, true, true]); assert.strictEqual(d.stage, 'A');
     assert.strictEqual(cp._decide(view(cp, st), ctxOf({ planDone: false })).stage, null, 'without Plan done S3 / S4 still count');

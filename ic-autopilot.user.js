@@ -8842,7 +8842,7 @@ try {
 
   const buildCost = (s, b) => Math.round(s.bld(b).cost * (20 + s.ownedAll(b)) / 20);
   // Cents per minute one more building on recipe r earns at the current floor rate: outputs at the Heartland bid that still takes
-  // the stock plus 1 h of this building's output (bid depth: one small high bid does not count), or base value while
+  // the stock plus 1 h of what the corp makes of it with this building added (bid depth: a small high bid does not count), or base value while
   // the corp eats the item itself; less its inputs at the best bid. 0 = not known (no bid deep enough, nothing eats it).
   function unitValue(s, item, depth = 0) {
     // same walk as planner.itemValues (not loaded in every harness): best bids first, the price of the lot the depth lands in
@@ -8856,7 +8856,7 @@ try {
     if (!rc) return 0;
     const runs = (s.st.layouts?.[r]?.fx?.rate ?? 1) * 120 / rc.ticks;
     let v = 0;
-    for (const o of rc.outputs) v += o.amount * unitValue(s, o.item, s.has(o.item) + o.amount * runs * 60);
+    for (const o of rc.outputs) v += o.amount * unitValue(s, o.item, s.has(o.item) + ((s.makePerMin[o.item] ?? 0) + o.amount * runs) * 60);
     for (const i of rc.inputs) v -= i.amount * unitValue(s, i.item);
     return Math.max(0, v * runs);
   }
