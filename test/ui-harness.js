@@ -876,7 +876,11 @@ async function useStageB(page, done, saved = {}) {
     const st = window.__st;
     for (const k of Object.keys(st)) delete st[k];
     Object.assign(st, fx.st);
+    // Not done = the last plan unlock (Lab) is still being researched; done = it finished.
+    const lab = fx.catalog.buildings.find((b) => b?.name === "Manufacturing Lab").id;
     if (done) st.research = null;
+    else { st.unlocked_buildings = st.unlocked_buildings.filter((b) => b !== lab); st.research = { ...st.research, building: lab }; }
+    window.__labId = lab;
     window.__fiber.memoizedProps.catalog = fx.catalog;
     window.__fiber.memoizedState.next.next.memoizedState = fx.deals;
     for (const [k, v] of Object.entries(saved)) localStorage.setItem(k, JSON.stringify(v));
@@ -898,7 +902,7 @@ async function sectionHandoff() {
       let t = await apText(page);
       ok(/Phase 5/.test(t.hero) && !(await page.evaluate(() => window.corePlan.running)), 'hand-off: Phase 5, Core plan not started yet', JSON.stringify(t));
       // The research ends: Plan done. Core plan starts by itself, in Autopilot's mode (dry run here), in the same panel.
-      await page.evaluate(() => { window.__st.research = null; });
+      await page.evaluate(() => { window.__st.research = null; window.__st.unlocked_buildings = [...window.__st.unlocked_buildings, window.__labId]; });
       await until(page, () => window.corePlan.running && /Core plan/.test(document.querySelector('.egp-panel .idc-state')?.textContent ?? ''), null, 15000);
       t = await apText(page);
       ok(await page.evaluate(() => window.corePlan.running && window.corePlan.cfg.dryRun), 'hand-off: Plan done starts Core plan in Autopilot\'s mode (dry run)');
@@ -1121,7 +1125,7 @@ const mode = process.argv[2];
     await page.evaluate(() => { window.earlyGame.panel(true); window.earlyGame.start({ dryRun: true }); });
     await page.waitForTimeout(2500);
     await page.screenshot({ path: path.join(out, pre + '-1-phase5.png') });
-    await page.evaluate(() => { window.__st.research = null; });
+    await page.evaluate(() => { window.__st.research = null; window.__st.unlocked_buildings = [...window.__st.unlocked_buildings, window.__labId]; });
     await page.waitForTimeout(5000);
     await page.screenshot({ path: path.join(out, pre + '-2-plan-done.png') });
     await page.evaluate(() => { localStorage.setItem('corePlan.v1.mem.handoff', JSON.stringify({ stopped: Date.now() })); window.earlyGame.stop(); });
