@@ -74,7 +74,7 @@
   let active = false; // a loop is still executing (maybe finishing a step after stop())
 
   // ---- watchdog, pacing, game check --------------------------------------------------
-  let rateScale = 1, okStreak = 0, waitStreak = 0, stalled = '', lastPhase = null, lastLiveCheck = 0, liveCountdownUntil = 0;
+  let rateScale = 1, okStreak = 0, waitStreak = 0, stalled = '', lastPhase = null, handedOver = false, lastLiveCheck = 0, liveCountdownUntil = 0;
   const INCOME_ACTION = /^(fill|autoship):/;           // selling is steady-state income, not plan progress
   const prog = { sig: '', at: 0, money: 0, acts: 0 };   // last time the plan moved (nowMs clock)
   const cash = [];                                      // { t, m } samples for the cash-change rate
@@ -108,6 +108,14 @@
       core.setBadge('AP', 'AP stalled');
       core.notify('AP', 'Autopilot looks stalled', stalled);
     }
+  }
+
+  // Plan done: Core plan picks up at once, in Autopilot's mode (a dry-run resume after a reload never goes Live by itself). Checked before
+  // any hold (CD Farm running), so the hand-off never waits. Once per run: a Core plan the user stops stays stopped, even if Iron Frames dip.
+  function handOver(s) {
+    if (handedOver || !running || !W.corePlan || phaseOf(s) !== 'done') return;
+    handedOver = true;
+    if (!(W.corePlan.busy || (W.corePlan.running && cfg.dryRun))) { note('plan done: Core plan takes over' + (cfg.dryRun ? ' (dry run)' : '')); W.corePlan.start({ dryRun: !!cfg.dryRun }); }
   }
 
   // Does the game still look like what this script was written against? Live mode needs it.
@@ -174,6 +182,7 @@
         }
         observe(s);
         trackCash(s);
+        handOver(s);
         const held = heldReason();
         if (held) { note('paused: ' + held); await sleep(cfg.intervalMs); continue; }
         sentTimes = sentTimes.filter((t) => Date.now() - t < 60000);
@@ -239,7 +248,7 @@
       if (why) { cfg.dryRun = true; console.warn('[earlyGame] Live refused: ' + why + '. Starting as a dry run.'); core.toast('Live refused: the game data changed. Started as a dry run (see the console).'); core.ledger.add('AP', 'fail', 'Live refused: ' + why); }
     }
     takeLock();
-    running = true; fails = 0; lastLine = ''; stopReason = '';
+    running = true; fails = 0; lastLine = ''; stopReason = ''; handedOver = false;
     stalled = ''; prog.at = 0; waitStreak = 0; rateScale = 1; okStreak = 0; lastLiveCheck = Date.now();
     core.setBadge('AP', '');
     if (cfg.dryRun) clearLive(); else heartbeatLive();

@@ -63,6 +63,8 @@
       next: d?.actions?.[0]?.text ?? null, waits: d?.waits ?? [], readouts: d?.readouts ?? {},
       land: d?.rule ? { lastAcre: d.rule.lastAcre, acresToBuy: d.rule.acresToBuy, landCost: Math.round(d.rule.landCost), tWallHours: +d.rule.tWall.toFixed(1), tWallFrom: d.rule.tWallFrom, income: Math.round(d.rule.income) } : null,
       holds: [...holds],
+      resumeIn: resumeLeft,   // seconds left of the Live resume countdown after a reload (0 = none)
+      handedOff: !!memOf('handoff').get().stopped,   // the hand-off has stopped (or recorded) Autopilot once
     };
   }
 

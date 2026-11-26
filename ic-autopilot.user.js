@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IC Autopilot
 // @namespace    idlecorp-toolkit
-// @version      2.8.15
+// @version      2.8.16
 // @author       XPARAD0X
 // @description  Early-game Autopilot, CD Farm (Construction Data by building and demolishing buildings; Auto picks the cheapest source itself), Lab runner (keeps the Manufacturing Labs researching), Auto ship (an "Auto ship" button on every distributor bid) and Auto utilities (an "Auto" switch that keeps the power and water subscriptions at what the groups need) for IdleCorp, each with a panel, menu or switch in the game UI.
 // @homepageURL  https://github.com/mahardikamaulana/ic-autopilot
@@ -17,7 +17,7 @@
 // Generated from src/*.js by build.js: edit those, then run
 //   bun build.js            (bun build.js --bump  raises @version first: Tampermonkey only updates when it goes up)
 //
-// Parts in one file; Core plan (window.corePlan, console only for now) reads the stage of the core game plan and sends its unlocks and early land.
+// Parts in one file; Core plan (window.corePlan) follows the core game plan: Autopilot starts it at Plan done and shows it in the Autopilot panel.
 // CD Farm and Autopilot talk through window.cdFarm and window.earlyGame,
 // all of them use the shared core, and each part is wrapped separately.
 //   0. Core      (window.idleCore)  one cached read of the game state, one socket listener, confirm
@@ -5577,6 +5577,8 @@ try {
       next: d?.actions?.[0]?.text ?? null, waits: d?.waits ?? [], readouts: d?.readouts ?? {},
       land: d?.rule ? { lastAcre: d.rule.lastAcre, acresToBuy: d.rule.acresToBuy, landCost: Math.round(d.rule.landCost), tWallHours: +d.rule.tWall.toFixed(1), tWallFrom: d.rule.tWallFrom, income: Math.round(d.rule.income) } : null,
       holds: [...holds],
+      resumeIn: resumeLeft,   // seconds left of the Live resume countdown after a reload (0 = none)
+      handedOff: !!memOf('handoff').get().stopped,   // the hand-off has stopped (or recorded) Autopilot once
     };
   }
 
@@ -9233,7 +9235,7 @@ try {
   let active = false; // a loop is still executing (maybe finishing a step after stop())
 
   // ---- watchdog, pacing, game check --------------------------------------------------
-  let rateScale = 1, okStreak = 0, waitStreak = 0, stalled = '', lastPhase = null, lastLiveCheck = 0, liveCountdownUntil = 0;
+  let rateScale = 1, okStreak = 0, waitStreak = 0, stalled = '', lastPhase = null, handedOver = false, lastLiveCheck = 0, liveCountdownUntil = 0;
   const INCOME_ACTION = /^(fill|autoship):/;           // selling is steady-state income, not plan progress
   const prog = { sig: '', at: 0, money: 0, acts: 0 };   // last time the plan moved (nowMs clock)
   const cash = [];                                      // { t, m } samples for the cash-change rate
@@ -9267,6 +9269,14 @@ try {
       core.setBadge('AP', 'AP stalled');
       core.notify('AP', 'Autopilot looks stalled', stalled);
     }
+  }
+
+  // Plan done: Core plan picks up at once, in Autopilot's mode (a dry-run resume after a reload never goes Live by itself). Checked before
+  // any hold (CD Farm running), so the hand-off never waits. Once per run: a Core plan the user stops stays stopped, even if Iron Frames dip.
+  function handOver(s) {
+    if (handedOver || !running || !W.corePlan || phaseOf(s) !== 'done') return;
+    handedOver = true;
+    if (!(W.corePlan.busy || (W.corePlan.running && cfg.dryRun))) { note('plan done: Core plan takes over' + (cfg.dryRun ? ' (dry run)' : '')); W.corePlan.start({ dryRun: !!cfg.dryRun }); }
   }
 
   // Does the game still look like what this script was written against? Live mode needs it.
@@ -9333,6 +9343,7 @@ try {
         }
         observe(s);
         trackCash(s);
+        handOver(s);
         const held = heldReason();
         if (held) { note('paused: ' + held); await sleep(cfg.intervalMs); continue; }
         sentTimes = sentTimes.filter((t) => Date.now() - t < 60000);
@@ -9398,7 +9409,7 @@ try {
       if (why) { cfg.dryRun = true; console.warn('[earlyGame] Live refused: ' + why + '. Starting as a dry run.'); core.toast('Live refused: the game data changed. Started as a dry run (see the console).'); core.ledger.add('AP', 'fail', 'Live refused: ' + why); }
     }
     takeLock();
-    running = true; fails = 0; lastLine = ''; stopReason = '';
+    running = true; fails = 0; lastLine = ''; stopReason = ''; handedOver = false;
     stalled = ''; prog.at = 0; waitStreak = 0; rateScale = 1; okStreak = 0; lastLiveCheck = Date.now();
     core.setBadge('AP', '');
     if (cfg.dryRun) clearLive(); else heartbeatLive();
@@ -9675,7 +9686,7 @@ try {
     refs.rows = K.rowList();
     refs.state = K.stateLine();
     refs.cdNote = K.banner(() => W.cdFarm?.panel?.(true), 'Open CD Farm');
-    refs.live = K.banner(() => { liveCountdownUntil = 0; render(); }, 'Cancel: resume as a dry run');
+    refs.live = K.banner(() => { liveCountdownUntil = 0; W.corePlan?.cancelResume?.(); render(); }, 'Cancel: resume as a dry run');   // both countdowns: one Cancel
     refs.stall = K.banner(() => { stalled = ''; core.setBadge('AP', ''); prog.at = nowMs(); prog.acts = 0; render(); }, 'Snooze');
     refs.check = K.rowList();
     refs.log = mk('div', { class: 'idc-recent', 'aria-live': 'polite' });
@@ -9727,19 +9738,33 @@ try {
 
   // The mode shown and started from the panel while idle: Dry run only with the experimental switch on. A run in progress shows what it really is.
   const viewDry = () => !!cfg.dryRun;   // the mode the panel shows and starts in: exactly what cfg says. Safety paths set it on purpose (refused Live, a reload resumed as a dry run), so the render never overrides it.
+  // Core plan in this panel: once the plan is done (or the hand-off has stopped Autopilot) and whenever it runs; null otherwise.
+  function cpOf(s) {
+    let c = null; try { c = W.corePlan?.status?.() ?? null; } catch {}
+    if (!c) return null;
+    const p = s ? phaseOf(s) : null;
+    c.handedOff &&= p === 'done' || p >= 4;   // the saved hand-off has no corp id: a new corp in this browser starts at Phase 1 again (4: a bill pause)
+    return c.running || c.handedOff || p === 'done' ? c : null;
+  }
+  const cpMode = (c) => (c.running ? (c.resumeIn ? 'resuming Live in ' + c.resumeIn + ' s' : c.dryRun ? 'dry run' : 'live') : 'stopped');
   function onMain() {
-    if (running) return stop();
-    if (viewDry()) return start();
-    if (Date.now() < confirmUntil) { confirmUntil = 0; return start({ dryRun: false }); }
+    const s = read(), cp = cpOf(s);
+    // After Plan done one button runs both: Stop stops Autopilot and Core plan; Start starts Core plan alone once the hand-off is done.
+    if (running || cp?.running) { if (cp?.running) W.corePlan.stop(); if (running) stop(); else render(); return; }
+    const go = (dry) => { if (cp?.handedOff) { W.corePlan.start({ dryRun: dry }); render(); } else if (dry) start(); else start({ dryRun: false }); };
+    if (viewDry()) return go(true);
+    if (Date.now() < confirmUntil) { confirmUntil = 0; return go(false); }
     confirmUntil = Date.now() + 6000;
     render();
     setTimeout(render, 6100);
   }
 
   // 'run' | 'wait' | 'err' | ''
-  function tone() {
+  function tone(cp) {
     if (running && stalled) return 'err';
     if (running) return heldReason() || cfg.dryRun ? 'wait' : 'run';
+    if (cp?.running) return cp.dryRun || cp.holds.length ? 'wait' : 'run';
+    if (cp?.stopReason) return 'err';
     if (stopReason && stopReason !== 'stopped by you') return 'err';
     return '';
   }
@@ -9752,20 +9777,21 @@ try {
     return null;
   }
 
-  function renderPanel(s) {
-    const t = tone();
+  function renderPanel(s, ph, cp, t) {
     K.setTone(P.dot, t);
-    refs.badge.textContent = viewDry() ? 'Dry run' : 'Live';
-    refs.badge.className = 'idc-badge' + (viewDry() ? '' : ' live');
+    const on = running || !!cp?.running, dry = running || !cp?.running ? viewDry() : cp.dryRun;
+    refs.badge.textContent = dry ? 'Dry run' : 'Live';
+    refs.badge.className = 'idc-badge' + (dry ? '' : ' live');
     if (!s) {
       refs.hero.set('—', '', 0); refs.rows.set([]); refs.check.set([]);
       refs.state.set(t, 'Waiting for the game to load…');
     } else {
-      const ph = phaseOf(s);
       const list = checklist(s);
       const marks = list.filter(([, v]) => /^(✓|·|researching|queued)/.test(v));
-      refs.hero.set(ph === 'done' ? 'Plan done' : `Phase ${ph}`, ph === 'done' ? '' : 'of 5', marks.length ? (marks.filter(([, v]) => v.startsWith('✓')).length / marks.length) * 100 : 0);
+      refs.hero.set(ph === 'done' ? 'Plan done' : `Phase ${ph}`, ph === 'done' ? '' : 'of 5',
+        ph === 'done' ? 100 : marks.length ? (marks.filter(([, v]) => v.startsWith('✓')).length / marks.length) * 100 : 0);   // done is full: optional rows (Gold Mines) never tick
       refs.rows.set([
+        ...(cp ? [['Core plan', (cp.stage ? 'stage ' + cp.stage + ' · ' : '') + cpMode(cp)]] : []),
         ['Money', `${usd(s.money)} · floor ${usd(moneyFloor(s))}`],
         ['CD', K.fmt(s.cd)],
         ['Acres', `${s.acresUsed} / ${s.acresOwned} · next ${usd(acrePrice(s.landBought))}`],
@@ -9780,14 +9806,19 @@ try {
       const held = running && heldReason();
       let next;
       try { const d = decide(s); next = d.wait ? 'Waiting: ' + d.wait : 'Next: ' + d.reason; } catch (e) { next = 'error: ' + e.message; }
+      // Core plan's line once it runs (or Autopilot has stopped at Plan done): what it does next or waits for
+      const cpLine = cp && (cp.running || !running) ? (cp.running ? (cp.dryRun ? 'Dry run. ' : '') + 'Core plan ' + (cp.next ? 'next: ' + cp.next : cp.waits[0] ? 'waiting: ' + cp.waits[0] : 'is reading the game…')
+        : 'Core plan stopped' + (cp.stopReason ? ': ' + cp.stopReason : '') + '.') : '';
       refs.state.set(t, held ? `Paused: ${held}`
+        : cpLine ? cpLine
         : running ? (cfg.dryRun ? 'Dry run. ' : '') + next
         : (stopReason ? `Stopped: ${stopReason}. ` : 'Stopped. ') + next);
     }
     const n = cdFarmNote();
     refs.cdNote.set(n?.text ?? '', !!n?.btn && !!W.cdFarm?.panel);
     refs.log.replaceChildren(...log.map((l) => mk('div', {}, l)));
-    refs.live.set(liveCountdownUntil ? `Resuming Live after the reload in ${Math.max(0, Math.ceil((liveCountdownUntil - Date.now()) / 1000))} s. Cancel to resume as a dry run instead.` : '');
+    refs.live.set(liveCountdownUntil ? `Resuming Live after the reload in ${Math.max(0, Math.ceil((liveCountdownUntil - Date.now()) / 1000))} s. Cancel to resume as a dry run instead.`
+      : cp?.resumeIn ? `Core plan resumes Live after the reload in ${cp.resumeIn} s. Cancel to keep it a dry run.` : '');
     refs.stall.set(stalled ? `Looks stalled: ${stalled}. Autopilot keeps running; check the log below.` : '');
     K.syncLog(P, ui, refs.logv);
     refs.alertBtn.hidden = core.notifyPerm() !== 'default';
@@ -9805,15 +9836,15 @@ try {
     refs.mode.el.hidden = !ui.dryRunSwitch;
     refs.dryRunSwitch.input.disabled = running || active;
     refs.mode.sync();
-    refs.mode.btns.forEach((b) => { b.disabled = running || active; });
+    refs.mode.btns.forEach((b) => { b.disabled = on || active; });
     const other = lockOwner() && lockOwner() !== TAB && !running;
-    const confirming = !running && !viewDry() && Date.now() < confirmUntil;
+    const confirming = !on && !viewDry() && Date.now() < confirmUntil;
     refs.plan.set(viewDry()
       ? 'Dry run: works out every step and writes it to the log, but sends nothing.'
       : `Live: sends actions to the game, one confirmed step at a time, and never spends below the power-bill floor${s ? ` (${usd(moneyFloor(s))})` : ''}.${confirming ? ' Click Confirm start to go.' : ''}`,
-    { hidden: running, hot: confirming });
-    refs.main.textContent = running ? 'Stop' : other ? 'Running in another tab' : active ? 'Stopping…' : viewDry() ? 'Start dry run' : confirming ? 'Confirm start' : 'Start live';
-    refs.main.disabled = !running && (other || active || !s);
+    { hidden: on, hot: confirming });
+    refs.main.textContent = on ? 'Stop' : other ? 'Running in another tab' : active ? 'Stopping…' : viewDry() ? 'Start dry run' : confirming ? 'Confirm start' : 'Start live';
+    refs.main.disabled = !on && (other || active || !s);
     refs.alt.hidden = !confirming;
   }
 
@@ -9822,14 +9853,16 @@ try {
   function render() {
     if (!HAS_DOM || unloaded) return;
     const s = read();
-    const t = tone();
-    const ph = s ? phaseOf(s) : null;
-    chrome?.setPill(heldReason() ? 'Held' : viewDry() ? 'Dry run' : ph === 'done' ? 'Done' : `P${ph ?? '?'}`, t, !running);
-    chrome?.setChip(ph == null ? 'Autopilot' : ph === 'done' ? 'Plan done' : `Phase ${ph}`, t,
-      `Autopilot · ${running ? (heldReason() ? 'paused' : cfg.dryRun ? 'dry run' : 'live') : 'stopped'}`);
+    const cp = cpOf(s);
+    const t = tone(cp);
+    const ph = s ? (cp?.handedOff ? 'done' : phaseOf(s)) : null;   // after the hand-off the early plan stays done, even if Iron Frames dip
+    const dry = running || !cp?.running ? viewDry() : cp.dryRun, stage = cp?.running && cp.stage;
+    chrome?.setPill(heldReason() ? 'Held' : dry ? 'Dry run' : ph === 'done' ? (stage ? 'Core ' + stage : 'Done') : `P${ph ?? '?'}`, t, !(running || cp?.running));
+    chrome?.setChip(ph == null ? 'Autopilot' : ph === 'done' ? (stage ? 'Core plan ' + stage : 'Plan done') : `Phase ${ph}`, t,
+      `Autopilot · ${running ? (heldReason() ? 'paused' : cfg.dryRun ? 'dry run' : 'live') : 'stopped'}` + (cp ? ' · Core plan · ' + cpMode(cp) : ''));
     const open = !!P?.el.isConnected;
     chrome?.setOpen(open);
-    if (open) renderPanel(s);
+    if (open) renderPanel(s, ph, cp, t);
   }
 
   function panel(show = true, opts = {}) {

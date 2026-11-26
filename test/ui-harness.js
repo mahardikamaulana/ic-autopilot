@@ -1,7 +1,8 @@
 // Browser harness for the userscript panels: loads ic-autopilot.user.js into headless Chrome on a fake game page
 // (sidebar, top bar, a fake React tree with the saved live board) and takes screenshots / runs UI checks.
 //   bun test/ui-harness.js shots <outDir> [width] [height]     # screenshots of all three panels (Autopilot, CD Farm, Lab), every tab
-//   bun test/ui-harness.js check                                # DOM + keyboard + mount/unmount assertions
+//   bun test/ui-harness.js check [shard]                        # DOM + keyboard + mount/unmount assertions
+//   bun test/ui-harness.js handoff-shots <outDir> [prefix] [w] [h] # Autopilot panel at Phase 5, Plan done and after the hand-off to Core plan
 const fs = require('fs');
 const path = require('path');
 const { chromium } = (() => {
@@ -866,12 +867,130 @@ async function sectionUnload(page, { q, attr, count, visible, ui }) {
   ok(await page.evaluate(() => !document.querySelector('.idc-panel, .idc-chip, .idc-tab, .idc-toasts, #idc-style, .au-sw, .au-note, #au-style')), 'unload removes panels, chrome, toasts and the stylesheet');
 }
 
+// The early plan hands over to Core plan in the same panel. The saved live corp (Stage B board) is one research away from Plan done:
+// research null = done. Loaded before the script, so it boots on that corp.
+const stageB = JSON.parse(fs.readFileSync(path.join(__dirname, 'live-stageB.json'), 'utf8'));
+async function useStageB(page, done, saved = {}) {
+  await page.evaluate(({ fx, done, saved }) => {
+    const st = window.__st;
+    for (const k of Object.keys(st)) delete st[k];
+    Object.assign(st, fx.st);
+    if (done) st.research = null;
+    window.__fiber.memoizedProps.catalog = fx.catalog;
+    window.__fiber.memoizedState.next.next.memoizedState = fx.deals;
+    for (const [k, v] of Object.entries(saved)) localStorage.setItem(k, JSON.stringify(v));
+  }, { fx: stageB, done, saved });
+}
+const apText = (page) => page.evaluate(() => {
+  const p = document.querySelector('.egp-panel'), q = (x) => p?.querySelector(x)?.textContent ?? '';
+  return { hero: q('.idc-hero'), bar: p?.querySelector('.idc-bar i')?.style.width, state: q('.idc-state'), rows: q('.idc-rows'), main: q('button.primary'), chip: document.querySelector('.egp-chip')?.textContent ?? '' };
+});
+
+async function sectionHandoff() {
+  {
+    const { browser, page, errors } = await open(1280, 800);
+    try {
+      await useStageB(page, false);
+      await load(page);
+      await page.evaluate(() => { window.earlyGame.panel(true); window.earlyGame.start({ dryRun: true }); });
+      await until(page, () => /Phase 5/.test(document.querySelector('.egp-panel .idc-hero')?.textContent ?? ''));
+      let t = await apText(page);
+      ok(/Phase 5/.test(t.hero) && !(await page.evaluate(() => window.corePlan.running)), 'hand-off: Phase 5, Core plan not started yet', JSON.stringify(t));
+      // The research ends: Plan done. Core plan starts by itself, in Autopilot's mode (dry run here), in the same panel.
+      await page.evaluate(() => { window.__st.research = null; });
+      await until(page, () => window.corePlan.running && /Core plan/.test(document.querySelector('.egp-panel .idc-state')?.textContent ?? ''), null, 15000);
+      t = await apText(page);
+      ok(await page.evaluate(() => window.corePlan.running && window.corePlan.cfg.dryRun), 'hand-off: Plan done starts Core plan in Autopilot\'s mode (dry run)');
+      ok(/Plan done/.test(t.hero) && t.bar === '100%', 'hand-off: hero shows Plan done with a full bar', JSON.stringify(t));
+      ok(/Core plan/.test(t.state) && /Core planstage [A-D]/.test(t.rows), 'hand-off: state line and rows show Core plan and its stage', JSON.stringify(t));
+      // Core plan stops Autopilot (the hand-off): the panel still runs, and its Stop stops Core plan.
+      await page.evaluate(() => { localStorage.setItem('corePlan.v1.mem.handoff', JSON.stringify({ stopped: Date.now() })); window.earlyGame.stop(); });
+      await until(page, () => document.querySelector('.egp-panel button.primary')?.textContent === 'Stop' && !window.earlyGame.running);
+      t = await apText(page);
+      ok(t.main === 'Stop' && /Plan done/.test(t.hero) && /^Core plan/.test(t.chip) && /Core plan/.test(t.state), 'hand-off: Autopilot stopped by the hand-off, panel shows Core plan running', JSON.stringify(t));
+      await page.click('.egp-panel button.primary');
+      ok(!(await page.evaluate(() => window.corePlan.running)), 'hand-off: Stop stops Core plan');
+      // Handed off and stopped: Start starts Core plan, not Autopilot.
+      await page.evaluate(() => { window.earlyGame.cfg.dryRun = true; });
+      await until(page, () => document.querySelector('.egp-panel button.primary')?.textContent === 'Start dry run');
+      await page.click('.egp-panel button.primary');
+      ok(await page.evaluate(() => window.corePlan.running && !window.earlyGame.running), 'hand-off: Start after the hand-off starts Core plan alone');
+      await page.evaluate(() => window.corePlan.stop());
+      ok(errors.length === 0, 'no console / page errors (handoff)', JSON.stringify(errors));
+    } finally { await browser.close(); }
+  }
+  {
+    // Reload mid-transition: the plan is already done and Autopilot was running. It resumes (as a dry run) and Core plan starts at once.
+    const { browser, page, errors } = await open(1280, 800);
+    try {
+      await useStageB(page, true, { 'earlyGame.v2': { running: true }, 'earlyGame.ui': { open: true } });
+      await load(page);
+      await until(page, () => window.corePlan.running, null, 15000);
+      const t = await apText(page);
+      ok(await page.evaluate(() => window.earlyGame.running && window.corePlan.running && window.corePlan.cfg.dryRun), 'hand-off after a reload: Autopilot resumes and Core plan starts (dry run)');
+      ok(/Plan done/.test(t.hero) && /Core plan/.test(t.rows), 'hand-off after a reload: panel shows Plan done and Core plan', JSON.stringify(t));
+      await page.evaluate(() => { window.earlyGame.stop(); window.corePlan.stop(); });
+      ok(errors.length === 0, 'no console / page errors (handoff reload)', JSON.stringify(errors));
+    } finally { await browser.close(); }
+  }
+  {
+    // Reload after the hand-off while Core plan was Live: its 60 s Live resume countdown shows in the panel; Cancel keeps it a dry run.
+    const { browser, page, errors } = await open(1280, 800);
+    try {
+      await useStageB(page, true, { 'corePlan.v1.mem.handoff': { stopped: Date.now() }, 'earlyGame.ui': { open: true } });
+      await page.evaluate(() => sessionStorage.setItem('corePlan.v1.live', JSON.stringify({ t: Date.now() })));
+      await load(page);
+      await until(page, () => /Core plan resumes Live/.test(document.querySelector('.egp-panel .idc-note:not([hidden])')?.textContent ?? ''), null, 8000);
+      const t = await apText(page);
+      ok(/Plan done/.test(t.hero) && t.main === 'Stop' && /resuming Live in \d+ s/.test(t.rows), 'hand-off reload: Core plan resume countdown shows in the panel', JSON.stringify(t));
+      await page.click('.egp-panel .idc-note:not([hidden]) button');
+      await page.waitForTimeout(1300);
+      ok(await page.evaluate(() => window.corePlan.running && window.corePlan.cfg.dryRun && !window.corePlan.status().resumeIn
+        && !document.querySelector('.egp-panel .idc-note:not([hidden])')?.textContent.includes('resumes Live')), 'hand-off reload: Cancel keeps Core plan a dry run and hides the countdown');
+      await page.evaluate(() => window.corePlan.stop());
+      ok(errors.length === 0, 'no console / page errors (handoff resume)', JSON.stringify(errors));
+    } finally { await browser.close(); }
+  }
+  {
+    // Reload with both Live (Autopilot with liveResume, Core plan) before the hand-off: one Cancel cancels both countdowns.
+    const { browser, page, errors } = await open(1280, 800);
+    try {
+      await useStageB(page, true, { 'earlyGame.v2': { running: true, cfg: { liveResume: true } }, 'earlyGame.ui': { open: true } });
+      await page.evaluate(() => { const f = JSON.stringify({ t: Date.now() }); sessionStorage.setItem('corePlan.v1.live', f); sessionStorage.setItem('earlyGame.v2.live', f); });
+      await load(page);
+      await until(page, () => /Resuming Live after the reload/.test(document.querySelector('.egp-panel .idc-note:not([hidden])')?.textContent ?? '') && window.corePlan.status().resumeIn > 0, null, 10000);
+      await page.click('.egp-panel .idc-note:not([hidden]) button');
+      await until(page, () => window.earlyGame.running, null, 8000);
+      ok(await page.evaluate(() => window.corePlan.status().resumeIn === 0 && window.earlyGame.cfg.dryRun), 'hand-off reload: one Cancel cancels both Live countdowns');
+      await page.evaluate(() => { window.earlyGame.stop(); window.corePlan.stop(); });
+      ok(errors.length === 0, 'no console / page errors (handoff two countdowns)', JSON.stringify(errors));
+    } finally { await browser.close(); }
+  }
+  {
+    // A hand-off saved by an earlier corp in this browser: a new corp (Phase 1) shows the early plan, and Start starts Autopilot.
+    const { browser, page, errors } = await open(1280, 800);
+    try {
+      await page.evaluate(() => { localStorage.setItem('corePlan.v1.mem.handoff', JSON.stringify({ stopped: 1 })); localStorage.setItem('earlyGame.ui', JSON.stringify({ open: true })); });
+      await load(page);
+      await page.evaluate(() => { window.earlyGame.cfg.dryRun = true; });
+      await until(page, () => document.querySelector('.egp-panel button.primary')?.textContent === 'Start dry run');
+      const t = await apText(page);
+      ok(/Phase 1/.test(t.hero) && !/Core plan/.test(t.rows), 'hand-off: a saved hand-off is ignored on a new corp', JSON.stringify(t));
+      await page.click('.egp-panel button.primary');
+      ok(await page.evaluate(() => window.earlyGame.running && !window.corePlan.running), 'hand-off: Start on a new corp starts Autopilot');
+      await page.evaluate(() => window.earlyGame.stop());
+      ok(errors.length === 0, 'no console / page errors (handoff new corp)', JSON.stringify(errors));
+    } finally { await browser.close(); }
+  }
+}
+
 const SHARDS = {
   chrome: { main: [sectionChrome] },
   cdfarm: { main: [sectionCdFarm] },
   lab: { main: [sectionLab] },
   utilities: { main: [sectionUtilities, sectionUnload] },
   narrow: { own: sectionNarrow },
+  handoff: { own: sectionHandoff },
   docked: { own: sectionDocked },
   motion: { own: sectionMotion },
   'auto-a': { auto: autoGroup1 },
@@ -935,6 +1054,26 @@ const mode = process.argv[2];
 (async () => {
   if (mode === 'check') return checks(process.argv[3]);   // bun test/ui-harness.js check [shard]
   if (mode === 'auto') return checks('auto');                // the three Auto shards
+
+  if (mode === 'handoff-shots') {   // bun test/ui-harness.js handoff-shots <outDir> [prefix] [width] [height]: Phase 5, Plan done, after the hand-off
+    const out = process.argv[3], pre = process.argv[4] || 'handoff', w = +process.argv[5] || 1650, hgt = +process.argv[6] || 962;
+    fs.mkdirSync(out, { recursive: true });
+    const { browser, page, errors } = await open(w, hgt, false, true);
+    await useStageB(page, false, { 'earlyGame.ui': { open: true } });
+    await load(page);
+    await page.evaluate(() => { window.earlyGame.panel(true); window.earlyGame.start({ dryRun: true }); });
+    await page.waitForTimeout(2500);
+    await page.screenshot({ path: path.join(out, pre + '-1-phase5.png') });
+    await page.evaluate(() => { window.__st.research = null; });
+    await page.waitForTimeout(5000);
+    await page.screenshot({ path: path.join(out, pre + '-2-plan-done.png') });
+    await page.evaluate(() => { localStorage.setItem('corePlan.v1.mem.handoff', JSON.stringify({ stopped: Date.now() })); window.earlyGame.stop(); });
+    await page.waitForTimeout(1500);
+    await page.screenshot({ path: path.join(out, pre + '-3-after-handoff.png') });
+    console.log('problems logged:', JSON.stringify(await page.evaluate(() => window.idleCore.ledger.list().filter((e) => e.kind === 'fail' || e.kind === 'alert').map((e) => e.mod + ' ' + e.text))));
+    console.log('errors:', JSON.stringify(errors));
+    await browser.close();
+  }
 
   if (mode === 'shots') {
     const out = process.argv[3]; const w = +process.argv[4] || 1280, hgt = +process.argv[5] || 800;

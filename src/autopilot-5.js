@@ -105,7 +105,7 @@
     refs.rows = K.rowList();
     refs.state = K.stateLine();
     refs.cdNote = K.banner(() => W.cdFarm?.panel?.(true), 'Open CD Farm');
-    refs.live = K.banner(() => { liveCountdownUntil = 0; render(); }, 'Cancel: resume as a dry run');
+    refs.live = K.banner(() => { liveCountdownUntil = 0; W.corePlan?.cancelResume?.(); render(); }, 'Cancel: resume as a dry run');   // both countdowns: one Cancel
     refs.stall = K.banner(() => { stalled = ''; core.setBadge('AP', ''); prog.at = nowMs(); prog.acts = 0; render(); }, 'Snooze');
     refs.check = K.rowList();
     refs.log = mk('div', { class: 'idc-recent', 'aria-live': 'polite' });
@@ -157,19 +157,33 @@
 
   // The mode shown and started from the panel while idle: Dry run only with the experimental switch on. A run in progress shows what it really is.
   const viewDry = () => !!cfg.dryRun;   // the mode the panel shows and starts in: exactly what cfg says. Safety paths set it on purpose (refused Live, a reload resumed as a dry run), so the render never overrides it.
+  // Core plan in this panel: once the plan is done (or the hand-off has stopped Autopilot) and whenever it runs; null otherwise.
+  function cpOf(s) {
+    let c = null; try { c = W.corePlan?.status?.() ?? null; } catch {}
+    if (!c) return null;
+    const p = s ? phaseOf(s) : null;
+    c.handedOff &&= p === 'done' || p >= 4;   // the saved hand-off has no corp id: a new corp in this browser starts at Phase 1 again (4: a bill pause)
+    return c.running || c.handedOff || p === 'done' ? c : null;
+  }
+  const cpMode = (c) => (c.running ? (c.resumeIn ? 'resuming Live in ' + c.resumeIn + ' s' : c.dryRun ? 'dry run' : 'live') : 'stopped');
   function onMain() {
-    if (running) return stop();
-    if (viewDry()) return start();
-    if (Date.now() < confirmUntil) { confirmUntil = 0; return start({ dryRun: false }); }
+    const s = read(), cp = cpOf(s);
+    // After Plan done one button runs both: Stop stops Autopilot and Core plan; Start starts Core plan alone once the hand-off is done.
+    if (running || cp?.running) { if (cp?.running) W.corePlan.stop(); if (running) stop(); else render(); return; }
+    const go = (dry) => { if (cp?.handedOff) { W.corePlan.start({ dryRun: dry }); render(); } else if (dry) start(); else start({ dryRun: false }); };
+    if (viewDry()) return go(true);
+    if (Date.now() < confirmUntil) { confirmUntil = 0; return go(false); }
     confirmUntil = Date.now() + 6000;
     render();
     setTimeout(render, 6100);
   }
 
   // 'run' | 'wait' | 'err' | ''
-  function tone() {
+  function tone(cp) {
     if (running && stalled) return 'err';
     if (running) return heldReason() || cfg.dryRun ? 'wait' : 'run';
+    if (cp?.running) return cp.dryRun || cp.holds.length ? 'wait' : 'run';
+    if (cp?.stopReason) return 'err';
     if (stopReason && stopReason !== 'stopped by you') return 'err';
     return '';
   }
@@ -182,20 +196,21 @@
     return null;
   }
 
-  function renderPanel(s) {
-    const t = tone();
+  function renderPanel(s, ph, cp, t) {
     K.setTone(P.dot, t);
-    refs.badge.textContent = viewDry() ? 'Dry run' : 'Live';
-    refs.badge.className = 'idc-badge' + (viewDry() ? '' : ' live');
+    const on = running || !!cp?.running, dry = running || !cp?.running ? viewDry() : cp.dryRun;
+    refs.badge.textContent = dry ? 'Dry run' : 'Live';
+    refs.badge.className = 'idc-badge' + (dry ? '' : ' live');
     if (!s) {
       refs.hero.set('—', '', 0); refs.rows.set([]); refs.check.set([]);
       refs.state.set(t, 'Waiting for the game to load…');
     } else {
-      const ph = phaseOf(s);
       const list = checklist(s);
       const marks = list.filter(([, v]) => /^(✓|·|researching|queued)/.test(v));
-      refs.hero.set(ph === 'done' ? 'Plan done' : `Phase ${ph}`, ph === 'done' ? '' : 'of 5', marks.length ? (marks.filter(([, v]) => v.startsWith('✓')).length / marks.length) * 100 : 0);
+      refs.hero.set(ph === 'done' ? 'Plan done' : `Phase ${ph}`, ph === 'done' ? '' : 'of 5',
+        ph === 'done' ? 100 : marks.length ? (marks.filter(([, v]) => v.startsWith('✓')).length / marks.length) * 100 : 0);   // done is full: optional rows (Gold Mines) never tick
       refs.rows.set([
+        ...(cp ? [['Core plan', (cp.stage ? 'stage ' + cp.stage + ' · ' : '') + cpMode(cp)]] : []),
         ['Money', `${usd(s.money)} · floor ${usd(moneyFloor(s))}`],
         ['CD', K.fmt(s.cd)],
         ['Acres', `${s.acresUsed} / ${s.acresOwned} · next ${usd(acrePrice(s.landBought))}`],
@@ -210,14 +225,19 @@
       const held = running && heldReason();
       let next;
       try { const d = decide(s); next = d.wait ? 'Waiting: ' + d.wait : 'Next: ' + d.reason; } catch (e) { next = 'error: ' + e.message; }
+      // Core plan's line once it runs (or Autopilot has stopped at Plan done): what it does next or waits for
+      const cpLine = cp && (cp.running || !running) ? (cp.running ? (cp.dryRun ? 'Dry run. ' : '') + 'Core plan ' + (cp.next ? 'next: ' + cp.next : cp.waits[0] ? 'waiting: ' + cp.waits[0] : 'is reading the game…')
+        : 'Core plan stopped' + (cp.stopReason ? ': ' + cp.stopReason : '') + '.') : '';
       refs.state.set(t, held ? `Paused: ${held}`
+        : cpLine ? cpLine
         : running ? (cfg.dryRun ? 'Dry run. ' : '') + next
         : (stopReason ? `Stopped: ${stopReason}. ` : 'Stopped. ') + next);
     }
     const n = cdFarmNote();
     refs.cdNote.set(n?.text ?? '', !!n?.btn && !!W.cdFarm?.panel);
     refs.log.replaceChildren(...log.map((l) => mk('div', {}, l)));
-    refs.live.set(liveCountdownUntil ? `Resuming Live after the reload in ${Math.max(0, Math.ceil((liveCountdownUntil - Date.now()) / 1000))} s. Cancel to resume as a dry run instead.` : '');
+    refs.live.set(liveCountdownUntil ? `Resuming Live after the reload in ${Math.max(0, Math.ceil((liveCountdownUntil - Date.now()) / 1000))} s. Cancel to resume as a dry run instead.`
+      : cp?.resumeIn ? `Core plan resumes Live after the reload in ${cp.resumeIn} s. Cancel to keep it a dry run.` : '');
     refs.stall.set(stalled ? `Looks stalled: ${stalled}. Autopilot keeps running; check the log below.` : '');
     K.syncLog(P, ui, refs.logv);
     refs.alertBtn.hidden = core.notifyPerm() !== 'default';
@@ -235,15 +255,15 @@
     refs.mode.el.hidden = !ui.dryRunSwitch;
     refs.dryRunSwitch.input.disabled = running || active;
     refs.mode.sync();
-    refs.mode.btns.forEach((b) => { b.disabled = running || active; });
+    refs.mode.btns.forEach((b) => { b.disabled = on || active; });
     const other = lockOwner() && lockOwner() !== TAB && !running;
-    const confirming = !running && !viewDry() && Date.now() < confirmUntil;
+    const confirming = !on && !viewDry() && Date.now() < confirmUntil;
     refs.plan.set(viewDry()
       ? 'Dry run: works out every step and writes it to the log, but sends nothing.'
       : `Live: sends actions to the game, one confirmed step at a time, and never spends below the power-bill floor${s ? ` (${usd(moneyFloor(s))})` : ''}.${confirming ? ' Click Confirm start to go.' : ''}`,
-    { hidden: running, hot: confirming });
-    refs.main.textContent = running ? 'Stop' : other ? 'Running in another tab' : active ? 'Stopping…' : viewDry() ? 'Start dry run' : confirming ? 'Confirm start' : 'Start live';
-    refs.main.disabled = !running && (other || active || !s);
+    { hidden: on, hot: confirming });
+    refs.main.textContent = on ? 'Stop' : other ? 'Running in another tab' : active ? 'Stopping…' : viewDry() ? 'Start dry run' : confirming ? 'Confirm start' : 'Start live';
+    refs.main.disabled = !on && (other || active || !s);
     refs.alt.hidden = !confirming;
   }
 
@@ -252,14 +272,16 @@
   function render() {
     if (!HAS_DOM || unloaded) return;
     const s = read();
-    const t = tone();
-    const ph = s ? phaseOf(s) : null;
-    chrome?.setPill(heldReason() ? 'Held' : viewDry() ? 'Dry run' : ph === 'done' ? 'Done' : `P${ph ?? '?'}`, t, !running);
-    chrome?.setChip(ph == null ? 'Autopilot' : ph === 'done' ? 'Plan done' : `Phase ${ph}`, t,
-      `Autopilot · ${running ? (heldReason() ? 'paused' : cfg.dryRun ? 'dry run' : 'live') : 'stopped'}`);
+    const cp = cpOf(s);
+    const t = tone(cp);
+    const ph = s ? (cp?.handedOff ? 'done' : phaseOf(s)) : null;   // after the hand-off the early plan stays done, even if Iron Frames dip
+    const dry = running || !cp?.running ? viewDry() : cp.dryRun, stage = cp?.running && cp.stage;
+    chrome?.setPill(heldReason() ? 'Held' : dry ? 'Dry run' : ph === 'done' ? (stage ? 'Core ' + stage : 'Done') : `P${ph ?? '?'}`, t, !(running || cp?.running));
+    chrome?.setChip(ph == null ? 'Autopilot' : ph === 'done' ? (stage ? 'Core plan ' + stage : 'Plan done') : `Phase ${ph}`, t,
+      `Autopilot · ${running ? (heldReason() ? 'paused' : cfg.dryRun ? 'dry run' : 'live') : 'stopped'}` + (cp ? ' · Core plan · ' + cpMode(cp) : ''));
     const open = !!P?.el.isConnected;
     chrome?.setOpen(open);
-    if (open) renderPanel(s);
+    if (open) renderPanel(s, ph, cp, t);
   }
 
   function panel(show = true, opts = {}) {

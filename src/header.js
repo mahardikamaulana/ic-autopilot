@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IC Autopilot
 // @namespace    idlecorp-toolkit
-// @version      2.8.15
+// @version      2.8.16
 // @author       XPARAD0X
 // @description  Early-game Autopilot, CD Farm (Construction Data by building and demolishing buildings; Auto picks the cheapest source itself), Lab runner (keeps the Manufacturing Labs researching), Auto ship (an "Auto ship" button on every distributor bid) and Auto utilities (an "Auto" switch that keeps the power and water subscriptions at what the groups need) for IdleCorp, each with a panel, menu or switch in the game UI.
 // @homepageURL  https://github.com/mahardikamaulana/ic-autopilot
@@ -17,7 +17,7 @@
 // Generated from src/*.js by build.js: edit those, then run
 //   bun build.js            (bun build.js --bump  raises @version first: Tampermonkey only updates when it goes up)
 //
-// Parts in one file; Core plan (window.corePlan, console only for now) reads the stage of the core game plan and sends its unlocks and early land.
+// Parts in one file; Core plan (window.corePlan) follows the core game plan: Autopilot starts it at Plan done and shows it in the Autopilot panel.
 // CD Farm and Autopilot talk through window.cdFarm and window.earlyGame,
 // all of them use the shared core, and each part is wrapped separately.
 //   0. Core      (window.idleCore)  one cached read of the game state, one socket listener, confirm
