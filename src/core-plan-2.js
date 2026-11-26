@@ -10,16 +10,20 @@
     const lab = v.owned('Manufacturing Lab'), kiln = v.owned('Kiln'), mine = v.owned('Mine'), quarry = v.owned('Quarry');
     const s4 = cond('S4', lab >= 1 && kiln >= 1 && mine >= 1 && quarry >= 1, lab >= 1 && kiln >= 1 && mine >= 1 && quarry >= 1 ? 'built' : 'missing: ' + [['Manufacturing Lab', lab], ['Kiln', kiln], ['Mine', mine], ['Quarry', quarry]].filter(([, n]) => n < 1).map(([n]) => n).join(', '));
     const s1 = cond('S1', ctx.planDone === true || (s2.ok && s3.ok && s4.ok), ctx.planDone === true ? 'Autopilot: Plan done' : (s2.ok && s3.ok && s4.ok) ? 'S2-S4 hold' : 'Autopilot has not finished the Early-Game Plan, and S2-S4 do not all hold');
+    // Autopilot's Plan done stands for S2-S4: a corp that finished the early plan its own way still starts Stage A.
+    if (ctx.planDone === true) for (const c of [s2, s3, s4]) if (!c.ok) { c.ok = true; c.why = 'Autopilot: Plan done (' + c.why + ')'; }
     const s5 = cond('S5', !v.unlocked('Assembly Plant'), v.unlocked('Assembly Plant') ? 'Assembly Plant is already unlocked (join at stage B or later)' : 'not unlocked yet');
     const c10 = ctx.cashDelta10;
     const s6 = cond('S6', c10 == null ? null : c10 > 0, c10 == null ? 'not enough cash samples yet (needs 10 min)' : 'money ' + (c10 > 0 ? 'rose ' : 'fell ') + usd(Math.abs(c10)) + ' over 10 min');
-    const s7 = cond('S7', v.cottonBid, v.cottonBid ? 'Cotton bid in Heartland' : 'no Cotton bid in Heartland');
+    const s7 = !v.dealsLoaded ? cond('S7', null, 'market board not loaded (open the Market page once)')
+      : cond('S7', v.cottonBid, v.cottonBid ? 'Cotton bid in Heartland' : 'no Cotton bid in Heartland');
     return [s1, s2, s3, s4, s5, s6, s7];
   }
   function stageOf(v, S) {
     if (v.owned('Retail Store') >= 1) return 'D';
     if (v.unlocked('Assembly Plant')) return 'C';
-    if (v.research && v.research.building === v.idB('Assembly Plant')) return 'B';
+    const ap = v.idB('Assembly Plant');
+    if (ap != null && (v.research?.building === ap || (v.st.research_queue ?? []).some((q) => q?.building === ap))) return 'B';
     const ok = S.filter((c) => c.id !== 'S5').every((c) => c.ok !== false);
     return ok && S[0].ok ? 'A' : null;
   }
@@ -129,6 +133,13 @@
     return { action: { id: 'tech:' + nx.b, text: why + ' (' + nx.cd + ' CD' + (proto.length ? ' + ' + proto.map((i) => i.amount + ' ' + (v.C.items[i.item]?.name ?? i.item)).join(', ') : '') + ')',
       steps: [{ msg: { type: 'StartTech', building: nx.b, region: REGION }, until: (x) => x.research?.building === nx.b || x.unlocked(nx.name) }] } };
   }
+  // Dollars per hour one Cotton Farm earns: the best Heartland Cotton bid x a Farm's output (runs per building from the live group's
+  // work row), else cfg.cottonFarmHourly.
+  function cottonHourly(v) {
+    const rc = v.C.recipes[v.idR('Grow Cotton')], w = v.cottonGroup?.work?.find((x) => x.recipe === rc?.id);
+    if (!v.cottonUnit || !rc?.ticks || !(w?.buildings > 0 && w.runs > 0)) return cfg.cottonFarmHourly;
+    return v.cottonUnit * w.runs / w.buildings * (rc.outputs?.[0]?.amount ?? 1) * 7200 / rc.ticks / 100;
+  }
   // Stage A-B land: an acre plus a Cotton Farm while (acre + Farm) / hourly income <= cfg.landPaybackAB; one purchase per call.
   // block: why another use of the cash goes first (B1, B2).
   function landAction(v, stage, floorCents, block) {
@@ -136,10 +147,10 @@
     if (block) return { wait: 'land: ' + block };
     if (!v.cottonGroup) return { wait: 'land: no running Cotton Farm group to add to' };
     if (v.acresOwned >= ACRE_CAP) return { wait: 'land: Heartland cap (' + ACRE_CAP + ' acres)' };
-    const farm = v.idB('Farm'), farmCents = P.price(v.bld(farm).cost, v.owned('Farm'), 0);
+    const farm = v.idB('Farm'), farmCents = P.price(v.bld(farm).cost, v.ownedAll('Farm'), 0);
     const needAcre = v.freeAcres - cfg.bufferAcres < 1;   // the CD farm's spare acres stay free
     const cost = farmCents + (needAcre ? v.nextAcreCents : 0);
-    const payback = cost / 100 / cfg.cottonFarmHourly;
+    const payback = cost / 100 / cottonHourly(v);
     const line = (needAcre ? 'acre #' + (v.acresOwned + 1) + ' ' + usd(v.nextAcreCents) + ' + ' : '') + 'Cotton Farm ' + usd(farmCents) + ', payback ' + payback.toFixed(1) + ' h';
     if (payback > cfg.landPaybackAB) return { wait: 'land: ' + line + ' > ' + cfg.landPaybackAB + ' h, rule closed' };
     if (v.money - cost < floorCents) return { wait: 'land: ' + line + ': need ' + usd(floorCents + cost - v.money) + ' more above the floor' };
@@ -207,7 +218,9 @@
     // After the directors' context: a failed retail checkpoint (ctx.retailFail) caps the planks at the furniture blocks sales carry (plan A2).
     let rule = null;
     try {
-      const planksCap = ctx.retailFail && typeof ctx.retailCap === 'number' ? ctx.retailCap / M.engineModel(v.C).wsPerPlank : undefined;
+      // The engine is sized to demand too: planks the shelves can sell (appetite x share, from the retail facts), and on a fail the measured cap.
+      const caps = [ctx.retail?.demandPlanksH > 0 ? ctx.retail.demandPlanksH : null, ctx.retailFail && typeof ctx.retailCap === 'number' ? ctx.retailCap / M.engineModel(v.C).wsPerPlank : null].filter((x) => typeof x === 'number');
+      const planksCap = caps.length ? Math.min(...caps) : undefined;
       // C4: the measured CD rate sets T_wall once CD Farm has measured 30 min (landCdRate); the model before
       rule = M.landRule(landInput(v, ctx), v.C, { cyclesPerHour: ctx.cyclesPerHour ?? cfg.cyclesPerHour, planksCap, cdPerHour: landCdRate(ctx) ?? undefined });
     } catch (e) { console.error(e); }

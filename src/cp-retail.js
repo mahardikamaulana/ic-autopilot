@@ -5,7 +5,8 @@
 //   - Pre-store gate: once the Retail Store is unlocked, every made shelf good needs cfg.stockHoursPerShelf hours of what will sell
 //     in stock: min(modelled demand, measured output) per hour (sales are capped by output, wiki 4.7). Held-only goods skip the gate.
 //   - Builds 1 store (BuyBuilding, then CreateGroup amount 1 "Retail"; an empty Retail group is reused), then SetAssortment with up
-//     to 4 of Bookshelf, Table, Chair, Bench (made, assigned or held, best appetite x price first), only when the shelf set differs.
+//     to 4 of the board's goods the Corporation can make (made, assigned or held, best appetite x price first; Bookshelf, Table, Chair,
+//     Bench when the board names none), only when the shelf set differs.
 //     A shelved good leaves only after cfg.retailShelfDropMin minutes absent, so pauses do not churn the shelf.
 //   - Money gate: floor + store price + bill floor (new MW x $20 + 2 h of bills, plan 8.1); Iron Frames keep cfg.ifReserve back.
 //   - Checkpoint sampler (context): every cfg.retailSampleMin minutes after the shelves are set it records the shelf rows, the rating
@@ -24,12 +25,12 @@ try {
   if (!W.corePlan?.addDirector) throw new Error('Core plan did not load');
   const P = W.idleCore?.planner;
   const REGION = 0, TPS = 2, TICKS_H = 3600 * TPS;
-  const GOODS = ['Bookshelf', 'Table', 'Chair', 'Bench'];
+  // fallback shelf goods when the board names none the Corporation can make
   const RECIPE = { Bookshelf: 'Make Bookshelf', Table: 'Make Table', Chair: 'Make Chair', Bench: 'Make Bench' };
   const STORE = 'Retail Store', GROUP_NAME = 'Retail', WORKSHOP = 'Workshop', FT = 'Frame Timber', FT_GROUP = 'Frame Timber';
   const RATES = { power: 1000, water: 400, bandwidth: 1500 };   // cents per unit per 10-min bill (same as autoUtil billsOf)
+  // shortcut: the corp state carries no stock quality, so the price uses quality 0; read it once the protocol shows one.
   const Q0 = 0.952;                    // quality factor at quality 0 (wiki retail.md, Price)
-  const PRICE_X = 1.52;                // retail price / base value expected at quality 0, board price 160%
   const cfg = () => W.corePlan.cfg;
   const usd = (c) => '$' + (c / 100).toLocaleString('en-US', { maximumFractionDigits: 0 });
   const pct = (x) => (x * 100).toFixed(0) + '%';
@@ -71,6 +72,36 @@ try {
     return null;
   }
 
+  // Shelf goods: every board row the Corporation can make (a recipe on an unlocked building), name -> recipe name; RECIPE when none.
+  function goodsOf(v, board) {
+    const rows = board?.shelves?.[REGION] ?? board?.shelves?.[String(REGION)];
+    const out = {};
+    if (rows && typeof rows === 'object') for (const id of Object.keys(rows)) {
+      const n = v.C.items[id]?.name;
+      if (!n) continue;
+      const rs = Object.values(v.C.recipes).filter((r) => r.outputs?.[0]?.item === +id && v.unlocked(v.bld(r.building).name));
+      const r = rs.find((x) => x.name === RECIPE[n]) ?? rs[0];
+      if (r) out[n] = r.name;
+    }
+    return Object.keys(out).length ? out : RECIPE;
+  }
+  // A demand world event running now (wiki megaprojects-and-events: "Demand +-X% for item in region"). null: no event message seen.
+  // shortcut: the WorldEvents payload is unverified; any event text naming demand with no end tick in the past counts. Parse its fields once a capture shows them.
+  function demandEvent(we, tick) {
+    if (!we?.raw) return null;
+    let j = null;
+    try { j = typeof we.raw === 'string' ? JSON.parse(we.raw) : we.raw; } catch { return /demand/i.test(String(we.raw)); }
+    let hit = false;
+    const walk = (o) => {
+      if (hit || !o || typeof o !== 'object') return;
+      const end = o.ends_at ?? o.end_tick ?? o.until ?? o.expires_at;
+      if (Object.values(o).some((x) => typeof x === 'string' && /demand/i.test(x)) && !(typeof end === 'number' && tick != null && end <= tick)) { hit = true; return; }
+      Object.values(o).forEach(walk);
+    };
+    walk(j);
+    return hit;
+  }
+
   // ---- what the Corporation makes ---------------------------------------------------------------------------------------------------
   // Units per tick from the groups on the good's recipe: runs per wave x output / recipe ticks (the live "work" rows hold the runs).
   function output(v, recipeId) {
@@ -93,26 +124,32 @@ try {
   function facts(v, ctx) {
     const c = cfg();
     const storeB = v.idB(STORE);
-    const ids = {}, miss = [];
-    for (const n of GOODS) { const i = v.idI(n), r = v.idR(RECIPE[n]); if (i == null || r == null) miss.push(i == null ? n : RECIPE[n]); else ids[n] = i; }
+    const ids = {}, miss = [], recipeOf = goodsOf(v, ctx.retailBoard);
+    for (const [n, rn] of Object.entries(recipeOf)) { const i = v.idI(n), r = v.idR(rn); if (i == null || r == null) miss.push(i == null ? n : rn); else ids[n] = i; }
     if (storeB == null) miss.push(STORE);
     if (miss.length) return { err: 'name not in the catalog: ' + miss.join(', ') + ' (director off until the names match)' };
     const badBoard = checkBoard(ctx.retailBoard, ids);
     const storeGroup = v.groups.find((g) => g.building === storeB && g.count > 0) ?? null;
     const emptyGroup = storeGroup ? null : v.groups.find((g) => g.building === storeB) ?? null;
-    const f = { storeB, ids, storeGroup, emptyGroup, pooled: v.pool[storeB] ?? 0, owned: v.owned(STORE), unlocked: v.unlocked(STORE), rating: ratingOf(v.st), badBoard };
+    const f = { storeB, ids, names: Object.keys(recipeOf), storeGroup, emptyGroup, pooled: v.pool[storeB] ?? 0, owned: v.owned(STORE), unlocked: v.unlocked(STORE), rating: ratingOf(v.st), badBoard };
     if (badBoard) return f;
     const rows = ctx.retailBoard.shelves[REGION] ?? ctx.retailBoard.shelves[String(REGION)];
     f.share = shareOf(ctx.retailBoard, f.rating, v.st.ssi?.corp_id);
-    f.goods = GOODS.map((n) => {
-      const id = ids[n], rid = v.idR(RECIPE[n]), row = rows[id], base = v.C.items[id]?.base_value ?? 0, o = output(v, rid);
+    const plId = v.idI('Planks');
+    f.goods = Object.keys(ids).map((n) => {
+      const id = ids[n], rid = v.idR(recipeOf[n]), row = rows[id], base = v.C.items[id]?.base_value ?? 0, o = output(v, rid), rc = v.C.recipes[rid];
       return { name: n, id, rid, appetite: row.appetite, held: row.held, boardPrice: row.price, base, unit: base * row.price / 10000 * Q0,
         stock: v.has(n), outTick: o.perTick, blockH: perBlockH(o), made: o.perTick > 0,
         // a paused or retuning group still counts: it comes back, and the shelf should not churn meanwhile
-        assigned: v.groups.some((g) => g.recipe === rid && g.count > 0) };
+        assigned: v.groups.some((g) => g.recipe === rid && g.count > 0),
+        ppu: (rc?.inputs ?? []).filter((x) => x.item === plId).reduce((a, x) => a + x.amount, 0) / (rc?.outputs?.[0]?.amount || 1) };
     });
     f.eligible = (g) => g.made || g.assigned || g.stock > 0;
     f.demandH = (g) => demandH(g, f.share);
+    // Planks per hour the best four plank goods sell: the land rule sizes the engine to it (corePlan decide). Before a store sells, at the
+    // share the target rating (cfg.retailRating) will give, not today's rating of 0.
+    const dShare = f.storeGroup ? f.share : shareOf(ctx.retailBoard, Math.max(f.rating ?? 0, c.retailRating ?? 0), v.st.ssi?.corp_id);
+    f.demandPlanksH = dShare == null ? null : pickOrder(f.goods.filter((g) => g.ppu > 0)).reduce((a, g) => a + demandH(g, dShare) * g.ppu, 0);
     // Before the store: the shelf is what is eligible now (shelfPick() adds the keep-on-shelf rule once the store exists).
     f.chosen = pickOrder(f.goods.filter(f.eligible));
     needOf(f, c);
@@ -151,7 +188,8 @@ try {
   // What the next bill is now, every subscription together (cents).
   function billsOf(st) {
     let t = (st.isp ?? 0) * RATES.bandwidth;
-    for (const o of Object.values(st.subscriptions ?? {})) for (const [k, l] of Object.entries(o ?? {})) t += (l ?? 0) * (RATES[k] ?? 0);
+    const pm = W.idleCore?.powerPriceMult?.() ?? 1;   // a world event's NPC power price multiplier
+    for (const o of Object.values(st.subscriptions ?? {})) for (const [k, l] of Object.entries(o ?? {})) t += (l ?? 0) * (RATES[k] ?? 0) * (k === 'power' ? pm : 1);
     return t;
   }
 
@@ -175,7 +213,8 @@ try {
     return { sold, model, by };
   }
   // base: appetite per item the drift is measured from (the E1 streak's first sample); default the first sample here.
-  function rowsOf(samples, mem, c, now, e1 = false, base = null) {
+  // live: board price per item now (default the last sample); demandOn: a demand world event runs, so appetite drift is unknown, not a fail.
+  function rowsOf(samples, mem, c, now, e1 = false, base = null, live = null, demandOn = false) {
     const s0 = samples[0], sN = samples[samples.length - 1], ids = Object.keys(s0?.g ?? {});
     const out = [];
     // 1. appetite steady within +-tol of the baseline (a fixed one, so a slow slide adds up instead of hiding in a rolling window)
@@ -185,7 +224,8 @@ try {
       for (const s of samples) { const d = a0 && s.g[id] ? Math.abs(s.g[id].a / a0 - 1) : 0; if (d > worst) { worst = d; worstName = s0.g[id].n; } }
     }
     const held0 = ids.reduce((a, id) => a + (s0.g[id].h ?? 0), 0), heldN = ids.reduce((a, id) => a + (sN.g[id]?.h ?? 0), 0);
-    out.push({ id: 'appetite', ok: samples.length < 2 ? null : worst <= c.retailAppetiteTol / 100, why: 'max drift ' + pct(worst) + (worstName ? ' (' + worstName + ')' : '') + ', limit ' + c.retailAppetiteTol + '%; held ' + held0 + ' -> ' + heldN });
+    const steady = worst <= c.retailAppetiteTol / 100;
+    out.push({ id: 'appetite', ok: samples.length < 2 || (!steady && demandOn) ? null : steady, why: 'max drift ' + pct(worst) + (worstName ? ' (' + worstName + ')' : '') + ', limit ' + c.retailAppetiteTol + '%' + (!steady && demandOn ? ' (a demand world event runs: unknown)' : '') + '; held ' + held0 + ' -> ' + heldN });
     // 2. sales >= pass% of the model
     // per good (wiki E1): every shelved good with a model must pass, so one dead good cannot hide behind the others; the worst is named
     const sv = salesOver(samples, ids);
@@ -193,10 +233,17 @@ try {
     const w = per[0];
     out.push({ id: 'sales', ok: per.length ? per.every((p) => p.x >= c.retailSamplePassPct / 100) : null,
       why: (w ? 'worst ' + w.n + ' sold ' + Math.round(w.sold) + ' of model ' + Math.round(w.model) + ' (' + pct(w.x) + ')' : 'no model yet') + ', all goods ' + Math.round(sv.sold) + ' of ' + Math.round(sv.model) + ', pass ' + c.retailSamplePassPct + '%' });
-    // 3. price about 1.52 x base at quality 0
-    let pw = 0, pName = '';
-    for (const s of samples) for (const id of ids) { const x = s.g[id]; if (!x) continue; const d = Math.abs(x.p / 10000 * Q0 / PRICE_X - 1); if (d > pw) { pw = d; pName = x.n + ' ' + (x.p / 10000 * Q0).toFixed(2) + 'x'; } }
-    out.push({ id: 'price', ok: pw <= c.retailPriceTol / 100, why: 'worst ' + (pName || '-') + ' vs ' + PRICE_X + 'x base, drift ' + pct(pw) + ', limit ' + c.retailPriceTol + '%' });
+    // 3. price = base x board price x quality factor (quality 0), from each sample's own board price: the server sets the board price
+    // (160% on 2026-11-21), so a board at another level or one that moves is the price, not a failed store. Unreadable: unknown.
+    let pw = 0, pName = '', bad = false;
+    for (const s of samples) for (const id of ids) {
+      const x = s.g[id], want = live?.[id] ?? sN.g[id]?.p;
+      if (!x) continue;
+      if (!(x.p > 0) || !(want > 0)) { bad = true; continue; }
+      const d = Math.abs(x.p / want - 1);
+      if (d > pw || !pName) { pw = d; pName = x.n + ' ' + (want / 10000 * Q0).toFixed(2) + 'x base'; }
+    }
+    out.push({ id: 'price', ok: bad || !pName ? null : true, why: bad ? 'a shelf row has no board price' : 'live board: ' + (pName || '-') + (pw > 0 ? ', board moved up to ' + pct(pw) + ' during the run' : '') });
     // 4. rating >= target within cfg.retailRatingMin minutes of the shelves being set (+1 per tick from 0 gives 9,000 in 75 min)
     const rated = samples.filter((s) => num(s.r));
     const dl = mem.shelvedAt + c.retailRatingMin * 60000;
@@ -274,7 +321,9 @@ try {
     }
     const res = { mem, n: samples.length };
     if (samples.length < 1) return res;
-    const ev = rowsOf(mem.decision ? samples.filter((x) => x.t >= (mem.streakStart ?? 0)) : samples, mem, c, ctx.now, !!mem.decision, mem.decision ? mem.e1Base : null);
+    const live = Object.fromEntries(f.goods.map((x) => [x.id, x.boardPrice]));
+    const we = ctx.worldEvents ?? W.idleCore?.sock?.worldEvents ?? null;
+    const ev = rowsOf(mem.decision ? samples.filter((x) => x.t >= (mem.streakStart ?? 0)) : samples, mem, c, ctx.now, !!mem.decision, mem.decision ? mem.e1Base : null, live, !!demandEvent(we, ctx.tick));
     res.rows = ev.rows;
     const blockH = Object.fromEntries(f.goods.map((x) => [x.id, x.blockH]));
     const age = ctx.now - mem.shelvedAt;
@@ -388,7 +437,7 @@ try {
     if (f.badBoard) return { wait: 'RETAIL BOARD SHAPE CHANGED: ' + f.badBoard + '; not building or shelving until it is checked', readout };
     if (f.share == null) return { wait: 'RETAIL BOARD: unknown "ratings" shape, share not computed; not acting', readout };
     if (!f.unlocked && !f.storeGroup && !f.pooled && !f.emptyGroup) return { wait: 'Retail Store not unlocked', readout };
-    if (!f.chosen.length) return { wait: 'no shelf good: the Corporation makes or holds none of ' + GOODS.join(', '), readout };
+    if (!f.chosen.length) return { wait: 'no shelf good: the Corporation makes or holds none of ' + f.names.join(', '), readout };
     const want = f.chosen.map((g) => g.id);
     const storeB = f.storeB, p0 = f.pooled;
     if (!f.storeGroup && f.emptyGroup) {
@@ -404,7 +453,7 @@ try {
       if (!p0) {
         const short = f.need.filter((x) => x.g.stock < x.need);
         if (short.length) return { wait: 'pre-store gate: ' + short.map((x) => x.g.name + ' ' + Math.floor(x.g.stock) + ' / ' + x.need).join(', ') + ' (' + cfg().stockHoursPerShelf + ' h of sales at min(demand, output))', readout };
-        const cost = P ? P.price(bd.cost, v.owned(STORE), 0) : bd.cost;
+        const cost = P ? P.price(bd.cost, v.ownedAll(STORE), 0) : bd.cost;
         // Iron Frames: until Stage D the prototypes and first builds still to pay are kept back (corePlan ifNeed, capped by cfg.ifReserve); this build's own frames are not
         const ifId = v.idI('Iron Frame'), late = out?.stage === 'D' || out?.stage === 'END';
         const keepOf = (i) => (i === ifId && !late ? Math.min(cfg().ifReserve ?? 0, W.corePlan._ifNeed(v, STORE)) : 0);
@@ -412,7 +461,7 @@ try {
         if (lack.length) return { wait: 'store needs ' + lack.map((i) => i.amount + ' ' + (v.C.items[i.item]?.name ?? i.item) + (keepOf(i.item) ? ' (+' + keepOf(i.item) + ' kept for prototypes)' : '')).join(', '), readout };
         if (v.freeAcres < bd.acres) return { wait: 'store needs ' + bd.acres + ' free acres (' + v.freeAcres + ' free)', readout };
         // bill floor (plan 8.1): the store's always-on draw goes on every bill from now on
-        const mw = bd.draws?.power ?? 0, billFloor = mw * 2000 + 12 * billsOf(v.st);
+        const mw = bd.draws?.power ?? 0, billFloor = mw * 2000 * (W.idleCore?.powerPriceMult?.() ?? 1) + 12 * billsOf(v.st);
         const need = (ctx.floorCents ?? 0) + cost + billFloor;
         if (v.money < need) return { wait: 'store ' + usd(cost) + ' + bill floor ' + usd(billFloor) + ' (' + mw + ' MW x $20 + 2 h of bills): need ' + usd(need - v.money) + ' more above the floor', readout };
         steps.push({ msg: { type: 'BuyBuilding', building: storeB, amount: 1, region: REGION }, until: (x) => (x.pool[storeB] ?? 0) >= 1 || x.groups.some((g) => g.building === storeB && g.count > 0) });
@@ -442,7 +491,6 @@ try {
       retailMaxHours: 4,           // give up (fail) when a row still has no data by then
       retailAppetiteTol: 15,       // % appetite may move while the store sells
       retailSamplePassPct: 70,     // % of the modelled sales that must sell
-      retailPriceTol: 3,           // % around 1.52 x base
       retailRating: 9000,          // rating the store must reach ...
       retailRatingMin: 90,         // ... within this many minutes of the build (75 at +1 per tick, plus slack)
       retailE1Hours: 6,            // E1: hours in a row with the rows passing
@@ -453,7 +501,7 @@ try {
     context, decide,
     duties: () => [{ duty: 'Retail Store, shelves and the retail checkpoint (wiki 4.7)', owner: 'Core plan', done: true }],
   });
-  W.corePlan._retail = { facts, demandH, shelfHours, checkBoard, shareOf, salesOver, rowsOf, capOf, shapeOf };
+  W.corePlan._retail = { facts, goodsOf, demandEvent, demandH, shelfHours, checkBoard, shareOf, salesOver, rowsOf, capOf, shapeOf };
 })();
 } catch (e) { console.error('[IdleCorp] cp-retail failed to load:', e); }
 // @@END cp-retail

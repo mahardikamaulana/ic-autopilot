@@ -165,7 +165,7 @@ try {
     if (frames < keep + per) return { want: true, note: 'second Lab waits: Iron Frame ' + Math.floor(frames) + ' < ' + (keep + per) + ' (' + keep + ' kept for the unlocks + ' + per + ')' };
     let land = 0;
     for (let i = 0; i < acres; i++) land += W.corePlan._acrePriceCents(v.landBought + i);
-    const price = W.idleCore.planner.price(bd.cost, owned, 0);
+    const price = W.idleCore.planner.price(bd.cost, v.ownedAll('Manufacturing Lab'), 0);
     const mw = bd.draws?.power ?? 0, bill = W.corePlan._billNeed(v, mw);
     const landTxt = acres ? acres + ' acre(s) ' + usd(land) + ' + ' : '';
     if (v.money < floor + land + price + bill) return { want: true, note: 'second Lab waits: cash ' + usd(v.money) + ' < ' + usd(floor + land + price + bill) + ' (money floor + ' + landTxt + 'Lab ' + usd(price) + ' + ' + mw + ' MW bills)' };

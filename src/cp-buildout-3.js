@@ -24,6 +24,9 @@
       // Storage check: write and read back through a fresh handle. Waves (which demolish Farms) need memory that survives; fail closed.
       m.set({ chk: ctx.now });
       ctx.boMemOk = ctx.mem('buildout').get().chk === ctx.now;
+      // Units placed by hand leave the pool: what tidy may take back is never more than the pool holds.
+      const pm = m.get().poolMine ?? {}, pm2 = Object.fromEntries(Object.entries(pm).map(([b, n]) => [b, Math.min(n, v.pool[b] ?? 0)]));
+      if (Object.entries(pm).some(([b, n]) => pm2[b] !== n)) m.set({ poolMine: pm2 });
       // A Kiln this director paused that is running now was resumed by the user: hands off from then on.
       const kilnId = v.idB('Kiln');
       const mine = m.get().kilnMine ?? [];
@@ -91,7 +94,7 @@
         if (ws.wait) waits.push(ws.wait);
       } else readout.waves = 'Stage C: ' + cottonFarms(v, e) + ' cotton Farms to convert';
       const nb = nextBuildStep(v, { ...ctx, _boEngine: e, _boTargets: tg ?? undefined }, rule, stage);
-      if (nb.pick) return done(buyAction(v, e, nb));
+      if (nb.pick) return done(track(v, ctx, nb.b, buyAction(v, e, nb)));
       waits.push('build-out: ' + nb.wait);
       readout.next = waits[waits.length - 1];
       return { wait: waits.join(' | '), readout };

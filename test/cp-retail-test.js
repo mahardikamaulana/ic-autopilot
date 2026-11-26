@@ -604,5 +604,38 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
     assert.strictEqual(rows([9000, 9500, 10000]).ok, true);
   });
 
+  await t('price row: the expected price comes from the live board (a steady 150% board passes; an unreadable price is unknown)', () => {
+    const { cp: c } = F.load(['cp-retail']);
+    const t0 = 1.8e12, g = (p) => ({ 1: { n: 'Bookshelf', a: 240, h: 0, p, s: 1e6, out: 0 } });
+    const row = (ps, live) => c._retail.rowsOf(ps.map((p, k) => ({ t: t0 + k * 600000, r: 10000, share: 1, g: g(p) })), { shelvedAt: t0 }, c.cfg, t0 + ps.length * 600000, false, null, live).rows.find((x) => x.id === 'price');
+    assert.strictEqual(row([15000, 15000]).ok, true, 'a board at 150% is the price, not a fail (old fixed 1.52x failed it)');
+    const moved = row([16000, 15000], { 1: 15000 });
+    assert.strictEqual(moved.ok, true); assert.match(moved.why, /board moved up to 7%/);
+    assert.strictEqual(row([0, 0]).ok, null);
+  });
+
+  await t('appetite row: drift past the limit is unknown while a demand world event runs, a fail without one', () => {
+    const { cp: c } = F.load(['cp-retail']);
+    const t0 = 1.8e12, g = (a) => ({ 1: { n: 'Bookshelf', a, h: 0, p: 16000, s: 1e6, out: 0 } });
+    const row = (ev) => c._retail.rowsOf([{ t: t0, r: 0, share: 1, g: g(240) }, { t: t0 + 600000, r: 0, share: 1, g: g(120) }], { shelvedAt: t0 }, c.cfg, t0 + 600000, false, null, null, ev).rows.find((x) => x.id === 'appetite');
+    assert.strictEqual(row(false).ok, false);
+    assert.strictEqual(row(true).ok, null);
+    assert.strictEqual(c._retail.demandEvent({ raw: JSON.stringify({ clock: [{ text: 'Demand +20% for Chair in Heartland', ends_at: 500 }] }) }, 100), true);
+    assert.strictEqual(c._retail.demandEvent({ raw: JSON.stringify({ clock: [{ text: 'Demand +20% for Chair', ends_at: 50 }] }) }, 100), false, 'ended');
+    assert.strictEqual(c._retail.demandEvent({ raw: JSON.stringify({ clock: [{ text: 'NPC power x2' }] }) }, 100), false);
+    assert.strictEqual(c._retail.demandEvent(null, 100), null);
+  });
+
+  await t('shelf goods: every board good the corp can make (Picture Frame, Desk ...); the four furniture goods without a board', () => {
+    const { cp: c } = F.load(['cp-retail']);
+    const v = c._view(clone(F.stageB.st), cat, []);
+    const gs = c._retail.goodsOf(v, board());
+    for (const n of ['Picture Frame', 'Desk', 'Bookshelf', 'Bench']) assert.ok(gs[n], n);
+    assert.ok(!gs.Lamp, 'Assembly Plant not unlocked: no Lamp');
+    assert.deepStrictEqual(Object.keys(c._retail.goodsOf(v, null)), ['Bookshelf', 'Table', 'Chair', 'Bench']);
+    const f = c._retail.facts(v, { retailBoard: board() });
+    assert.ok(f.demandPlanksH > 0, 'demand planks for the land rule');
+  });
+
   done();
 })();

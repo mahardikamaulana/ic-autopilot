@@ -5031,7 +5031,7 @@ try {
     dryRun: true,
     intervalMs: 5000, confirmMs: 8000, maxFails: 3, cmdsPerMin: 20,
     landPaybackAB: 20,            // Stage A-B: buy an acre + Cotton Farm while payback <= this many hours (wiki 4.6)
-    cottonFarmHourly: 790,        // dollars per hour one Cotton Farm earns (wiki 4.6)
+    cottonFarmHourly: 790,        // dollars per hour one Cotton Farm earns (wiki 4.6); fallback when no live Cotton bid prices it
     landPaybackFraction: 1 / 3,   // Stage C-D: payback <= T_wall x this
     cashReserve: 0,               // cents kept on top of the other modules' money floors
     ifReserve: 44,                // upper cap on the Iron Frames kept back for the prototypes and first builds (ifNeed counts what is still needed)
@@ -5048,7 +5048,8 @@ try {
   const ENGINE_ITEMS = ['Wood', 'Planks', 'Iron Sheet', 'Concrete', 'Glass', 'Bookshelf', 'Table', 'Chair', 'Bench', 'Wooden Frame', 'Iron Frame',
     'Iron Ore', 'Coal', 'Limestone', 'Sand', 'Copper Ore', 'Copper Wire', 'Wired Frame'];   // cp-cadence NEVER plus the ores the kits use
   const UNLOCKS = ['Assembly Plant', 'Retail Store', 'Oil Rig'];   // in this order (wiki 9)
-  const S2_NEEDS = ['Mine', 'Quarry', 'Sawmill', 'Smelter', 'Workshop', 'Kiln', 'Factory', 'Paper Mill', 'Manufacturing Lab'];
+  const S2_NEEDS = ['Mine', 'Quarry', 'Sawmill', 'Smelter', 'Workshop', 'Kiln', 'Manufacturing Lab'];   // Factory and Paper Mill are not on the plan's path
+  const REFINERY_CD = 500000;   // fallback when the tech tree lacks it (wiki data/tech-tree.md, 2026-11-24 patch); ladder and endgame share it
 
   // ---- ids by name (the client catalog array is not indexed by id) ------------------------------------------------------
   const idxRef = new WeakMap();
@@ -5066,7 +5067,8 @@ try {
   const acrePriceCents = (n) => { let p = FIRST_ACRE; for (let i = 0; i < n; i++) p = Math.floor(p * 41 / 40); return p; };
   const usd = (c) => '$' + (c / 100).toLocaleString('en-US', { maximumFractionDigits: 0 });
   // ---- purchase and floor pieces shared by the buildout, lab and endgame directors ----------------------------------------------------
-  const billNeed = (v, newMW) => newMW * 2000 + (v.st.subscriptions?.[REGION]?.power ?? 0) * 12000;   // cents: $20 per new MW + 2 h of bills ($60/MW/h)
+  // cents: $20 per new MW + 2 h of bills ($60/MW/h), times a world event's NPC power price multiplier
+  const billNeed = (v, newMW) => (newMW * 2000 + (v.st.subscriptions?.[REGION]?.power ?? 0) * 12000) * (core.powerPriceMult?.() ?? 1);
   // One purchase: BuyLand (if acres), BuyBuilding, then the building into group g, else a new group of `amount` named `name`.
   function buySteps(v, b, acres, g, name, amount = 1) {
     const p0 = v.pool[b] ?? 0, l0 = v.landBought, steps = [];
@@ -5107,8 +5109,18 @@ try {
     const idB = (n) => N.b[n], idI = (n) => N.i[n], idR = (n) => N.r[n];
     const ownedId = (b) => groups.filter((g) => g.building === b).reduce((a, g) => a + g.count, 0) + (pool[b] ?? 0);
     const owned = (n) => (N.b[n] == null ? 0 : ownedId(N.b[n]));
+    // Building prices count every region and the build / demolish queues (planner.queued): owned() is Heartland only.
+    const q = P.queued({ st, catalog: raw, region: REGION });
+    const ownedAll = (n) => {
+      const b = N.b[n];
+      if (b == null) return 0;
+      let c = q.owned[b] ?? 0;
+      for (const g of Object.values(st.groups ?? {})) if (g.building === b) c += g.count ?? 0;
+      for (const p of Object.values(st.building_pool ?? {})) c += p?.[b] ?? 0;
+      return c;
+    };
     const landBought = st.land_bought?.[REGION] ?? 0;
-    let acresUsed = 0;
+    let acresUsed = q.acres;   // a queued build or demolition holds its acres
     for (const g of groups) acresUsed += bld(g.building).acres * g.count;
     for (const [b, n] of Object.entries(pool)) acresUsed += bld(+b).acres * n;
     const acresOwned = STARTER_ACRES + landBought;
@@ -5118,10 +5130,12 @@ try {
     const running = (bn, rn) => groups.filter((g) => g.building === N.b[bn] && g.recipe === N.r[rn] && !g.paused && g.count > 0).reduce((a, g) => a + g.count, 0);
     const cottonGroup = groups.find((g) => g.building === N.b.Farm && g.recipe === N.r['Grow Cotton'] && !g.paused);
     const engineAcres = ['Lumber Camp', 'Farm', 'Sawmill', 'Workshop'].reduce((a, n) => a + owned(n) * (N.b[n] == null ? 0 : bld(N.b[n]).acres), 0);
-    const cottonBid = deals.some((d) => d.side === 'Sell' && d.item === N.i.Cotton && (d.region ?? REGION) === REGION);
+    const cottonBids = deals.filter((d) => d.side === 'Sell' && d.item === N.i.Cotton && (d.region ?? REGION) === REGION && d.amount > 0);
     return {
       catalog: raw,
-      N, C, st, groups, pool, bld, idB, idI, idR, owned, has, unlocked, running, cottonGroup, cottonBid,
+      N, C, st, groups, pool, bld, idB, idI, idR, owned, ownedAll, has, unlocked, running, cottonGroup,
+      cottonBid: cottonBids.length > 0, dealsLoaded: deals.length > 0,
+      cottonUnit: cottonBids.reduce((a, d) => Math.max(a, d.price / d.amount), 0) || null,   // cents per unit, best Heartland Cotton bid
       money: items[MONEY] ?? 0, cd: items[CD] ?? 0,
       landBought, acresUsed, acresOwned, freeAcres: Math.max(0, acresOwned - acresUsed), fixedAcres: Math.max(0, acresUsed - engineAcres),
       nextAcreCents: acrePriceCents(landBought),
@@ -5142,16 +5156,20 @@ try {
     const lab = v.owned('Manufacturing Lab'), kiln = v.owned('Kiln'), mine = v.owned('Mine'), quarry = v.owned('Quarry');
     const s4 = cond('S4', lab >= 1 && kiln >= 1 && mine >= 1 && quarry >= 1, lab >= 1 && kiln >= 1 && mine >= 1 && quarry >= 1 ? 'built' : 'missing: ' + [['Manufacturing Lab', lab], ['Kiln', kiln], ['Mine', mine], ['Quarry', quarry]].filter(([, n]) => n < 1).map(([n]) => n).join(', '));
     const s1 = cond('S1', ctx.planDone === true || (s2.ok && s3.ok && s4.ok), ctx.planDone === true ? 'Autopilot: Plan done' : (s2.ok && s3.ok && s4.ok) ? 'S2-S4 hold' : 'Autopilot has not finished the Early-Game Plan, and S2-S4 do not all hold');
+    // Autopilot's Plan done stands for S2-S4: a corp that finished the early plan its own way still starts Stage A.
+    if (ctx.planDone === true) for (const c of [s2, s3, s4]) if (!c.ok) { c.ok = true; c.why = 'Autopilot: Plan done (' + c.why + ')'; }
     const s5 = cond('S5', !v.unlocked('Assembly Plant'), v.unlocked('Assembly Plant') ? 'Assembly Plant is already unlocked (join at stage B or later)' : 'not unlocked yet');
     const c10 = ctx.cashDelta10;
     const s6 = cond('S6', c10 == null ? null : c10 > 0, c10 == null ? 'not enough cash samples yet (needs 10 min)' : 'money ' + (c10 > 0 ? 'rose ' : 'fell ') + usd(Math.abs(c10)) + ' over 10 min');
-    const s7 = cond('S7', v.cottonBid, v.cottonBid ? 'Cotton bid in Heartland' : 'no Cotton bid in Heartland');
+    const s7 = !v.dealsLoaded ? cond('S7', null, 'market board not loaded (open the Market page once)')
+      : cond('S7', v.cottonBid, v.cottonBid ? 'Cotton bid in Heartland' : 'no Cotton bid in Heartland');
     return [s1, s2, s3, s4, s5, s6, s7];
   }
   function stageOf(v, S) {
     if (v.owned('Retail Store') >= 1) return 'D';
     if (v.unlocked('Assembly Plant')) return 'C';
-    if (v.research && v.research.building === v.idB('Assembly Plant')) return 'B';
+    const ap = v.idB('Assembly Plant');
+    if (ap != null && (v.research?.building === ap || (v.st.research_queue ?? []).some((q) => q?.building === ap))) return 'B';
     const ok = S.filter((c) => c.id !== 'S5').every((c) => c.ok !== false);
     return ok && S[0].ok ? 'A' : null;
   }
@@ -5261,6 +5279,13 @@ try {
     return { action: { id: 'tech:' + nx.b, text: why + ' (' + nx.cd + ' CD' + (proto.length ? ' + ' + proto.map((i) => i.amount + ' ' + (v.C.items[i.item]?.name ?? i.item)).join(', ') : '') + ')',
       steps: [{ msg: { type: 'StartTech', building: nx.b, region: REGION }, until: (x) => x.research?.building === nx.b || x.unlocked(nx.name) }] } };
   }
+  // Dollars per hour one Cotton Farm earns: the best Heartland Cotton bid x a Farm's output (runs per building from the live group's
+  // work row), else cfg.cottonFarmHourly.
+  function cottonHourly(v) {
+    const rc = v.C.recipes[v.idR('Grow Cotton')], w = v.cottonGroup?.work?.find((x) => x.recipe === rc?.id);
+    if (!v.cottonUnit || !rc?.ticks || !(w?.buildings > 0 && w.runs > 0)) return cfg.cottonFarmHourly;
+    return v.cottonUnit * w.runs / w.buildings * (rc.outputs?.[0]?.amount ?? 1) * 7200 / rc.ticks / 100;
+  }
   // Stage A-B land: an acre plus a Cotton Farm while (acre + Farm) / hourly income <= cfg.landPaybackAB; one purchase per call.
   // block: why another use of the cash goes first (B1, B2).
   function landAction(v, stage, floorCents, block) {
@@ -5268,10 +5293,10 @@ try {
     if (block) return { wait: 'land: ' + block };
     if (!v.cottonGroup) return { wait: 'land: no running Cotton Farm group to add to' };
     if (v.acresOwned >= ACRE_CAP) return { wait: 'land: Heartland cap (' + ACRE_CAP + ' acres)' };
-    const farm = v.idB('Farm'), farmCents = P.price(v.bld(farm).cost, v.owned('Farm'), 0);
+    const farm = v.idB('Farm'), farmCents = P.price(v.bld(farm).cost, v.ownedAll('Farm'), 0);
     const needAcre = v.freeAcres - cfg.bufferAcres < 1;   // the CD farm's spare acres stay free
     const cost = farmCents + (needAcre ? v.nextAcreCents : 0);
-    const payback = cost / 100 / cfg.cottonFarmHourly;
+    const payback = cost / 100 / cottonHourly(v);
     const line = (needAcre ? 'acre #' + (v.acresOwned + 1) + ' ' + usd(v.nextAcreCents) + ' + ' : '') + 'Cotton Farm ' + usd(farmCents) + ', payback ' + payback.toFixed(1) + ' h';
     if (payback > cfg.landPaybackAB) return { wait: 'land: ' + line + ' > ' + cfg.landPaybackAB + ' h, rule closed' };
     if (v.money - cost < floorCents) return { wait: 'land: ' + line + ': need ' + usd(floorCents + cost - v.money) + ' more above the floor' };
@@ -5339,7 +5364,9 @@ try {
     // After the directors' context: a failed retail checkpoint (ctx.retailFail) caps the planks at the furniture blocks sales carry (plan A2).
     let rule = null;
     try {
-      const planksCap = ctx.retailFail && typeof ctx.retailCap === 'number' ? ctx.retailCap / M.engineModel(v.C).wsPerPlank : undefined;
+      // The engine is sized to demand too: planks the shelves can sell (appetite x share, from the retail facts), and on a fail the measured cap.
+      const caps = [ctx.retail?.demandPlanksH > 0 ? ctx.retail.demandPlanksH : null, ctx.retailFail && typeof ctx.retailCap === 'number' ? ctx.retailCap / M.engineModel(v.C).wsPerPlank : null].filter((x) => typeof x === 'number');
+      const planksCap = caps.length ? Math.min(...caps) : undefined;
       // C4: the measured CD rate sets T_wall once CD Farm has measured 30 min (landCdRate); the model before
       rule = M.landRule(landInput(v, ctx), v.C, { cyclesPerHour: ctx.cyclesPerHour ?? cfg.cyclesPerHour, planksCap, cdPerHour: landCdRate(ctx) ?? undefined });
     } catch (e) { console.error(e); }
@@ -5619,7 +5646,7 @@ try {
   W.corePlan = {
     cfg, DEFAULTS,
     get running() { return running; }, get busy() { return running && !cfg.dryRun; }, get active() { return stepping; },
-    status, plan: () => last, start, stop, addDirector, ENGINE_ITEMS, directors: () => directors.map((d) => d.name), _usd: usd, _acrePriceCents: acrePriceCents, _billNeed: billNeed, _buySteps: buySteps, _floorObj: floorObj, _floorAction: floorAction, hold, release, duties, cancelResume,
+    status, plan: () => last, start, stop, addDirector, ENGINE_ITEMS, directors: () => directors.map((d) => d.name), _usd: usd, _acrePriceCents: acrePriceCents, _billNeed: billNeed, _refineryCd: REFINERY_CD, _buySteps: buySteps, _floorObj: floorObj, _floorAction: floorAction, hold, release, duties, cancelResume,
     importCfg(o) { const r = apply(o?.cfg ?? o); save(); return r; },
     exportCfg() { return { cfg: Object.fromEntries(Object.entries(cfg).filter(([k]) => !SESSION_ONLY.includes(k))) }; },
     resetCfg() { Object.assign(cfg, DEFAULTS); save(); },
@@ -5637,11 +5664,13 @@ try {
 // CORE PLAN DIRECTOR: 5. Engine build-out and Farm conversion
 // ============================================================================
 // Director "buildout" (wiki/guides/core-game-plan.md 4.2-4.5, 4.8, 8.1, 11.2-11.3, 14 R8). One message (or one purchase) per step:
-//   - pool tidy: own Camps / Sawmills / Workshops left in the pool go into their group (never cdFarm's units), named groups get their recipe;
+//   - pool tidy: Camps / Sawmills / Workshops it left in the pool (mem poolMine), or any pooled when no group outside the plan uses the
+//     building, go into their group (never cdFarm's units); groups it made or named after a plan recipe get their recipe;
 //   - Kiln stock gate: unpause / switch the Kiln until Glass and Concrete reach their gates, pause again after;
 //   - Wooden Frame gate: pause Frame Timber at the WF keep line (Rivet use for cfg.ftKeepHours), resume below half (plan D-3);
 //   - Stage B-D: spare Frame Timber Workshops switch to furniture (split from the retail board), keeping 1 on Frame Timber;
-//   - Stage C-D: Farms go in 4 waves 3 h apart (UnassignBuildings + DemolishBuilding), only when the last wave's acres are built and running;
+//   - Stage C-D: Farms go in 4 waves 3 h apart (UnassignBuildings + DemolishBuilding), only when the last wave's acres are built and running
+//     and no group eats Cotton;
 //   - build-out toward core-math landRule: a consumer only when its supplier covers it, each buy gated by acre, kit, wood (R8), bill floor
 //     and the money floor; Stage C-D buys the acre too while the land rule is open, Stage B while (acre + $1,200) / $1,444 <= 20 h (plan D-1).
 //   - Stage B-D: furniture Workshops follow the board: a recipe 1+ Workshops over / under the split for cfg.rebalanceHours moves one (plan D3);
@@ -5662,7 +5691,7 @@ try {
   const ENGINE = ['Lumber Camp', 'Sawmill', 'Workshop'];
   const HOUR = 3600000;
   const BENCH_FLOOR = 3, BENCH_HOURS = 48;                    // Make Bench on the Rivet x3 floor; Concrete kept for this many hours of Bench use (plan D4)
-  const BLOCK_SHARE = 1200, BLOCK_HOURLY = 1444;               // dollars: a block's buildings per acre, and what an engine acre earns an hour (plan D-1)
+  const BLOCK_SHARE = 1200, BLOCK_HOURLY = 1444;               // dollars: a block's buildings per acre, and what an engine acre earns an hour (plan D-1; blockHourly scales it to the board)
 
   const DEFAULTS = {
     keepFrameTimber: 1,          // Workshops kept on Frame Timber (wiki 4.8 step 1)
@@ -5863,25 +5892,61 @@ try {
     return ok ? e.R[ok.k] : e.R.ft;
   }
 
-  // 1. Pool tidy: own engine buildings sitting in the pool, and engine groups without a recipe.
+  // Ownership memory, like kilnMine: units this director left in the pool (mem poolMine { building: n }: + on a confirmed BuyBuilding or
+  // UnassignBuildings, - on AssignBuildings / CreateGroup) and the groups it made (groupsMine). Each step records once.
+  function track(v, ctx, b, a) {
+    const ids = new Set(v.groups.map((g) => g.id));
+    for (const st of a.steps) {
+      const t = st.msg?.type, n = st.msg?.amount ?? 1, u = st.until;
+      const sign = t === 'BuyBuilding' || t === 'UnassignBuildings' ? 1 : t === 'AssignBuildings' || t === 'CreateGroup' ? -1 : 0;
+      if (!sign) continue;
+      let seen = false;
+      st.until = (x) => {
+        const ok = u(x), m = ctx.mem?.('buildout');
+        if (ok && !seen && m) {
+          seen = true;
+          const pm = { ...(m.get().poolMine ?? {}) }, patch = { poolMine: pm };
+          pm[b] = Math.max(0, (pm[b] ?? 0) + sign * n);
+          if (t === 'CreateGroup') patch.groupsMine = [...new Set([...(m.get().groupsMine ?? []), ...x.groups.filter((g) => !ids.has(g.id) && g.building === b).map((g) => g.id)])];
+          m.set(patch);
+        }
+        return ok;
+      };
+    }
+    return a;
+  }
+  // A plan group of engine building bn: made here, on a plan recipe, or without one but named after a plan recipe (how groups are named here).
+  function planGroupOf(v, e, bn, mineG) {
+    const b = v.idB(bn), pr = (bn === 'Lumber Camp' ? [e.R.wood] : bn === 'Sawmill' ? [e.R.planks] : [e.R.ft, e.R.rivet, e.R.bookshelf, e.R.table, e.R.chair, e.R.bench]).filter(Boolean);
+    return (g) => mineG.has(g.id) || pr.some((r) => r.id === g.recipe || (g.recipe == null && r.name === g.name && r.building === b));
+  }
+  // 1. Pool tidy: own engine buildings sitting in the pool, and engine groups without a recipe. Pooled units are taken only when this
+  // director left them there, or no group outside the plan uses that building (then nobody else is waiting to place them).
+  // Pooled units of bn tidy may take (the wave gate waits on the same count).
+  function poolTake(v, ctx, e, bn) {
+    const mm = ctx.mem?.('buildout')?.get?.() ?? {}, b = v.idB(bn), plan = planGroupOf(v, e, bn, new Set(mm.groupsMine ?? []));
+    return v.groups.some((g) => g.building === b && g.count > 0 && !plan(g)) ? Math.min(e.ownPool(b), mm.poolMine?.[b] ?? 0) : e.ownPool(b);
+  }
   function tidy(v, ctx, e, tg) {
+    const mineG = new Set(ctx.mem?.('buildout')?.get?.()?.groupsMine ?? []);
     for (const bn of ENGINE) {
       const b = v.idB(bn);
       if (bn === 'Lumber Camp' && ctx.boCdBusy) continue;            // a CD run may be cycling Camps through the pool
-      const n = e.ownPool(b);
+      const n = poolTake(v, ctx, e, bn);
       if (!n) continue;
       let r = bn === 'Lumber Camp' ? e.R.wood : bn === 'Sawmill' ? e.R.planks : null;
       if (bn === 'Workshop') r = poolWorkshopRecipe(v, ctx, e, tg, n);
       const g = homeGroup(e, b, r);
       const k = bn === 'Workshop' ? 1 : n;                            // Workshops one at a time: each goes where the split is shortest
-      return g ? assignAction(v, b, g, k, 'pool') : createAction(v, b, k, r.name, 'pool');
+      return track(v, ctx, b, g ? assignAction(v, b, g, k, 'pool') : createAction(v, b, k, r.name, 'pool'));
     }
     for (const bn of ENGINE) {
-      const b = v.idB(bn);
-      const g = v.groups.find((x) => x.building === b && x.count > 0 && (x.recipe == null || !v.C.recipes[x.recipe]));
+      const b = v.idB(bn), plan = planGroupOf(v, e, bn, mineG);
+      const named = (g) => Object.values(v.C.recipes).find((r) => r.building === b && r.name === g.name);
+      // Workshops: only a plan group (a user's recipe-less Workshop group waits for the user)
+      const g = v.groups.find((x) => x.building === b && x.count > 0 && (x.recipe == null || !v.C.recipes[x.recipe]) && (bn !== 'Workshop' || plan(x)));
       if (!g) continue;
-      const named = Object.values(v.C.recipes).find((r) => r.building === b && r.name === g.name);
-      const r = named ?? (bn === 'Lumber Camp' ? e.R.wood : bn === 'Sawmill' ? e.R.planks : (tg ? nextWorkshopRecipe(e, tg)?.r : null) ?? e.R.ft);
+      const r = named(g) ?? (bn === 'Lumber Camp' ? e.R.wood : bn === 'Sawmill' ? e.R.planks : (tg ? nextWorkshopRecipe(e, tg)?.r : null) ?? e.R.ft);
       return recipeAction(v, g, r, 'new group');
     }
     return null;
@@ -6054,8 +6119,8 @@ try {
     const place = home
       ? { msg: { type: 'AssignBuildings', group: home.id, amount: take }, until: ((h0) => (x) => (groupById(x, home.id)?.count ?? 0) >= h0 + take)(home.count) }
       : { msg: { type: 'CreateGroup', building: e.id.ws, amount: take, name: r.name, region: REGION }, until: (x) => x.groups.some((y) => !ids.has(y.id) && y.building === e.id.ws && y.count >= take) };
-    return { action: { id: 'bo:split:' + g.id, text: 'switch spare Frame Timber to furniture (' + split.source + '): move ' + take + ' Workshop(s) from group ' + g.id + ' to ' + r.name + (home ? ' (group ' + home.id + ')' : ' (new group)'),
-      steps: [{ msg: { type: 'UnassignBuildings', group: g.id, amount: take }, until: (x) => (groupById(x, g.id)?.count ?? 0) <= c0 - take }, place] } };
+    return { action: track(v, ctx, e.id.ws, { id: 'bo:split:' + g.id, text: 'switch spare Frame Timber to furniture (' + split.source + '): move ' + take + ' Workshop(s) from group ' + g.id + ' to ' + r.name + (home ? ' (group ' + home.id + ')' : ' (new group)'),
+      steps: [{ msg: { type: 'UnassignBuildings', group: g.id, amount: take }, until: (x) => (groupById(x, g.id)?.count ?? 0) <= c0 - take }, place] }) };
   }
 
   // 3b. Furniture rebalance (wiki 4.7 step 3, plan D3): today's furniture Workshops against the board's split of the same total.
@@ -6095,8 +6160,8 @@ try {
         const place = home
           ? { msg: { type: 'AssignBuildings', group: home.id, amount: 1 }, until: ((h0) => (x) => (groupById(x, home.id)?.count ?? 0) >= h0 + 1)(home.count) }
           : { msg: { type: 'CreateGroup', building: e.id.ws, amount: 1, name: r.name, region: REGION }, until: (x) => x.groups.some((y) => !ids.has(y.id) && y.building === e.id.ws) };
-        return { action: { id: 'bo:rebal:' + g.id, text: 'rebalance furniture to the board (' + line + '): move 1 Workshop from group ' + g.id + ' (' + e.R[from].name + ') to ' + r.name + (home ? ' (group ' + home.id + ')' : ' (new group)'),
-          steps: [{ msg: { type: 'UnassignBuildings', group: g.id, amount: 1 }, until: (x) => (groupById(x, g.id)?.count ?? 0) <= c0 - 1 }, place] } };
+        return { action: track(v, ctx, e.id.ws, { id: 'bo:rebal:' + g.id, text: 'rebalance furniture to the board (' + line + '): move 1 Workshop from group ' + g.id + ' (' + e.R[from].name + ') to ' + r.name + (home ? ' (group ' + home.id + ')' : ' (new group)'),
+          steps: [{ msg: { type: 'UnassignBuildings', group: g.id, amount: 1 }, until: (x) => (groupById(x, g.id)?.count ?? 0) <= c0 - 1 }, place] }) };
       }
     }
     return { wait: 'rebalance: ' + line + ' waits: ' + why.join('; ') };
@@ -6114,7 +6179,7 @@ try {
     const ftHeld = new Set(ctx.mem?.('buildout')?.get?.()?.ftMine ?? []);   // paused by the WF gate on purpose
     for (const bn of ENGINE) {
       const b = v.idB(bn);
-      if (e.ownPool(b) > 0) return v.bld(b).name + ' in the pool';
+      if (poolTake(v, ctx, e, bn) > 0) return v.bld(b).name + ' in the pool';
       const g = v.groups.find((x) => x.building === b && x.count > 0 && !ftHeld.has(x.id) && (x.paused || (x.equipped ?? x.count) < x.count));
       if (g) return 'group ' + g.id + ' (' + (g.name ?? v.bld(b).name) + ') ' + (g.paused ? 'paused' : 'equipped ' + g.equipped + '/' + g.count);
     }
@@ -6132,7 +6197,7 @@ try {
     const lack = short(v, e.kitOf(s.b, s.pick.r), ahead);
     if (lack.length) return { wait: 'kit short for ' + ahead + ' x ' + s.pick.label + ': ' + lack.join(', ') };
     let cost = 0;
-    for (let i = 0; i < ahead; i++) cost += W.idleCore.planner.price(bd.cost, v.owned(s.pick.bn), i);
+    for (let i = 0; i < ahead; i++) cost += W.idleCore.planner.price(bd.cost, v.ownedAll(s.pick.bn), i);
     const bill = cp._billNeed(v, (bd.draws?.power ?? 0) * ahead), floor = ctx.floorCents ?? 0;
     if (v.money - cost < floor + bill) return { wait: 'cash ' + usd(v.money) + ' < ' + usd(cost + floor + bill) + ' for ' + ahead + ' x ' + s.pick.label + ' + bill floor + money floor', need: cost + floor + bill };
     return { ok: true, need: cost + floor + bill };
@@ -6150,6 +6215,8 @@ try {
     if (w.wave >= w.waves) return { status, wait: 'conversion: all ' + w.waves + ' waves done, ' + w.farms + ' Farms left' };
     if (ctx.retailOk === false) return { status, wait: 'retail checkpoint failed: remaining Farms stay on Cotton' };   // plan A2: any fail, measured or not; the capped engine needs no more acres
     if (ctx.retailFail) return { status, wait: 'retail fail path: Farms stay on Cotton' };   // a pass of the re-run proves only the capped output sells
+    const cot = v.idI('Cotton'), eater = v.groups.find((g) => g.count > 0 && (v.C.recipes[g.recipe]?.inputs ?? []).some((i) => i.item === cot));
+    if (eater) return { status, wait: 'conversion: group ' + eater.id + ' (' + (eater.name ?? v.C.recipes[eater.recipe].name) + ') eats Cotton: Farms stay' };   // the plan sells Cotton; a group outside it needs the Farms
     if (ctx.boCdBusy) return { status, wait: 'conversion: CD Farm is running' };
     // Fail closed: without saved wave memory every step would look like wave 1 and demolish another quarter of the Farms.
     if (!ctx.boMemOk || ctx.mem?.('buildout')?.get?.()?.base == null) return { status, wait: 'conversion: wave memory not saved (browser storage), no wave' };
@@ -6170,6 +6237,15 @@ try {
     return { status, action: { id: 'bo:wave:' + w.wave, text: 'Farm conversion wave ' + (w.wave + 1) + '/' + w.waves + ': unassign and demolish ' + n + ' Farms', hold: true,
       steps: [{ msg: { type: 'UnassignBuildings', group: g.id, amount: n }, until: (x) => (groupById(x, g.id)?.count ?? 0) <= c0 - n },
         { msg: { type: 'DemolishBuilding', building: e.id.farm, amount: n, region: REGION }, until: (x) => x.owned('Farm') <= o0 - n }] } };
+  }
+
+  // Dollars an engine acre earns an hour (plan D-1): BLOCK_HOURLY at board price 160% and quality 0, scaled by the live board price of the
+  // furniture mix, and 0 once the planks made already cover what the shelves sell (appetite x share). BLOCK_HOURLY without a board.
+  function blockHourly(ctx, e) {
+    const f = ctx.retail, gs = FURN.map(([, n]) => f?.goods?.find((g) => g.name === n));
+    if (f?.share == null || gs.some((g) => !(g?.base > 0))) return BLOCK_HOURLY;
+    if (f.demandPlanksH > 0 && e.planksSupply >= f.demandPlanksH) return 0;
+    return BLOCK_HOURLY * gs.reduce((a, g, i) => a + MIX[FURN[i][0]] * g.unit / g.base, 0) / (1.6 * 0.952);
   }
 
   // 5. The next purchase: a consumer only when its supplier covers it; otherwise its supplier.
@@ -6218,7 +6294,7 @@ try {
     let landCents = 0;
     if (acres > 0) {
       if (stage === 'B') {
-        const last = cp._acrePriceCents(v.landBought + acres - 1), pb = (last / 100 + BLOCK_SHARE) / BLOCK_HOURLY;
+        const last = cp._acrePriceCents(v.landBought + acres - 1), pb = (last / 100 + BLOCK_SHARE) / blockHourly(ctx, e);
         if (pb > cfg.landPaybackAB) return { closed: true, wait: why + ': acre #' + (v.acresOwned + acres) + ' ' + usd(last) + ' + block ' + usd(BLOCK_SHARE * 100) + ' pays back in ' + pb.toFixed(1) + ' h > ' + cfg.landPaybackAB + ' h (Stage A-B rule closed)' };
         if (v.acresOwned + acres > ACRE_CAP) return { closed: true, wait: why + ': no free acre and Heartland is at its cap (' + ACRE_CAP + ' acres)' };
       } else {
@@ -6233,7 +6309,7 @@ try {
       const need = (e.saws + 1) * cfg.woodRunsPerSawmill * amt(e.R.planks.inputs, e.woodId);
       if (v.has('Wood') < need) return { wait: why + ': wood gate: Wood ' + Math.floor(v.has('Wood')) + ' < ' + need + ' (Sawmills x ' + cfg.woodRunsPerSawmill + ' runs)' };
     }
-    const price = W.idleCore.planner.price(bd.cost, v.owned(pick.bn), 0), cost = price + landCents;
+    const price = W.idleCore.planner.price(bd.cost, v.ownedAll(pick.bn), 0), cost = price + landCents;
     const mw = bd.draws?.power ?? 0, bill = cp._billNeed(v, mw), floor = ctx.floorCents ?? 0;
     if (ctx._boNoCash) return { pick, b, acres, cost, landCents, price, why };   // the wave gate checks cash itself, for several buildings
     if (v.money - cost < bill) return { saving: pick.label, wait: why + ': bill floor: cash ' + usd(v.money) + ' - ' + usd(cost) + ' < ' + usd(bill) + ' (' + mw + ' new MW x $20 + 2 h of bills)' };
@@ -6273,6 +6349,9 @@ try {
       // Storage check: write and read back through a fresh handle. Waves (which demolish Farms) need memory that survives; fail closed.
       m.set({ chk: ctx.now });
       ctx.boMemOk = ctx.mem('buildout').get().chk === ctx.now;
+      // Units placed by hand leave the pool: what tidy may take back is never more than the pool holds.
+      const pm = m.get().poolMine ?? {}, pm2 = Object.fromEntries(Object.entries(pm).map(([b, n]) => [b, Math.min(n, v.pool[b] ?? 0)]));
+      if (Object.entries(pm).some(([b, n]) => pm2[b] !== n)) m.set({ poolMine: pm2 });
       // A Kiln this director paused that is running now was resumed by the user: hands off from then on.
       const kilnId = v.idB('Kiln');
       const mine = m.get().kilnMine ?? [];
@@ -6340,7 +6419,7 @@ try {
         if (ws.wait) waits.push(ws.wait);
       } else readout.waves = 'Stage C: ' + cottonFarms(v, e) + ' cotton Farms to convert';
       const nb = nextBuildStep(v, { ...ctx, _boEngine: e, _boTargets: tg ?? undefined }, rule, stage);
-      if (nb.pick) return done(buyAction(v, e, nb));
+      if (nb.pick) return done(track(v, ctx, nb.b, buyAction(v, e, nb)));
       waits.push('build-out: ' + nb.wait);
       readout.next = waits[waits.length - 1];
       return { wait: waits.join(' | '), readout };
@@ -6362,7 +6441,8 @@ try {
 //   - Pre-store gate: once the Retail Store is unlocked, every made shelf good needs cfg.stockHoursPerShelf hours of what will sell
 //     in stock: min(modelled demand, measured output) per hour (sales are capped by output, wiki 4.7). Held-only goods skip the gate.
 //   - Builds 1 store (BuyBuilding, then CreateGroup amount 1 "Retail"; an empty Retail group is reused), then SetAssortment with up
-//     to 4 of Bookshelf, Table, Chair, Bench (made, assigned or held, best appetite x price first), only when the shelf set differs.
+//     to 4 of the board's goods the Corporation can make (made, assigned or held, best appetite x price first; Bookshelf, Table, Chair,
+//     Bench when the board names none), only when the shelf set differs.
 //     A shelved good leaves only after cfg.retailShelfDropMin minutes absent, so pauses do not churn the shelf.
 //   - Money gate: floor + store price + bill floor (new MW x $20 + 2 h of bills, plan 8.1); Iron Frames keep cfg.ifReserve back.
 //   - Checkpoint sampler (context): every cfg.retailSampleMin minutes after the shelves are set it records the shelf rows, the rating
@@ -6381,12 +6461,12 @@ try {
   if (!W.corePlan?.addDirector) throw new Error('Core plan did not load');
   const P = W.idleCore?.planner;
   const REGION = 0, TPS = 2, TICKS_H = 3600 * TPS;
-  const GOODS = ['Bookshelf', 'Table', 'Chair', 'Bench'];
+  // fallback shelf goods when the board names none the Corporation can make
   const RECIPE = { Bookshelf: 'Make Bookshelf', Table: 'Make Table', Chair: 'Make Chair', Bench: 'Make Bench' };
   const STORE = 'Retail Store', GROUP_NAME = 'Retail', WORKSHOP = 'Workshop', FT = 'Frame Timber', FT_GROUP = 'Frame Timber';
   const RATES = { power: 1000, water: 400, bandwidth: 1500 };   // cents per unit per 10-min bill (same as autoUtil billsOf)
+  // shortcut: the corp state carries no stock quality, so the price uses quality 0; read it once the protocol shows one.
   const Q0 = 0.952;                    // quality factor at quality 0 (wiki retail.md, Price)
-  const PRICE_X = 1.52;                // retail price / base value expected at quality 0, board price 160%
   const cfg = () => W.corePlan.cfg;
   const usd = (c) => '$' + (c / 100).toLocaleString('en-US', { maximumFractionDigits: 0 });
   const pct = (x) => (x * 100).toFixed(0) + '%';
@@ -6428,6 +6508,36 @@ try {
     return null;
   }
 
+  // Shelf goods: every board row the Corporation can make (a recipe on an unlocked building), name -> recipe name; RECIPE when none.
+  function goodsOf(v, board) {
+    const rows = board?.shelves?.[REGION] ?? board?.shelves?.[String(REGION)];
+    const out = {};
+    if (rows && typeof rows === 'object') for (const id of Object.keys(rows)) {
+      const n = v.C.items[id]?.name;
+      if (!n) continue;
+      const rs = Object.values(v.C.recipes).filter((r) => r.outputs?.[0]?.item === +id && v.unlocked(v.bld(r.building).name));
+      const r = rs.find((x) => x.name === RECIPE[n]) ?? rs[0];
+      if (r) out[n] = r.name;
+    }
+    return Object.keys(out).length ? out : RECIPE;
+  }
+  // A demand world event running now (wiki megaprojects-and-events: "Demand +-X% for item in region"). null: no event message seen.
+  // shortcut: the WorldEvents payload is unverified; any event text naming demand with no end tick in the past counts. Parse its fields once a capture shows them.
+  function demandEvent(we, tick) {
+    if (!we?.raw) return null;
+    let j = null;
+    try { j = typeof we.raw === 'string' ? JSON.parse(we.raw) : we.raw; } catch { return /demand/i.test(String(we.raw)); }
+    let hit = false;
+    const walk = (o) => {
+      if (hit || !o || typeof o !== 'object') return;
+      const end = o.ends_at ?? o.end_tick ?? o.until ?? o.expires_at;
+      if (Object.values(o).some((x) => typeof x === 'string' && /demand/i.test(x)) && !(typeof end === 'number' && tick != null && end <= tick)) { hit = true; return; }
+      Object.values(o).forEach(walk);
+    };
+    walk(j);
+    return hit;
+  }
+
   // ---- what the Corporation makes ---------------------------------------------------------------------------------------------------
   // Units per tick from the groups on the good's recipe: runs per wave x output / recipe ticks (the live "work" rows hold the runs).
   function output(v, recipeId) {
@@ -6450,26 +6560,32 @@ try {
   function facts(v, ctx) {
     const c = cfg();
     const storeB = v.idB(STORE);
-    const ids = {}, miss = [];
-    for (const n of GOODS) { const i = v.idI(n), r = v.idR(RECIPE[n]); if (i == null || r == null) miss.push(i == null ? n : RECIPE[n]); else ids[n] = i; }
+    const ids = {}, miss = [], recipeOf = goodsOf(v, ctx.retailBoard);
+    for (const [n, rn] of Object.entries(recipeOf)) { const i = v.idI(n), r = v.idR(rn); if (i == null || r == null) miss.push(i == null ? n : rn); else ids[n] = i; }
     if (storeB == null) miss.push(STORE);
     if (miss.length) return { err: 'name not in the catalog: ' + miss.join(', ') + ' (director off until the names match)' };
     const badBoard = checkBoard(ctx.retailBoard, ids);
     const storeGroup = v.groups.find((g) => g.building === storeB && g.count > 0) ?? null;
     const emptyGroup = storeGroup ? null : v.groups.find((g) => g.building === storeB) ?? null;
-    const f = { storeB, ids, storeGroup, emptyGroup, pooled: v.pool[storeB] ?? 0, owned: v.owned(STORE), unlocked: v.unlocked(STORE), rating: ratingOf(v.st), badBoard };
+    const f = { storeB, ids, names: Object.keys(recipeOf), storeGroup, emptyGroup, pooled: v.pool[storeB] ?? 0, owned: v.owned(STORE), unlocked: v.unlocked(STORE), rating: ratingOf(v.st), badBoard };
     if (badBoard) return f;
     const rows = ctx.retailBoard.shelves[REGION] ?? ctx.retailBoard.shelves[String(REGION)];
     f.share = shareOf(ctx.retailBoard, f.rating, v.st.ssi?.corp_id);
-    f.goods = GOODS.map((n) => {
-      const id = ids[n], rid = v.idR(RECIPE[n]), row = rows[id], base = v.C.items[id]?.base_value ?? 0, o = output(v, rid);
+    const plId = v.idI('Planks');
+    f.goods = Object.keys(ids).map((n) => {
+      const id = ids[n], rid = v.idR(recipeOf[n]), row = rows[id], base = v.C.items[id]?.base_value ?? 0, o = output(v, rid), rc = v.C.recipes[rid];
       return { name: n, id, rid, appetite: row.appetite, held: row.held, boardPrice: row.price, base, unit: base * row.price / 10000 * Q0,
         stock: v.has(n), outTick: o.perTick, blockH: perBlockH(o), made: o.perTick > 0,
         // a paused or retuning group still counts: it comes back, and the shelf should not churn meanwhile
-        assigned: v.groups.some((g) => g.recipe === rid && g.count > 0) };
+        assigned: v.groups.some((g) => g.recipe === rid && g.count > 0),
+        ppu: (rc?.inputs ?? []).filter((x) => x.item === plId).reduce((a, x) => a + x.amount, 0) / (rc?.outputs?.[0]?.amount || 1) };
     });
     f.eligible = (g) => g.made || g.assigned || g.stock > 0;
     f.demandH = (g) => demandH(g, f.share);
+    // Planks per hour the best four plank goods sell: the land rule sizes the engine to it (corePlan decide). Before a store sells, at the
+    // share the target rating (cfg.retailRating) will give, not today's rating of 0.
+    const dShare = f.storeGroup ? f.share : shareOf(ctx.retailBoard, Math.max(f.rating ?? 0, c.retailRating ?? 0), v.st.ssi?.corp_id);
+    f.demandPlanksH = dShare == null ? null : pickOrder(f.goods.filter((g) => g.ppu > 0)).reduce((a, g) => a + demandH(g, dShare) * g.ppu, 0);
     // Before the store: the shelf is what is eligible now (shelfPick() adds the keep-on-shelf rule once the store exists).
     f.chosen = pickOrder(f.goods.filter(f.eligible));
     needOf(f, c);
@@ -6508,7 +6624,8 @@ try {
   // What the next bill is now, every subscription together (cents).
   function billsOf(st) {
     let t = (st.isp ?? 0) * RATES.bandwidth;
-    for (const o of Object.values(st.subscriptions ?? {})) for (const [k, l] of Object.entries(o ?? {})) t += (l ?? 0) * (RATES[k] ?? 0);
+    const pm = W.idleCore?.powerPriceMult?.() ?? 1;   // a world event's NPC power price multiplier
+    for (const o of Object.values(st.subscriptions ?? {})) for (const [k, l] of Object.entries(o ?? {})) t += (l ?? 0) * (RATES[k] ?? 0) * (k === 'power' ? pm : 1);
     return t;
   }
 
@@ -6532,7 +6649,8 @@ try {
     return { sold, model, by };
   }
   // base: appetite per item the drift is measured from (the E1 streak's first sample); default the first sample here.
-  function rowsOf(samples, mem, c, now, e1 = false, base = null) {
+  // live: board price per item now (default the last sample); demandOn: a demand world event runs, so appetite drift is unknown, not a fail.
+  function rowsOf(samples, mem, c, now, e1 = false, base = null, live = null, demandOn = false) {
     const s0 = samples[0], sN = samples[samples.length - 1], ids = Object.keys(s0?.g ?? {});
     const out = [];
     // 1. appetite steady within +-tol of the baseline (a fixed one, so a slow slide adds up instead of hiding in a rolling window)
@@ -6542,7 +6660,8 @@ try {
       for (const s of samples) { const d = a0 && s.g[id] ? Math.abs(s.g[id].a / a0 - 1) : 0; if (d > worst) { worst = d; worstName = s0.g[id].n; } }
     }
     const held0 = ids.reduce((a, id) => a + (s0.g[id].h ?? 0), 0), heldN = ids.reduce((a, id) => a + (sN.g[id]?.h ?? 0), 0);
-    out.push({ id: 'appetite', ok: samples.length < 2 ? null : worst <= c.retailAppetiteTol / 100, why: 'max drift ' + pct(worst) + (worstName ? ' (' + worstName + ')' : '') + ', limit ' + c.retailAppetiteTol + '%; held ' + held0 + ' -> ' + heldN });
+    const steady = worst <= c.retailAppetiteTol / 100;
+    out.push({ id: 'appetite', ok: samples.length < 2 || (!steady && demandOn) ? null : steady, why: 'max drift ' + pct(worst) + (worstName ? ' (' + worstName + ')' : '') + ', limit ' + c.retailAppetiteTol + '%' + (!steady && demandOn ? ' (a demand world event runs: unknown)' : '') + '; held ' + held0 + ' -> ' + heldN });
     // 2. sales >= pass% of the model
     // per good (wiki E1): every shelved good with a model must pass, so one dead good cannot hide behind the others; the worst is named
     const sv = salesOver(samples, ids);
@@ -6550,10 +6669,17 @@ try {
     const w = per[0];
     out.push({ id: 'sales', ok: per.length ? per.every((p) => p.x >= c.retailSamplePassPct / 100) : null,
       why: (w ? 'worst ' + w.n + ' sold ' + Math.round(w.sold) + ' of model ' + Math.round(w.model) + ' (' + pct(w.x) + ')' : 'no model yet') + ', all goods ' + Math.round(sv.sold) + ' of ' + Math.round(sv.model) + ', pass ' + c.retailSamplePassPct + '%' });
-    // 3. price about 1.52 x base at quality 0
-    let pw = 0, pName = '';
-    for (const s of samples) for (const id of ids) { const x = s.g[id]; if (!x) continue; const d = Math.abs(x.p / 10000 * Q0 / PRICE_X - 1); if (d > pw) { pw = d; pName = x.n + ' ' + (x.p / 10000 * Q0).toFixed(2) + 'x'; } }
-    out.push({ id: 'price', ok: pw <= c.retailPriceTol / 100, why: 'worst ' + (pName || '-') + ' vs ' + PRICE_X + 'x base, drift ' + pct(pw) + ', limit ' + c.retailPriceTol + '%' });
+    // 3. price = base x board price x quality factor (quality 0), from each sample's own board price: the server sets the board price
+    // (160% on 2026-11-21), so a board at another level or one that moves is the price, not a failed store. Unreadable: unknown.
+    let pw = 0, pName = '', bad = false;
+    for (const s of samples) for (const id of ids) {
+      const x = s.g[id], want = live?.[id] ?? sN.g[id]?.p;
+      if (!x) continue;
+      if (!(x.p > 0) || !(want > 0)) { bad = true; continue; }
+      const d = Math.abs(x.p / want - 1);
+      if (d > pw || !pName) { pw = d; pName = x.n + ' ' + (want / 10000 * Q0).toFixed(2) + 'x base'; }
+    }
+    out.push({ id: 'price', ok: bad || !pName ? null : true, why: bad ? 'a shelf row has no board price' : 'live board: ' + (pName || '-') + (pw > 0 ? ', board moved up to ' + pct(pw) + ' during the run' : '') });
     // 4. rating >= target within cfg.retailRatingMin minutes of the shelves being set (+1 per tick from 0 gives 9,000 in 75 min)
     const rated = samples.filter((s) => num(s.r));
     const dl = mem.shelvedAt + c.retailRatingMin * 60000;
@@ -6631,7 +6757,9 @@ try {
     }
     const res = { mem, n: samples.length };
     if (samples.length < 1) return res;
-    const ev = rowsOf(mem.decision ? samples.filter((x) => x.t >= (mem.streakStart ?? 0)) : samples, mem, c, ctx.now, !!mem.decision, mem.decision ? mem.e1Base : null);
+    const live = Object.fromEntries(f.goods.map((x) => [x.id, x.boardPrice]));
+    const we = ctx.worldEvents ?? W.idleCore?.sock?.worldEvents ?? null;
+    const ev = rowsOf(mem.decision ? samples.filter((x) => x.t >= (mem.streakStart ?? 0)) : samples, mem, c, ctx.now, !!mem.decision, mem.decision ? mem.e1Base : null, live, !!demandEvent(we, ctx.tick));
     res.rows = ev.rows;
     const blockH = Object.fromEntries(f.goods.map((x) => [x.id, x.blockH]));
     const age = ctx.now - mem.shelvedAt;
@@ -6745,7 +6873,7 @@ try {
     if (f.badBoard) return { wait: 'RETAIL BOARD SHAPE CHANGED: ' + f.badBoard + '; not building or shelving until it is checked', readout };
     if (f.share == null) return { wait: 'RETAIL BOARD: unknown "ratings" shape, share not computed; not acting', readout };
     if (!f.unlocked && !f.storeGroup && !f.pooled && !f.emptyGroup) return { wait: 'Retail Store not unlocked', readout };
-    if (!f.chosen.length) return { wait: 'no shelf good: the Corporation makes or holds none of ' + GOODS.join(', '), readout };
+    if (!f.chosen.length) return { wait: 'no shelf good: the Corporation makes or holds none of ' + f.names.join(', '), readout };
     const want = f.chosen.map((g) => g.id);
     const storeB = f.storeB, p0 = f.pooled;
     if (!f.storeGroup && f.emptyGroup) {
@@ -6761,7 +6889,7 @@ try {
       if (!p0) {
         const short = f.need.filter((x) => x.g.stock < x.need);
         if (short.length) return { wait: 'pre-store gate: ' + short.map((x) => x.g.name + ' ' + Math.floor(x.g.stock) + ' / ' + x.need).join(', ') + ' (' + cfg().stockHoursPerShelf + ' h of sales at min(demand, output))', readout };
-        const cost = P ? P.price(bd.cost, v.owned(STORE), 0) : bd.cost;
+        const cost = P ? P.price(bd.cost, v.ownedAll(STORE), 0) : bd.cost;
         // Iron Frames: until Stage D the prototypes and first builds still to pay are kept back (corePlan ifNeed, capped by cfg.ifReserve); this build's own frames are not
         const ifId = v.idI('Iron Frame'), late = out?.stage === 'D' || out?.stage === 'END';
         const keepOf = (i) => (i === ifId && !late ? Math.min(cfg().ifReserve ?? 0, W.corePlan._ifNeed(v, STORE)) : 0);
@@ -6769,7 +6897,7 @@ try {
         if (lack.length) return { wait: 'store needs ' + lack.map((i) => i.amount + ' ' + (v.C.items[i.item]?.name ?? i.item) + (keepOf(i.item) ? ' (+' + keepOf(i.item) + ' kept for prototypes)' : '')).join(', '), readout };
         if (v.freeAcres < bd.acres) return { wait: 'store needs ' + bd.acres + ' free acres (' + v.freeAcres + ' free)', readout };
         // bill floor (plan 8.1): the store's always-on draw goes on every bill from now on
-        const mw = bd.draws?.power ?? 0, billFloor = mw * 2000 + 12 * billsOf(v.st);
+        const mw = bd.draws?.power ?? 0, billFloor = mw * 2000 * (W.idleCore?.powerPriceMult?.() ?? 1) + 12 * billsOf(v.st);
         const need = (ctx.floorCents ?? 0) + cost + billFloor;
         if (v.money < need) return { wait: 'store ' + usd(cost) + ' + bill floor ' + usd(billFloor) + ' (' + mw + ' MW x $20 + 2 h of bills): need ' + usd(need - v.money) + ' more above the floor', readout };
         steps.push({ msg: { type: 'BuyBuilding', building: storeB, amount: 1, region: REGION }, until: (x) => (x.pool[storeB] ?? 0) >= 1 || x.groups.some((g) => g.building === storeB && g.count > 0) });
@@ -6799,7 +6927,6 @@ try {
       retailMaxHours: 4,           // give up (fail) when a row still has no data by then
       retailAppetiteTol: 15,       // % appetite may move while the store sells
       retailSamplePassPct: 70,     // % of the modelled sales that must sell
-      retailPriceTol: 3,           // % around 1.52 x base
       retailRating: 9000,          // rating the store must reach ...
       retailRatingMin: 90,         // ... within this many minutes of the build (75 at +1 per tick, plus slack)
       retailE1Hours: 6,            // E1: hours in a row with the rows passing
@@ -6810,7 +6937,7 @@ try {
     context, decide,
     duties: () => [{ duty: 'Retail Store, shelves and the retail checkpoint (wiki 4.7)', owner: 'Core plan', done: true }],
   });
-  W.corePlan._retail = { facts, demandH, shelfHours, checkBoard, shareOf, salesOver, rowsOf, capOf, shapeOf };
+  W.corePlan._retail = { facts, goodsOf, demandEvent, demandH, shelfHours, checkBoard, shareOf, salesOver, rowsOf, capOf, shapeOf };
 })();
 } catch (e) { console.error('[IdleCorp] cp-retail failed to load:', e); }
 // @@END cp-retail
@@ -6981,7 +7108,7 @@ try {
     if (frames < keep + per) return { want: true, note: 'second Lab waits: Iron Frame ' + Math.floor(frames) + ' < ' + (keep + per) + ' (' + keep + ' kept for the unlocks + ' + per + ')' };
     let land = 0;
     for (let i = 0; i < acres; i++) land += W.corePlan._acrePriceCents(v.landBought + i);
-    const price = W.idleCore.planner.price(bd.cost, owned, 0);
+    const price = W.idleCore.planner.price(bd.cost, v.ownedAll('Manufacturing Lab'), 0);
     const mw = bd.draws?.power ?? 0, bill = W.corePlan._billNeed(v, mw);
     const landTxt = acres ? acres + ' acre(s) ' + usd(land) + ' + ' : '';
     if (v.money < floor + land + price + bill) return { want: true, note: 'second Lab waits: cash ' + usd(v.money) + ' < ' + usd(floor + land + price + bill) + ' (money floor + ' + landTxt + 'Lab ' + usd(price) + ' + ' + mw + ' MW bills)' };
@@ -7105,7 +7232,7 @@ try {
   if (!W.corePlan?.addDirector) throw new Error('Core plan did not load');
   const M = W.idleCore?.coreMath;
   if (!M) throw new Error('core-math did not load');
-  const NAME = 'ladder', WALL_CD = 505000;   // Oil Rig 5,000 + Refinery 500,000 (2026-11-24 catalog)
+  const NAME = 'ladder', WALL_CD = 5000 + W.corePlan._refineryCd;   // Oil Rig 5,000 + Refinery 500,000 (2026-11-24 catalog)
   const fmt = (n) => Math.round(n).toLocaleString('en-US');
   const cfgOf = () => W.corePlan.cfg;
   // A Live session = Core plan stepping live without a long gap; a reload starts a new one (new LOAD token).
@@ -7469,7 +7596,7 @@ try {
       if (it.category === 'Raw') return 'raw';
       if (/ Sheet$/.test(it.name)) return 'sheet';
       // Saturated: output keeps up with demand and the stock is a stretch of demand deep (wiki 6).
-      const g = rf?.share != null ? rf.goods?.find((x) => x.id === i) : null;
+      const g = rf?.share != null && storeItems(v).includes(i) ? rf.goods?.find((x) => x.id === i) : null;   // only goods on the shelf
       if (g) { const dem = cp._retail.demandH(g, rf.share); if (g.outTick * TPH >= dem && g.stock >= cfg.sellSaturatedHours * dem) return 'saturated shelf'; }
       return null;
     };
@@ -7548,7 +7675,7 @@ try {
     }
     const au = ctx.mods?.autoUtil, sub = v.st.subscriptions?.[REGION]?.power ?? 0, load = au?._measure ? au._measure('power', REGION, v.st, v.catalog, 0, []).load : powerLoad(v);
     if (load > 0) c.push(chk('power', !!au?.conf?.power?.on && sub >= load, (au?.conf?.power?.on ? 'Auto power on' : 'Auto power off') + ', ' + sub + ' MW subscribed for ' + load + ' MW load'));
-    const floor = sub * 12000;
+    const floor = sub * 12000 * (core?.powerPriceMult?.() ?? 1);   // a world event's NPC power price multiplier
     c.push(chk('cash', v.money >= floor, 'money ' + usd(v.money) + (v.money >= floor ? ' >= ' : ' < ') + 'bill floor ' + usd(floor) + ' (2 h of bills)'));
     if (out.stage === 'D' || out.stage === 'END') {
       const rf = ctx.retail;
@@ -7637,8 +7764,8 @@ try {
     add('unlock', names.length > 0 || busyB != null || oilWaits || UNLOCKS.every((n) => v.unlocked(n)),
       names.length ? (premium ? 'queue ' : 'start ') + names.join(' -> ') : busyName ? 'research running: ' + busyName : UNLOCKS.every((n) => v.unlocked(n)) ? 'all three unlocks are in'
         : oilWaits ? 'Oil Rig waits for the retail checkpoint' : 'no unlock can start (CD, prototype or prerequisite missing)');
-    const mw = v.st.subscriptions?.[REGION]?.power ?? 0, need = mw * 6000 * hours;
-    add('cash', v.money >= need, 'cash ' + usd(v.money) + (v.money >= need ? ' >= ' : ' < ') + mw + ' MW x $60 x ' + hours + ' h = ' + usd(need));
+    const mw = v.st.subscriptions?.[REGION]?.power ?? 0, pm = core?.powerPriceMult?.() ?? 1, need = mw * 6000 * pm * hours;
+    add('cash', v.money >= need, 'cash ' + usd(v.money) + (v.money >= need ? ' >= ' : ' < ') + mw + ' MW x $' + +(60 * pm).toFixed(2) + ' x ' + hours + ' h = ' + usd(need));
     if (v.owned('Retail Store') > 0) {
       const rf = opts.retail?.goods ? opts.retail : null, items = storeItems(v);
       const low = rf ? items.filter((i) => shelfHours(rf, i) < hours) : [];
@@ -7857,7 +7984,7 @@ try {
 //   4. one Smelter on Draw Copper Wire, the Smelt x3 floor applied before it;
 //   5. stock gates: a production group pauses once every endgame target its output feeds is met and resumes when one is below
 //      (Kiln-gate bookkeeping in mem('endgame'): egMine = paused here, egUser = resumed by you, left alone; the resume director skips egMine);
-//   6. StartTech Refinery once 750,000 CD and its prototype are in hand, checked before steps 1-5. Its CD need is published from the moment E1-E5 hold.
+//   6. StartTech Refinery once 500,000 CD and its prototype are in hand, checked before steps 1-5. Its CD need is published from the moment E1-E5 hold.
 // Before E1-E5 hold, or with cfg.dir_endgame off, only the resume half of step 5 runs (off: every group it paused), so no pause is stranded.
 // Purchases: acres above the CD-farm buffer, BuyLand for the rest (E4 leaves no acre above the buffer), kit in stock, cash >= the money
 // floor + land + price + bill floor. These buildings are not pending investments for E5: they come after the gate.
@@ -7896,7 +8023,7 @@ try {
     for (const x of [...(bd.build_items ?? []), ...(v.st.layouts?.[r.id]?.bom ?? bd.default_kit ?? [])]) need[x.item] = (need[x.item] ?? 0) + x.amount;
     const lack = Object.entries(need).filter(([i, a]) => stockOf(v, +i) < a).map(([i, a]) => Math.ceil(a - stockOf(v, +i)) + ' ' + itemName(v, +i));
     if (lack.length) return { wait: label + ': kit short: ' + lack.join(', ') };
-    const price = W.idleCore.planner.price(bd.cost, v.owned(bn), 0), mw = bd.draws?.power ?? 0, bill = cp._billNeed(v, mw), floor = ctx.floorCents ?? 0;
+    const price = W.idleCore.planner.price(bd.cost, v.ownedAll(bn), 0), mw = bd.draws?.power ?? 0, bill = cp._billNeed(v, mw), floor = ctx.floorCents ?? 0;
     const want = floor + land + price + bill;
     if (v.money < want) return { wait: label + ': cash ' + usd(v.money) + ' < ' + usd(want) + ' (money floor + ' + (land ? acres + ' acre(s) ' + usd(land) + ' + ' : '') + usd(price) + ' + ' + mw + ' MW bills)' };
     const g = groupsOn(v, b, r.id).sort((a, z) => z.count - a.count)[0], steps = cp._buySteps(v, b, acres, g, r.name);
@@ -7970,7 +8097,7 @@ try {
       const r = gateStep(v, ctx, 'resume');
       return { ...(r ?? {}), wait: r?.wait ?? (r?.action ? undefined : 'end conditions E1-E5 not all true'), readout: { checklist } };
     }
-    const b = v.idB('Refinery'), t = b == null ? null : v.N.techs.find((x) => x.building === b), cost = t?.cost ?? 750000;
+    const b = v.idB('Refinery'), t = b == null ? null : v.N.techs.find((x) => x.building === b), cost = t?.cost ?? cp._refineryCd;
     const preOk = !t?.requires || !!v.st.unlocked_buildings?.includes(t.requires);
     // The CD for the Refinery takes days to farm: asked for from the start, not after the builds.
     if (b != null && !v.unlocked('Refinery') && v.research?.building !== b) out.cdNeed = { b, name: 'Refinery', cd: cost, prereqsMet: preOk, note: preOk ? '' : 'needs Oil Rig first' };

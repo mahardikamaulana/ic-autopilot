@@ -27,7 +27,7 @@
     }
     const au = ctx.mods?.autoUtil, sub = v.st.subscriptions?.[REGION]?.power ?? 0, load = au?._measure ? au._measure('power', REGION, v.st, v.catalog, 0, []).load : powerLoad(v);
     if (load > 0) c.push(chk('power', !!au?.conf?.power?.on && sub >= load, (au?.conf?.power?.on ? 'Auto power on' : 'Auto power off') + ', ' + sub + ' MW subscribed for ' + load + ' MW load'));
-    const floor = sub * 12000;
+    const floor = sub * 12000 * (core?.powerPriceMult?.() ?? 1);   // a world event's NPC power price multiplier
     c.push(chk('cash', v.money >= floor, 'money ' + usd(v.money) + (v.money >= floor ? ' >= ' : ' < ') + 'bill floor ' + usd(floor) + ' (2 h of bills)'));
     if (out.stage === 'D' || out.stage === 'END') {
       const rf = ctx.retail;
@@ -116,8 +116,8 @@
     add('unlock', names.length > 0 || busyB != null || oilWaits || UNLOCKS.every((n) => v.unlocked(n)),
       names.length ? (premium ? 'queue ' : 'start ') + names.join(' -> ') : busyName ? 'research running: ' + busyName : UNLOCKS.every((n) => v.unlocked(n)) ? 'all three unlocks are in'
         : oilWaits ? 'Oil Rig waits for the retail checkpoint' : 'no unlock can start (CD, prototype or prerequisite missing)');
-    const mw = v.st.subscriptions?.[REGION]?.power ?? 0, need = mw * 6000 * hours;
-    add('cash', v.money >= need, 'cash ' + usd(v.money) + (v.money >= need ? ' >= ' : ' < ') + mw + ' MW x $60 x ' + hours + ' h = ' + usd(need));
+    const mw = v.st.subscriptions?.[REGION]?.power ?? 0, pm = core?.powerPriceMult?.() ?? 1, need = mw * 6000 * pm * hours;
+    add('cash', v.money >= need, 'cash ' + usd(v.money) + (v.money >= need ? ' >= ' : ' < ') + mw + ' MW x $' + +(60 * pm).toFixed(2) + ' x ' + hours + ' h = ' + usd(need));
     if (v.owned('Retail Store') > 0) {
       const rf = opts.retail?.goods ? opts.retail : null, items = storeItems(v);
       const low = rf ? items.filter((i) => shelfHours(rf, i) < hours) : [];
