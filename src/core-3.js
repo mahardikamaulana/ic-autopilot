@@ -41,15 +41,26 @@
     smeltX3: '0,0:123:1 0,1:127:1 0,2:123:1 0,3:123:0 1,0:113:0 1,2:123:3 1,3:126:0 2,3:123:0 3,0:123:0 3,2:123:0 3,3:126:0 4,0:123:0 4,1:113:0 4,3:123:0 5,0:123:0 5,3:123:0 6,0:123:0 6,1:123:0 6,2:113:0 7,0:123:0 7,1:123:0 8,0:123:0 8,1:123:0 8,2:123:0 9,0:114:0 9,1:114:0 9,2:114:0',
   });
 
+  // ---- game numbers other modules share ------------------------------------------------------------------------------
+  // Courier allowance per run in CU: 10,000 + 5,000 per capacity level, at most 50,000 (the client's own formula, st.courier_levels.capacity).
+  const courierCU = (st = walk().st) => Math.min(50000, 10000 + Math.max(0, Number(st?.courier_levels?.capacity) || 0) * 5000);
+  // NPC power price multiplier from the world event in force: the client's event chip reads engine.worldEventAt(tick) and shows
+  // "NPC power x(100 + percent) / 100" when the event is an outage. 1 when there is none, or no engine / tick to ask.
+  function powerPriceMult(engine = walk().engine, tick = nowTick()) {
+    try {
+      const ev = tick > 0 && typeof engine?.worldEventAt === 'function' ? JSON.parse(engine.worldEventAt(tick)) : null;
+      return ev?.outage && Number.isFinite(ev.percent) ? Math.max(0, (100 + ev.percent) / 100) : 1;
+    } catch { return 1; }
+  }
 
   const titleTimer = HAS_DOM ? setInterval(applyTitle, 2000) : 0;
   addEventListener?.('pagehide', flushLedger);
 
   W.idleCore = {
     version: 1,
-    walk, sleep, sleepWake, waitConfirm, tune, markSend, lastRtt, nowTick, seeTick, sock, orderBook,
+    walk, sleep, every, sleepWake,waitConfirm, tune, markSend, lastRtt, nowTick, seeTick, sock, orderBook,
     h, makeDraggable, toast, ledger: ledgerApi, ui,
-    setBadge, notify, askNotify, notifyPerm, stopAll, reserves, floorDesigns,
+    setBadge, notify, askNotify, notifyPerm, stopAll, reserves, floorDesigns, courierCU, powerPriceMult,
     exportConfig, importConfig, exportFile, importFile, missingFields,
     _unload() {
       orderBook.release();
@@ -60,7 +71,7 @@
       if (HAS_DOM) removeEventListener('keydown', onKey, true);
       clearInterval(titleTimer);
       flushLedger();
-      if (HAS_DOM) { uiStyleEl?.remove(); toastBox?.remove(); uiStyleEl = toastBox = null; dockObs?.disconnect(); dockObs = null; }
+      if (HAS_DOM) { uiStyleEl?.remove(); toastBox?.remove(); uiStyleEl = toastBox = null; domObs?.disconnect(); domObs = null; domSubs.clear(); dockOff = null; }
     },
   };
 })();

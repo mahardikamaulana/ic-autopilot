@@ -477,6 +477,8 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
     const dl = [bid(61, I('Clock'), 400000, 500, 300)], st = plain(); st.stock[0][I('Clock')] = 9e6;
     const sat = (g) => XR.sellPlan(view(cpR, st, dl), F.ctxOf({ tick: T0, deals: dl, retail: { goods: [g], share: 1 } }), {}).find((p) => p.item === I('Clock'));
     const clock = (stock, outTick) => ({ id: I('Clock'), appetite: 2400, stock, outTick });
+    assert.ok(!sat(clock(2e6, 10)), 'a good the store does not shelve is never sold as a saturated shelf');
+    st.groups[90] = { building: B('Retail Store'), region: 0, count: 1, recipe: null, assortment: [I('Clock')] };
     assert.strictEqual(sat(clock(2e6, 10)).kind, 'saturated shelf');
     assert.ok(!sat(clock(1e6, 10)), 'under 24 h of demand in stock');
     assert.ok(!sat(clock(2e6, 5)), 'output below demand');

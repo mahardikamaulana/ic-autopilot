@@ -606,6 +606,40 @@ const wsGroups = (st) => Object.values(st.groups).filter((g) => g.building === B
     st.stock[0] = liveReady().stock[0];
     d = decideOn(cp, st);
     assert.strictEqual(bo(d)?.id, 'bo:wave:0', boWait(d));
+    // a group outside the plan eats Cotton (Textile Mill on Spin Thread): no Farm is demolished
+    st.groups[95] = { building: B('Textile Mill'), region: 0, count: 1, recipe: Rc('Spin Thread'), paused: true, modules: {} };
+    d = decideOn(cp, st);
+    assert.ok(!bo(d) || !/wave/.test(bo(d).id), bo(d)?.text);
+    const ws = cp._buildout.waveStep(cp._view(st, cat, deals), F.ctxOf({ retailBoard: retail, boMemOk: true, mem: () => ({ get: () => ({ base: 88, wave: 0 }), set() {} }) }), d.rule, 'C');
+    assert.match(ws.wait, /conversion: group 95 \(Spin Thread\) eats Cotton: Farms stay/);
+    F.unload();
+  });
+
+  await F.t('pool tidy: with a user Workshop group, only Workshops the plan left in the pool are taken; a user recipe-less group keeps no recipe', () => {
+    const { cp } = F.load(['cp-buildout']);
+    const st = switched(liveReady());
+    st.building_pool[0][B('Workshop')] = 2;
+    const mem = sharedMem(), dec = () => decideOn(cp, st, { mem });
+    let a = bo(dec());
+    assert.ok(a && /^bo:(assign|create)/.test(a.id), 'no user group: pooled Workshops are tidied: ' + (a?.text ?? boWait(dec())));
+    st.groups[96] = { building: B('Workshop'), region: 0, count: 3, recipe: Rc('Make Desk'), modules: {} };   // the user's Desk group
+    a = bo(dec());
+    assert.ok(!a || !/^bo:(assign|create)/.test(a.id), 'the user may be placing them: ' + a?.text);
+    mem('buildout').set({ poolMine: { [B('Workshop')]: 1 } });
+    a = bo(dec());
+    assert.ok(a && /^bo:(assign|create)/.test(a.id), boWait(dec()));
+    assert.strictEqual(a.steps[0].msg.amount, 1, 'only the one the plan left there');
+    // confirming it records the unit as placed (poolMine back to 0)
+    a.steps[0].until({ groups: Object.entries(st.groups).map(([id, g]) => ({ id: +id, ...g, count: g.count + 1 })), pool: {} });
+    assert.strictEqual(mem('buildout').get().poolMine[B('Workshop')], 0);
+    // a recipe-less Workshop group the user made (not named after a plan recipe) gets no recipe
+    st.building_pool[0][B('Workshop')] = 0;
+    st.groups[97] = { building: B('Workshop'), region: 0, count: 1, recipe: null, name: 'My shop', modules: {} };
+    a = bo(dec());
+    assert.ok(!a || a.id !== 'bo:recipe:97:' + Rc('Frame Timber'), a?.text);
+    assert.ok(!a || !String(a.id).startsWith('bo:recipe:97'), a?.text);
+    mem('buildout').set({ groupsMine: [97] });
+    assert.ok(String(bo(dec())?.id).startsWith('bo:recipe:97'), 'a group the plan made gets its recipe');
     F.unload();
   });
 

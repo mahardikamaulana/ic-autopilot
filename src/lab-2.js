@@ -30,9 +30,9 @@
   // Sleep that stop() (or unload) ends at once.
   let kick = null;
   const nap = (ms) => new Promise((res) => {
-    const t = setTimeout(done, ms);
-    function done() { clearTimeout(t); if (kick === done) kick = null; res(); }
+    function done() { if (kick === done) kick = null; res(); }
     kick = done;
+    sleep(ms).then(done);   // core.sleep: socket messages end it on time in a hidden tab
   });
   // Sends a command; returns the mutation-Diff count at send time.
   function send(msg) {
@@ -154,7 +154,7 @@
     cool.clear(); sess.started = sess.claimed = 0;
     save();
     console.log(`[labRunner] start (${cfg.dryRun ? 'DRY RUN: start({ dryRun: false }) to send' : 'LIVE'})`);
-    core.ledger.add(TAG, 'info', `started (${cfg.dryRun ? 'dry run' : 'live'}): ${cfg.mode === 'list' ? 'custom list' : cfg.mode === 'modules' ? 'module fabrication' : 'process study'}, ${cfg.tierMode === 'best' ? 'best affordable tier' : 'Tier ' + TIERS[cfg.tierMode - 1].name}, keeps ${fmt(cfg.mdReserve)} MD`);
+    core.ledger.add(TAG, 'info', `started (${cfg.dryRun ? 'dry run' : 'live'}): ${cfg.mode === 'list' ? 'custom list' : cfg.mode === 'modules' ? 'module fabrication' : 'process study'}, ${cfg.tierMode === 'best' ? 'best value tier' : 'Tier ' + TIERS[cfg.tierMode - 1].name}, keeps ${fmt(cfg.mdReserve)} MD`);
     loop();
     render();
   }

@@ -8,7 +8,7 @@
 //   4. one Smelter on Draw Copper Wire, the Smelt x3 floor applied before it;
 //   5. stock gates: a production group pauses once every endgame target its output feeds is met and resumes when one is below
 //      (Kiln-gate bookkeeping in mem('endgame'): egMine = paused here, egUser = resumed by you, left alone; the resume director skips egMine);
-//   6. StartTech Refinery once 750,000 CD and its prototype are in hand, checked before steps 1-5. Its CD need is published from the moment E1-E5 hold.
+//   6. StartTech Refinery once 500,000 CD and its prototype are in hand, checked before steps 1-5. Its CD need is published from the moment E1-E5 hold.
 // Before E1-E5 hold, or with cfg.dir_endgame off, only the resume half of step 5 runs (off: every group it paused), so no pause is stranded.
 // Purchases: acres above the CD-farm buffer, BuyLand for the rest (E4 leaves no acre above the buffer), kit in stock, cash >= the money
 // floor + land + price + bill floor. These buildings are not pending investments for E5: they come after the gate.
@@ -47,7 +47,7 @@ try {
     for (const x of [...(bd.build_items ?? []), ...(v.st.layouts?.[r.id]?.bom ?? bd.default_kit ?? [])]) need[x.item] = (need[x.item] ?? 0) + x.amount;
     const lack = Object.entries(need).filter(([i, a]) => stockOf(v, +i) < a).map(([i, a]) => Math.ceil(a - stockOf(v, +i)) + ' ' + itemName(v, +i));
     if (lack.length) return { wait: label + ': kit short: ' + lack.join(', ') };
-    const price = W.idleCore.planner.price(bd.cost, v.owned(bn), 0), mw = bd.draws?.power ?? 0, bill = cp._billNeed(v, mw), floor = ctx.floorCents ?? 0;
+    const price = W.idleCore.planner.price(bd.cost, v.ownedAll(bn), 0), mw = bd.draws?.power ?? 0, bill = cp._billNeed(v, mw), floor = ctx.floorCents ?? 0;
     const want = floor + land + price + bill;
     if (v.money < want) return { wait: label + ': cash ' + usd(v.money) + ' < ' + usd(want) + ' (money floor + ' + (land ? acres + ' acre(s) ' + usd(land) + ' + ' : '') + usd(price) + ' + ' + mw + ' MW bills)' };
     const g = groupsOn(v, b, r.id).sort((a, z) => z.count - a.count)[0], steps = cp._buySteps(v, b, acres, g, r.name);
@@ -121,7 +121,7 @@ try {
       const r = gateStep(v, ctx, 'resume');
       return { ...(r ?? {}), wait: r?.wait ?? (r?.action ? undefined : 'end conditions E1-E5 not all true'), readout: { checklist } };
     }
-    const b = v.idB('Refinery'), t = b == null ? null : v.N.techs.find((x) => x.building === b), cost = t?.cost ?? 750000;
+    const b = v.idB('Refinery'), t = b == null ? null : v.N.techs.find((x) => x.building === b), cost = t?.cost ?? cp._refineryCd;
     const preOk = !t?.requires || !!v.st.unlocked_buildings?.includes(t.requires);
     // The CD for the Refinery takes days to farm: asked for from the start, not after the builds.
     if (b != null && !v.unlocked('Refinery') && v.research?.building !== b) out.cdNeed = { b, name: 'Refinery', cd: cost, prereqsMet: preOk, note: preOk ? '' : 'needs Oil Rig first' };
