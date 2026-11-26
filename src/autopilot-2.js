@@ -312,6 +312,7 @@
     try {
       const out = s.engine.evaluateLayout(r, JSON.stringify(cells));
       const rate = (typeof out === 'string' ? JSON.parse(out) : out)?.fx?.rate ?? null;
+      if (scoreCache.size >= 20000) scoreCache.clear();   // bounded: a long session scores many distinct layouts
       scoreCache.set(k, rate);
       return rate;
     } catch { scorerBroken = true; return null; }

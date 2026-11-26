@@ -35,7 +35,7 @@
     phase = 'building';
     await jitter();
     if (!running) return 'stop'; // stopped during the wait; nothing sent yet
-    const rb = mustRead();       // fresh baseline after the wait
+    const rb = mustRead(true);   // fresh baseline after the wait
     if (rb.nextBatch < n) { phase = 'waiting: money or land changed'; return 'wait'; } // the plan above no longer fits
     inFlight = { action: 'build', amount: n, at: Date.now() }; save();
     const d = send({ type: 'BuyBuilding', building: farmId(), amount: n, region: region() });

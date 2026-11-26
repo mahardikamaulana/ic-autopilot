@@ -210,7 +210,7 @@ function resetSettings(name, { snapshot, reset, restore }) {
 }
 
 const ui = {
-  ensureStyle, ICONS, group, field, inputBox, createPanel, createChrome, createLogView, togglePanel,
+  ensureStyle, ICONS, group, field, inputBox, createPanel, createChrome, createLogView, togglePanel, onDom,
   fmt, short, parseAmount, setOn, setMsg, setTone,
   hero, rowList, stateLine, banner, disclosure,
   amountField, toggleField, segField, quickPicks, runModeSeg,

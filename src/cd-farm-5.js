@@ -70,7 +70,7 @@
     get stats() { return stats; },
     get building() { return farmId(); },    // id of the building the farm cycles (the run's own while one is on)
     _debug: () => ({ ...core.sock, ws: undefined, attached: !!core.sock.ws, inFlight, phase, active }),
-    _unload: () => { unloaded = true; running = false; clearInterval(ctlTimer); unmountUi(); },
+    _unload: () => { unloaded = true; running = false; ctlTimer?.(); ctlTimer = null; unmountUi(); },
   };
 
   // Wait for the game to render and connect before mounting or resuming.
@@ -80,7 +80,7 @@
       await sleep(500);
     }
     mountUi();
-    ctlTimer = setInterval(() => controllerTick().catch((e) => console.error('[cdFarm]', e)), 2000);
+    ctlTimer = core.every(2000, () => controllerTick().catch((e) => console.error('[cdFarm]', e)));
     console.log('[cdFarm] ready. Open "CD Farm" in the sidebar, or use cdFarm.start() / cdFarm.stop()' + (resumable ? ' / cdFarm.resume()' : ''));
     if (resumable && cfg.autoResume) {
       while (!read()?.wsOpen) { if (unloaded) return; await sleep(500); }

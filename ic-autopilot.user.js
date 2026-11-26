@@ -47,7 +47,19 @@ try {
   const HAS_DOM = typeof document !== 'undefined' && !!document.body;
   if (W.idleCore?._unload) W.idleCore._unload();
   const store = (() => { try { return W.localStorage ?? null; } catch { return null; } })();
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  // Chrome may run timers in a tab hidden 5+ minutes only once a minute, but socket messages (2 ticks/s) still
+  // arrive, so every message also fires the timers that are due. after() is setTimeout with that rescue.
+  const due = new Set();
+  function after(ms, fn) {
+    const d = { at: Date.now() + ms, fn: () => { clearTimeout(t); due.delete(d); fn(); } };
+    const t = setTimeout(d.fn, ms);
+    due.add(d);
+    return () => { clearTimeout(t); due.delete(d); };
+  }
+  function runDue() { const now = Date.now(); for (const d of due) if (now >= d.at) { try { d.fn(); } catch (e) { console.error('[idleCore]', e); } } }
+  const sleep = (ms) => new Promise((r) => after(ms, r));
+  // setInterval with the same rescue; returns a stop function.
+  function every(ms, fn) { let stop = null; const run = () => { stop = after(ms, run); fn(); }; stop = after(ms, run); return () => stop(); }
   let unloaded = false;
 
   // ---- game state: one walk of the React fiber tree --------------------------
@@ -105,6 +117,7 @@ try {
   const wakers = new Set();
   function seeTick(t) { if (typeof t === 'number' && t > sock.tick) { sock.tick = t; sock.tickAt = Date.now(); } }
   function onMessage(e) {
+    runDue();
     if (typeof e.data !== 'string') return;
     sock.textMsgs++;
     try {
@@ -185,8 +198,8 @@ try {
   // Sleep that ends early when the server applies a player command (yours, or one you click yourself).
   function sleepWake(ms) {
     return new Promise((res) => {
-      const done = () => { clearTimeout(t); wakers.delete(done); res(); };
-      const t = setTimeout(done, ms);
+      const done = () => { cancel(); wakers.delete(done); res(); };
+      const cancel = after(ms, done);
       wakers.add(done);
     });
   }
@@ -610,17 +623,26 @@ body:has(>.idc-docked:not(.idc-ghost)) .idc-toasts{right:calc(var(--idc-dock,360
 
   // Panel shell: sticky header (drag, close; double-click minimizes), tabs, scrolling body, sticky footer ----------
   const livePanels = new Set();
+  // One page observer for every module (dock, chrome, Auto ship, Auto utilities): each subtree observer gets its own
+  // copy of every mutation record, and the game re-renders numbers on every tick. Subscribers run at most once a frame.
+  const domSubs = new Set();
+  let domObs = null, domQueued = false;
+  function onDom(fn) {
+    domSubs.add(fn);
+    if (!domObs) {
+      domObs = new MutationObserver(() => {
+        if (domQueued) return;
+        domQueued = true;
+        requestAnimationFrame(() => { domQueued = false; for (const f of [...domSubs]) { try { f(); } catch (e) { console.error('[idleCore]', e); } } });
+      });
+      domObs.observe(document.body, { childList: true, subtree: true });
+    }
+    return () => { domSubs.delete(fn); if (!domSubs.size) { domObs?.disconnect(); domObs = null; } };
+  }
   // React can drop or bring back the game's layout: re-place the panels whose docked state no longer matches it.
-  let dockObs = null;
+  let dockOff = null;
   function watchDock() {
-    if (dockObs) return;
-    let queued = false;
-    dockObs = new MutationObserver(() => {
-      if (queued) return;
-      queued = true;
-      requestAnimationFrame(() => { queued = false; const can = !!document.querySelector('.shell'); for (const p of livePanels) if (!p.state.min && p.el.classList.contains('idc-docked') !== can) p.place(); });
-    });
-    dockObs.observe(document.getElementById('root') || document.body, { childList: true, subtree: true });
+    dockOff ||= onDom(() => { const can = !!document.querySelector('.shell'); for (const p of livePanels) if (!p.state.min && p.el.classList.contains('idc-docked') !== can) p.place(); });
   }
   const motionOK = () => HAS_DOM && matchMedia('(prefers-reduced-motion: no-preference)').matches;
   const EASE = 'cubic-bezier(.2,.8,.2,1)';
@@ -781,11 +803,9 @@ body:has(>.idc-docked:not(.idc-ghost)) .idc-toasts{right:calc(var(--idc-dock,360
       get opener() { return chipEl?.isConnected ? chipEl : navEl; },
       mount() {
         dead = false; ensureStyle(); ensure();
-        let queued = false;
-        observer = new MutationObserver(() => { if (queued) return; queued = true; requestAnimationFrame(() => { queued = false; ensure(); }); });
-        observer.observe(document.getElementById('root') || document.body, { childList: true, subtree: true });
+        observer?.(); observer = onDom(ensure);
       },
-      unmount() { dead = true; observer?.disconnect(); observer = null; navEl?.remove(); chipEl?.remove(); navEl = chipEl = pillEl = chipDot = chipText = null; },
+      unmount() { dead = true; observer?.(); observer = null; navEl?.remove(); chipEl?.remove(); navEl = chipEl = pillEl = chipDot = chipText = null; },
       setPill(text, tone, hidden) { view.pill = { text, tone, hidden }; paint(); },
       setChip(text, tone, title) { view.chip = { text, tone, title }; paint(); },
       setOpen(b) { view.open = !!b; paint(); },
@@ -1034,7 +1054,7 @@ function resetSettings(name, { snapshot, reset, restore }) {
 }
 
 const ui = {
-  ensureStyle, ICONS, group, field, inputBox, createPanel, createChrome, createLogView, togglePanel,
+  ensureStyle, ICONS, group, field, inputBox, createPanel, createChrome, createLogView, togglePanel, onDom,
   fmt, short, parseAmount, setOn, setMsg, setTone,
   hero, rowList, stateLine, banner, disclosure,
   amountField, toggleField, segField, quickPicks, runModeSeg,
@@ -1089,7 +1109,7 @@ const ui = {
 
   W.idleCore = {
     version: 1,
-    walk, sleep, sleepWake, waitConfirm, tune, markSend, lastRtt, nowTick, seeTick, sock, orderBook,
+    walk, sleep, every, sleepWake,waitConfirm, tune, markSend, lastRtt, nowTick, seeTick, sock, orderBook,
     h, makeDraggable, toast, ledger: ledgerApi, ui,
     setBadge, notify, askNotify, notifyPerm, stopAll, reserves, floorDesigns,
     exportConfig, importConfig, exportFile, importFile, missingFields,
@@ -1102,7 +1122,7 @@ const ui = {
       if (HAS_DOM) removeEventListener('keydown', onKey, true);
       clearInterval(titleTimer);
       flushLedger();
-      if (HAS_DOM) { uiStyleEl?.remove(); toastBox?.remove(); uiStyleEl = toastBox = null; dockObs?.disconnect(); dockObs = null; }
+      if (HAS_DOM) { uiStyleEl?.remove(); toastBox?.remove(); uiStyleEl = toastBox = null; domObs?.disconnect(); domObs = null; domSubs.clear(); dockOff = null; }
     },
   };
 })();
@@ -2061,7 +2081,7 @@ try {
   // Returns the observed money change (includes passive income during the wait).
   async function demolish(n, { count = true } = {}) {
     await jitter();
-    const r0 = mustRead();
+    const r0 = mustRead(true);
     inFlight = { action: 'demolish', amount: n, at: Date.now() }; save();
     const d = send({ type: 'DemolishBuilding', building: farmId(), amount: n, region: region() });
     const r1 = await waitConfirm((r) => r.unassignedCamps <= r0.unassignedCamps - n, d);
@@ -2141,7 +2161,7 @@ try {
     phase = 'building';
     await jitter();
     if (!running) return 'stop'; // stopped during the wait; nothing sent yet
-    const rb = mustRead();       // fresh baseline after the wait
+    const rb = mustRead(true);   // fresh baseline after the wait
     if (rb.nextBatch < n) { phase = 'waiting: money or land changed'; return 'wait'; } // the plan above no longer fits
     inFlight = { action: 'build', amount: n, at: Date.now() }; save();
     const d = send({ type: 'BuyBuilding', building: farmId(), amount: n, region: region() });
@@ -3322,7 +3342,7 @@ try {
     get stats() { return stats; },
     get building() { return farmId(); },    // id of the building the farm cycles (the run's own while one is on)
     _debug: () => ({ ...core.sock, ws: undefined, attached: !!core.sock.ws, inFlight, phase, active }),
-    _unload: () => { unloaded = true; running = false; clearInterval(ctlTimer); unmountUi(); },
+    _unload: () => { unloaded = true; running = false; ctlTimer?.(); ctlTimer = null; unmountUi(); },
   };
 
   // Wait for the game to render and connect before mounting or resuming.
@@ -3332,7 +3352,7 @@ try {
       await sleep(500);
     }
     mountUi();
-    ctlTimer = setInterval(() => controllerTick().catch((e) => console.error('[cdFarm]', e)), 2000);
+    ctlTimer = core.every(2000, () => controllerTick().catch((e) => console.error('[cdFarm]', e)));
     console.log('[cdFarm] ready. Open "CD Farm" in the sidebar, or use cdFarm.start() / cdFarm.stop()' + (resumable ? ' / cdFarm.resume()' : ''));
     if (resumable && cfg.autoResume) {
       while (!read()?.wsOpen) { if (unloaded) return; await sleep(500); }
@@ -3670,9 +3690,9 @@ try {
   // Sleep that stop() (or unload) ends at once.
   let kick = null;
   const nap = (ms) => new Promise((res) => {
-    const t = setTimeout(done, ms);
-    function done() { clearTimeout(t); if (kick === done) kick = null; res(); }
+    function done() { if (kick === done) kick = null; res(); }
     kick = done;
+    sleep(ms).then(done);   // core.sleep: socket messages end it on time in a hidden tab
   });
   // Sends a command; returns the mutation-Diff count at send time.
   function send(msg) {
@@ -4691,14 +4711,13 @@ try {
     mounted = true;
     styleEl = h('style', { id: 'as-style' }, CSS);
     document.head.append(styleEl);
-    obs = new MutationObserver(renderAll);
-    obs.observe(document.body, { childList: true, subtree: true });
+    obs = core.ui.onDom(renderAll);
     tickTimer = setInterval(inject, 1000);
     inject();
   }
   function unmountUi() {
     mounted = false;
-    obs?.disconnect(); obs = null;
+    obs?.(); obs = null;
     clearInterval(tickTimer); clearTimeout(passTimer);
     closeMenu(false);
     styleEl?.remove(); panelEl?.remove(); styleEl = panelEl = null;
@@ -4905,7 +4924,7 @@ try {
   // ---- the engine --------------------------------------------------------------------------------------------------------
   const ctl = new Map();                 // util:region -> { samples: [{t, want}], first, fails, retryAt }
   const info = { power: [], water: [] }; // the last look, for the page
-  let loopTimer = 0, busy = false;
+  let loopTimer = null, busy = false;
   const anyOn = () => NAMES.some((u) => conf[u].on);
   const unit = (u) => UTILS[u].unit;
 
@@ -4999,8 +5018,8 @@ try {
   }
 
   function ensureLoop() {
-    if (anyOn() && !loopTimer && !unloaded) { loopTimer = setInterval(step, cfg.cycleMs); }
-    else if (!anyOn() && loopTimer) { clearInterval(loopTimer); loopTimer = 0; }
+    if (anyOn() && !loopTimer && !unloaded) { loopTimer = core.every(cfg.cycleMs, step); }
+    else if (!anyOn() && loopTimer) { loopTimer(); loopTimer = null; }
   }
 
   function set(util, on) {
@@ -5064,14 +5083,13 @@ try {
     mounted = true;
     styleEl = h('style', { id: 'au-style' }, CSS);
     document.head.append(styleEl);
-    obs = new MutationObserver(renderAll);
-    obs.observe(document.body, { childList: true, subtree: true });
+    obs = core.ui.onDom(renderAll);
     tickTimer = setInterval(inject, 1000);
     inject();
   }
   function unmountUi() {
     mounted = false;
-    obs?.disconnect(); obs = null;
+    obs?.(); obs = null;
     clearInterval(tickTimer); clearTimeout(passTimer);
     styleEl?.remove(); styleEl = null;
     document.querySelectorAll('[data-au],[data-au-note]').forEach((e) => e.remove());
@@ -5085,7 +5103,7 @@ try {
     exportCfg: () => ({ cfg: persistable() }),
     importCfg(o) { const r = apply(o?.cfg ?? o); save(); ensureLoop(); renderAll(); return r; },
     _measure: measure, _want: wantOf, _decide: decide, _step: step, _info: info,
-    _unload() { unloaded = true; clearInterval(loopTimer); loopTimer = 0; if (mounted) unmountUi(); },
+    _unload() { unloaded = true; loopTimer?.(); loopTimer = null; if (mounted) unmountUi(); },
   };
 
   restore();
@@ -5553,7 +5571,7 @@ try {
   }
 
   const ledgerNote = (kind, text) => core.ledger.add(TAG, kind, text);
-  let running = false, stepping = false, loopTimer = 0, last = null, fails = 0, lastSig = '', lastWait = '', lastWouldAt = {}, stopReason = '';
+  let running = false, stepping = false, loopTimer = null, last = null, fails = 0, lastSig = '', lastWait = '', lastWouldAt = {}, stopReason = '';
   const holds = new Set();
 
   async function sendStep(st) {
@@ -5650,11 +5668,11 @@ try {
   }
   function stop() {
     if (!running) return status();
-    running = false; clearInterval(loopTimer); loopTimer = 0; clearLive(); dropLock(); cancelResume();
+    running = false; loopTimer?.(); loopTimer = null; clearLive(); dropLock(); cancelResume();
     ledgerNote('info', 'stopped');
     return status();
   }
-  function ensureLoop() { if (!loopTimer) loopTimer = setInterval(() => { step(); }, cfg.intervalMs); }
+  function ensureLoop() { if (!loopTimer) loopTimer = core.every(cfg.intervalMs, () => { step(); }); }
   async function hold(who) { holds.add(who); while (stepping) await core.sleep(25); }
   function release(who) { holds.delete(who); }
 
@@ -5735,7 +5753,7 @@ try {
     exportCfg() { return { cfg: Object.fromEntries(Object.entries(cfg).filter(([k]) => !SESSION_ONLY.includes(k))) }; },
     resetCfg() { Object.assign(cfg, DEFAULTS); save(); },
     _ifNeed: ifNeed, _view: view, _decide: decide, _step: step, _names: names, _startConditions: startConditions, _endConditions: endConditions, _nextUnlock: nextUnlock, _trackCash: trackCash, _cashTrend60: cashTrend60, _setPacer(p) { pacer = p; },
-    _unload() { unloaded = true; running = false; clearInterval(loopTimer); cancelResume(); loopTimer = 0; core.reserves?.unregister('corePlan'); dropLock(); removeEventListener?.('pagehide', dropLock); },
+    _unload() { unloaded = true; running = false; loopTimer?.(); cancelResume(); loopTimer = null; core.reserves?.unregister('corePlan'); dropLock(); removeEventListener?.('pagehide', dropLock); },
   };
 
   restore();
@@ -8743,6 +8761,7 @@ try {
     try {
       const out = s.engine.evaluateLayout(r, JSON.stringify(cells));
       const rate = (typeof out === 'string' ? JSON.parse(out) : out)?.fx?.rate ?? null;
+      if (scoreCache.size >= 20000) scoreCache.clear();   // bounded: a long session scores many distinct layouts
       scoreCache.set(k, rate);
       return rate;
     } catch { scorerBroken = true; return null; }
