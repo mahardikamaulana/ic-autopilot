@@ -30,9 +30,9 @@
   // Sleep that stop() (or unload) ends at once.
   let kick = null;
   const nap = (ms) => new Promise((res) => {
-    const t = setTimeout(done, ms);
-    function done() { clearTimeout(t); if (kick === done) kick = null; res(); }
+    function done() { if (kick === done) kick = null; res(); }
     kick = done;
+    sleep(ms).then(done);   // core.sleep: socket messages end it on time in a hidden tab
   });
   // Sends a command; returns the mutation-Diff count at send time.
   function send(msg) {

@@ -216,7 +216,7 @@ try {
   // Returns the observed money change (includes passive income during the wait).
   async function demolish(n, { count = true } = {}) {
     await jitter();
-    const r0 = mustRead();
+    const r0 = mustRead(true);
     inFlight = { action: 'demolish', amount: n, at: Date.now() }; save();
     const d = send({ type: 'DemolishBuilding', building: farmId(), amount: n, region: REGION });
     const r1 = await waitConfirm((r) => r.unassignedCamps <= r0.unassignedCamps - n, d);

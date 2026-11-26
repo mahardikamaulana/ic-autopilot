@@ -175,7 +175,7 @@ try {
   // ---- the engine --------------------------------------------------------------------------------------------------------
   const ctl = new Map();                 // util:region -> { samples: [{t, want}], first, fails, retryAt }
   const info = { power: [], water: [] }; // the last look, for the page
-  let loopTimer = 0, busy = false;
+  let loopTimer = null, busy = false;
   const anyOn = () => NAMES.some((u) => conf[u].on);
   const unit = (u) => UTILS[u].unit;
 
@@ -269,8 +269,8 @@ try {
   }
 
   function ensureLoop() {
-    if (anyOn() && !loopTimer && !unloaded) { loopTimer = setInterval(step, cfg.cycleMs); }
-    else if (!anyOn() && loopTimer) { clearInterval(loopTimer); loopTimer = 0; }
+    if (anyOn() && !loopTimer && !unloaded) { loopTimer = core.every(cfg.cycleMs, step); }
+    else if (!anyOn() && loopTimer) { loopTimer(); loopTimer = null; }
   }
 
   function set(util, on) {
@@ -334,14 +334,13 @@ try {
     mounted = true;
     styleEl = h('style', { id: 'au-style' }, CSS);
     document.head.append(styleEl);
-    obs = new MutationObserver(renderAll);
-    obs.observe(document.body, { childList: true, subtree: true });
+    obs = core.ui.onDom(renderAll);
     tickTimer = setInterval(inject, 1000);
     inject();
   }
   function unmountUi() {
     mounted = false;
-    obs?.disconnect(); obs = null;
+    obs?.(); obs = null;
     clearInterval(tickTimer); clearTimeout(passTimer);
     styleEl?.remove(); styleEl = null;
     document.querySelectorAll('[data-au],[data-au-note]').forEach((e) => e.remove());
@@ -355,7 +354,7 @@ try {
     exportCfg: () => ({ cfg: persistable() }),
     importCfg(o) { const r = apply(o?.cfg ?? o); save(); ensureLoop(); renderAll(); return r; },
     _measure: measure, _want: wantOf, _decide: decide, _step: step, _info: info,
-    _unload() { unloaded = true; clearInterval(loopTimer); loopTimer = 0; if (mounted) unmountUi(); },
+    _unload() { unloaded = true; loopTimer?.(); loopTimer = null; if (mounted) unmountUi(); },
   };
 
   restore();

@@ -47,7 +47,7 @@
 
   W.idleCore = {
     version: 1,
-    walk, sleep, sleepWake, waitConfirm, tune, markSend, lastRtt, nowTick, seeTick, sock, orderBook,
+    walk, sleep, every, sleepWake,waitConfirm, tune, markSend, lastRtt, nowTick, seeTick, sock, orderBook,
     h, makeDraggable, toast, ledger: ledgerApi, ui,
     setBadge, notify, askNotify, notifyPerm, stopAll, reserves, floorDesigns,
     exportConfig, importConfig, exportFile, importFile, missingFields,
@@ -60,7 +60,7 @@
       if (HAS_DOM) removeEventListener('keydown', onKey, true);
       clearInterval(titleTimer);
       flushLedger();
-      if (HAS_DOM) { uiStyleEl?.remove(); toastBox?.remove(); uiStyleEl = toastBox = null; dockObs?.disconnect(); dockObs = null; }
+      if (HAS_DOM) { uiStyleEl?.remove(); toastBox?.remove(); uiStyleEl = toastBox = null; domObs?.disconnect(); domObs = null; domSubs.clear(); dockOff = null; }
     },
   };
 })();
