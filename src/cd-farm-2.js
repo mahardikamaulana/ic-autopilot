@@ -38,7 +38,7 @@
     const rb = mustRead();       // fresh baseline after the wait
     if (rb.nextBatch < n) { phase = 'waiting: money or land changed'; return 'wait'; } // the plan above no longer fits
     inFlight = { action: 'build', amount: n, at: Date.now() }; save();
-    const d = send({ type: 'BuyBuilding', building: farmId(), amount: n, region: REGION });
+    const d = send({ type: 'BuyBuilding', building: farmId(), amount: n, region: region() });
     const r1 = await waitConfirm((r) => r.unassignedCamps >= rb.unassignedCamps + n, d, read, cfg.timeoutMs + Math.ceil((n * rb.buildSec + rb.queue.build) * 1500));
     if (!r1) {
       const r = mustRead();
@@ -112,13 +112,13 @@
     fast: { mult: 1, minUnits: 1, maxHours: 1 },         // as fast as cash and acres allow
   };
   const PL = () => core.planner;
-  const FIRST_ACRE = 5000;
   const MIN_FLOOR_C = 10000;          // Auto never spends the last $100, whatever the other floors say
   let graceMs = 2000;                 // a timed-out Demolish gets this long to land before the retry looks again
   let waitMaxMs = 600000;             // a run waits this long for cash/items inside the run, then ends and lets Autopilot go
-  const RUN_MAX_MS = 900000;          // a run ends after 15 min so Autopilot gets its turn (sales, power, resuming groups); the controller restarts it
-  let segStart = 0;                   // when this run segment began (a start or a resume): RUN_MAX_MS counts from here, so time spent interrupted does not end a resumed run
-  const ERR_COOLDOWN_MS = 300000;     // after an error stop: 5 min, doubling, off after 3 in a row               // cents: first bought acre in Heartland
+  // A run ends after PL().runMaxMs (15 min, shorter at high income while it holds Autopilot / Core plan) so they get their turn
+  // (sales, power, resuming groups); the controller restarts it.
+  let segStart = 0;                   // when this run segment began (a start or a resume): the cap counts from here, so time spent interrupted does not end a resumed run
+  const ERR_COOLDOWN_MS = 300000;     // after an error stop: 5 min, doubling, off after 3 in a row
   const HIST_MS = 30 * 60 * 1000;        // window for income, organic CD, net supply
   const SAMPLE_MS = 5000;
   const BOOT_DELAY_MS = 15000;           // let the first snapshot and Autopilot settle before Auto starts itself
@@ -143,11 +143,12 @@
 
   // Light state for confirming commands: no catalog needed.
   function readPool(fresh = false) {
-    const { ws, st } = core.walk(fresh);
+    const { ws, st, catalog } = core.walk(fresh);
     if (!st) return null;
+    const R = region(st, catalog);
     return {
-      ws, wsOpen: ws?.readyState === 1, pool: { ...(st.building_pool?.[REGION] ?? {}) }, money: st.items?.[MONEY] ?? 0, cd: st.items?.[CD] ?? 0,
-      landBought: st.land_bought?.[REGION] ?? 0, mutTick: st.ssi?.last_user_mutation_tick ?? 0,
+      ws, wsOpen: ws?.readyState === 1, pool: { ...(st.building_pool?.[R] ?? {}) }, money: st.items?.[MONEY] ?? 0, cd: st.items?.[CD] ?? 0,
+      landBought: st.land_bought?.[R] ?? 0, mutTick: st.ssi?.last_user_mutation_tick ?? 0,
     };
   }
 
@@ -155,37 +156,32 @@
   function readAuto(fresh = false) {
     const { ws, st, catalog, deals } = core.walk(fresh);
     if (!st || !catalog || !PL()) return null;
+    syncIds(catalog);
+    const R = region(st, catalog);   // before `running` below shadows the run flag
     const cat = PL().normalize(catalog);
-    const pool = { ...(st.building_pool?.[REGION] ?? {}) };   // a copy: confirms compare against what it was before the command
-    const owned = { ...pool }, running = new Set(), recipes = [];
-    let acresUsed = 0;
-    for (const [b, n] of Object.entries(pool)) acresUsed += (cat.buildings[b]?.acres ?? 1) * n;
+    const pool = { ...(st.building_pool?.[R] ?? {}) };   // a copy: confirms compare against what it was before the command
+    // The price counts every unit in every region and both queues; acres, stock, bids and recipes are this region's.
+    const owned = PL().ownedAll({ st, catalog: cat }), running = new Set(), recipes = [];
     for (const g of Object.values(st.groups ?? {})) {
-      if ((g.region ?? REGION) !== REGION) continue;
-      owned[g.building] = (owned[g.building] ?? 0) + g.count;
-      acresUsed += (cat.buildings[g.building]?.acres ?? 1) * g.count;
-      if (g.paused) continue;
+      if ((g.region ?? 0) !== R || g.paused) continue;
       recipes.push(g.recipe);
       for (const i of cat.recipes[g.recipe]?.inputs ?? []) running.add(i.item);
     }
-    // Queued builds and demolitions count in the price and hold acres (see PL().queued).
-    const q = PL().queued({ st, catalog, region: REGION });
-    for (const [b, n] of Object.entries(q.owned)) owned[b] = (owned[b] ?? 0) + n;
-    acresUsed += q.acres;
-    // Best open bid per unit (side 'Sell' rows are bids you can sell into).
+    const q = PL().queued({ st, catalog: cat, region: R });
+    const ra = PL().regionAcres({ st, catalog: cat, region: R });
+    // Open bids per item as lots (per-unit price, amount); side 'Sell' rows are bids you can sell into.
     const bids = {};
-    for (const d of deals ?? []) if (d.region === REGION && d.side === 'Sell' && d.amount > 0) bids[d.item] = Math.max(bids[d.item] ?? 0, d.price / d.amount);
+    for (const d of deals ?? []) if (d.region === R && d.side === 'Sell' && d.amount > 0) (bids[d.item] ||= []).push({ price: d.price / d.amount, amount: d.amount });
     const unlocked = st.unlocked_buildings ?? [];
-    const landBought = st.land_bought?.[REGION] ?? 0;
-    const acresOwned = STARTER_ACRES + landBought;
+    const landBought = st.land_bought?.[R] ?? 0;
     return {
-      ws, wsOpen: ws?.readyState === 1, cat, pool, owned, running, recipes, bids, unlocked, landBought, acresOwned, acresUsed, queue: { build: q.build, demolish: q.demolish },
-      freeAcres: Math.max(0, acresOwned - acresUsed), stock: st.stock?.[REGION] ?? {},
+      ws, wsOpen: ws?.readyState === 1, cat, region: R, pool, owned, running, recipes, bids, unlocked, landBought, acresOwned: ra.owned, acresUsed: ra.used, queue: { build: q.build, demolish: q.demolish },
+      freeAcres: ra.free, stock: st.stock?.[R] ?? {},
       money: st.items?.[MONEY] ?? 0, cd: st.items?.[CD] ?? 0, retail: unlocked.includes(RETAIL) || (owned[RETAIL] ?? 0) > 0,
+      nextTech: cfg.solo ? PL().nextLockedTech({ catalog, unlocked, research: st.research, queue: st.research_queue ?? [] }) : null,
       mutTick: st.ssi?.last_user_mutation_tick ?? 0,
     };
   }
-  const RETAIL = 38;   // Retail Store
 
   // Items whose stock matters: the build items of every type that is not a starter.
   function watchItems(c) {
@@ -273,10 +269,13 @@
     const sig = detectRegime(c, ap);
     const pace = PACE[cfg.pace] ?? PACE.balanced;
     const userTarget = Number.isFinite(cfg.targetCd) ? cfg.targetCd : null;
-    const next = userTarget == null ? ap?.nextTech : null;
+    // On its own (cfg.solo, nothing else live): the target is the cheapest tech that can start next (PL().nextLockedTech).
+    const live = othersBusy(), solo = userTarget == null && !live && cfg.solo;
+    const next = userTarget != null ? null : solo ? c.nextTech : ap?.nextTech;
     const need = userTarget ?? next?.cd ?? null;
-    const base = { c, ap, sig, need, pace };
-    if (userTarget == null && !othersBusy()) return { ...base, idle: true, gate: 'G0', reason: 'waiting for Autopilot or Core plan to run live (or set a Target CD)' };
+    const base = { c, ap, sig, need, next, pace };
+    if (userTarget == null && !live && !solo) return { ...base, idle: true, gate: 'G0', reason: 'waiting for Autopilot or Core plan to run live (or set a Target CD, or switch on Run without Autopilot)' };
+    if (solo && !next) return { ...base, idle: true, gate: 'G0', reason: 'no tech can start next' };
     const g = PL().gates({ need: need ?? 0, cd: c.cd, prereqsMet: next ? next.prereqsMet !== false : true, prereqNote: next?.note || 'its prerequisites', organicCdPerHour: hist.slopes.cd ?? null, maxHours: pace.maxHours });
     if (!g.run) return { ...base, idle: true, gate: g.gate, reason: g.reason };
 
@@ -289,7 +288,7 @@
     for (const it of watchItems(c)) { const s = hist.slopes['s' + it]; if (s != null) netSupply[it] = s; burn[it] = Math.max(0, hist.slopes['u' + it] ?? 0); }
     const input = {
       catalog: c.cat, unlocked: c.unlocked, owned: c.owned, usableAcres: Math.max(0, c.freeAcres - cfg.reserveAcres), money: c.money, floor: floorC,
-      stock: c.stock, reserve: ap?.items ?? {}, netSupply, burn, itemValue: PL().itemValues({ catalog: c.cat, bids: c.bids, runningInputs: [...c.running] }),
+      stock: c.stock, reserve: ap?.items ?? {}, netSupply, burn, itemValue: PL().itemValues({ catalog: c.cat, bids: c.bids, runningInputs: [...c.running], stock: c.stock }),
       quarantine: activeQuarantine(), R: need - c.cd, T: t.T, TperType: t.perType, I, queue: c.queue, cdHave: c.cd,
       minUnits: recovering ? 1 : pace.minUnits, maxBatch: recovering ? 1 : cfg.batch, maxTypes: recovering ? 1 : cfg.maxTypes,
     };
@@ -297,17 +296,21 @@
     const plan = PL().plan(input);
     reportDrops(plan);
 
-    // Land only matters while acres cap the batch. With no free acre at all, ask what one acre would buy.
+    // Land only matters while acres cap the batch. With no free acre at all, ask what one acre would buy. Only in Heartland: the
+    // state does not show a charter's acre cap, and land is never refunded.
     let landR = { buy: 0, note: '' };
-    if (plan.binding === 'acres' || plan.wait?.reason === 'no free acres above the spare') {
+    if (c.region === 0 && (plan.binding === 'acres' || plan.wait?.reason === 'no free acres above the spare')) {
       const p2 = plan.units.length ? plan : PL().plan({ ...input, usableAcres: 1 });
       const u = p2.units[0];
       if (u) {
-        const wallC = cfg.land === 'plan' ? (window.earlyGame?.cfg?.maxAcrePrice ?? 0) * 100 : Infinity;
+        // Autopilot's land wall when it is loaded; without it the payback test in PL().land decides (plus its cash floor).
+        const apWall = window.earlyGame?.cfg?.maxAcrePrice;
+        const wallC = cfg.land === 'plan' && apWall != null ? apWall * 100 : Infinity;
         const share = window.earlyGame?.cfg?.landCashShare ?? 0.02;   // Autopilot's own pace of land buying
+        const first = PL().firstAcre(c.region);
         landR = PL().land({
-          allow: cfg.land === 'plan' || cfg.land === 'off' ? cfg.land : cfg.land * 100, landBought: c.landBought, firstAcre: FIRST_ACRE, wall: wallC, paybackHours: 20,
-          hoursUntilBought: (k) => (income > 0 ? PL().landCost(FIRST_ACRE, c.landBought, k) / (income * share) : Infinity),
+          allow: cfg.land === 'plan' || cfg.land === 'off' ? cfg.land : cfg.land * 100, landBought: c.landBought, firstAcre: first, wall: wallC, paybackHours: 20,
+          hoursUntilBought: (k) => (income > 0 ? PL().landCost(first, c.landBought, k) / (income * share) : Infinity),
           plan: p2, unitNeed: { cd: u.cd, acres: c.cat.buildings[u.b].acres }, R: need - c.cd, T: t.T, I, money: c.money, floor: floorC,
         });
       }
@@ -358,9 +361,9 @@
     const rb = readAuto(true);
     if (!rb) throw new ConnError('game state not found');
     // Land is never refunded: send only if nothing moved since the plan and the floor still holds.
-    if (rb.landBought !== ev.c.landBought || rb.money - ev.land.priceCents < ev.floorC) return;
+    if (rb.region !== ev.c.region || rb.landBought !== ev.c.landBought || rb.money - ev.land.priceCents < ev.floorC) return;
     inFlight = { action: 'land', amount: k, at: Date.now() }; save();
-    const d = send({ type: 'BuyLand', amount: k, region: REGION });
+    const d = send({ type: 'BuyLand', amount: k, region: rb.region });
     const r1 = await waitConfirm((r) => r.landBought >= rb.landBought + k, d, readPool);
     inFlight = null;
     if (!r1) throw new Error(`land purchase of ${k} acre(s) not confirmed`);
@@ -382,7 +385,7 @@
       // Never more than the farm holds: a first attempt that the server applied late must not make the retry eat your own buildings.
       const amt = Math.min(want, (r0.pool[b] ?? 0) - (stats.baseline?.[b] ?? 0));
       if (amt <= 0) return { ok: true, rtt: 0 };
-      const d = send({ type, building: b, amount: amt, region: REGION });
+      const d = send({ type, building: b, amount: amt, region: region() });
       if (await waitConfirm((r) => (r.pool[b] ?? 0) <= (r0.pool[b] ?? 0) - amt, d, readPool)) return { ok: true, rtt: core.lastRtt() ?? 0 };
     }
     return { ok: false, rtt: 0 };
@@ -410,7 +413,7 @@
     lastEval = ev;
     if (ev.idle) return stopWith(ev.reason);
     if (netSpend() >= cfg.maxSpend) return stopWith(`reached max spend $${fmt(cfg.maxSpend)}`);
-    if (Date.now() - segStart > RUN_MAX_MS) return stopWith('giving Autopilot its turn');
+    if (Date.now() - segStart > PL().runMaxMs({ incomeCentsPerHour: ev.income, held: othersBusy() })) return stopWith('giving Autopilot its turn');
     if (cfg.dryRun) {
       // Nothing is sent, land included. Log the plan a few times, then end (a dry run must not hold Autopilot forever).
       const u = ev.plan.units;
@@ -452,7 +455,7 @@
       if (halted) break;
       const base = rb.cat.buildings[u.b], owned = rb.owned[u.b] ?? 0;
       inFlight.units.push({ b: u.b, n: u.n }); save();   // from here on a reload or error counts these as possibly built
-      const d = send({ type: 'BuyBuilding', building: u.b, amount: u.n, region: REGION });
+      const d = send({ type: 'BuyBuilding', building: u.b, amount: u.n, region: region() });
       const bw0 = hr();
       // The game charges on the Buy, but refunds of queued demolishes and income keep landing until the build is done: read the
       // charge from the first state that has applied a player command since the send (the state's own mutation tick: the game can
@@ -563,7 +566,7 @@
       }
       console.log(`[cdFarm] cleanup: demolishing ${extra} leftover ${base.name}`);
       await jitter();
-      const d = send({ type: 'DemolishBuilding', building: b, amount: extra, region: REGION });
+      const d = send({ type: 'DemolishBuilding', building: b, amount: extra, region: region() });
       const r1 = await waitConfirm((r) => (r.pool[b] ?? 0) <= (rp.pool[b] ?? 0) - extra, d, readPool);
       if (!r1) throw new Error(`cleanup demolish of ${extra} ${base.name} not confirmed`);
       const refund = Math.floor(base.cost / 2) * extra;

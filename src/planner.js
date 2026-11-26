@@ -12,7 +12,13 @@ try {
 
   // Frame CD weights, by item name (ids differ between catalogs).
   const FRAME_CD = { 'Wooden Frame': 2, 'Iron Frame': 4, 'Wired Frame': 8, 'Light Frame': 16, 'Machine Frame': 32, 'Automated Frame': 64, 'Smart Frame': 128 };
-  const STARTERS = [0, 10];
+  const STARTERS = { 'Lumber Camp': 0, Farm: 10 };   // by name, with the ids as fallback
+  // Per region (Heartland 0, Industrial Basin 1, Coastal Cities 2, Frontier 3; wiki regions-and-land.md): free acres at start
+  // and the first bought acre in cents. The state carries neither, so these are the wiki's numbers.
+  const STARTER_ACRES = [25, 0, 0, 0];
+  const FIRST_ACRE = [5000, 3500, 4500, 1500];
+  const starterAcres = (r) => STARTER_ACRES[r] ?? 0;
+  const firstAcre = (r) => FIRST_ACRE[r] ?? FIRST_ACRE[0];
   const dollars = (c) => '$' + (c / 100).toFixed(2);
 
   const normCache = new WeakMap();
@@ -65,6 +71,65 @@ try {
     return out;
   }
 
+  // Units owned per type for the price: groups and pools in every region plus the queues (the price counts them all).
+  function ownedAll({ st, catalog }) {
+    const out = { ...queued({ st, catalog }).owned };
+    const add = (b, n) => { out[b] = (out[b] ?? 0) + n; };
+    for (const g of Object.values(st.groups ?? {})) add(g.building, g.count);
+    for (const pool of Object.values(st.building_pool ?? {})) for (const [b, n] of Object.entries(pool ?? {})) add(b, n);
+    return out;
+  }
+
+  // Acres in one region: starter + bought, used by groups, the pool and both queues there.
+  function regionAcres({ st, catalog, region = 0 }) {
+    const C = normalize(catalog);
+    const ac = (b) => C.buildings[b]?.acres ?? 1;
+    let used = queued({ st, catalog: C, region }).acres;
+    for (const g of Object.values(st.groups ?? {})) if ((g.region ?? 0) === region) used += ac(g.building) * g.count;
+    for (const [b, n] of Object.entries(st.building_pool?.[region] ?? {})) used += ac(b) * n;
+    const owned = starterAcres(region) + (st.land_bought?.[region] ?? 0);
+    return { owned, used, free: Math.max(0, owned - used) };
+  }
+
+  // The region to farm in: a fixed id, or 'auto' = the region with the most free acres among those the corp holds land or
+  // buildings in. Heartland wins ties (and is the answer when nothing else is held).
+  function pickRegion({ st, catalog, choice = 'auto' }) {
+    if (choice !== 'auto') return Number(choice) || 0;
+    const held = new Set([0]);
+    for (const [r, n] of Object.entries(st.land_bought ?? {})) if (n > 0) held.add(Number(r));
+    for (const g of Object.values(st.groups ?? {})) held.add(g.region ?? 0);
+    for (const [r, pool] of Object.entries(st.building_pool ?? {})) if (Object.values(pool ?? {}).some((n) => n > 0)) held.add(Number(r));
+    let best = 0, bestFree = regionAcres({ st, catalog, region: 0 }).free;
+    for (const r of [...held].sort((a, b) => a - b)) {
+      const f = regionAcres({ st, catalog, region: r }).free;
+      if (f > bestFree) { best = r; bestFree = f; }
+    }
+    return best;
+  }
+
+  // Manual money floor ($). The default floor is capped at half the cash at start, so a young corp is not stopped at once;
+  // a floor you (or Autopilot) set is used as is.
+  const manualFloor = ({ minMoney, isDefault, moneyStart }) => (isDefault ? Math.min(minMoney, Math.max(0, moneyStart) / 2) : minMoney);
+
+  // The cheapest tech that can start now (prerequisite unlocked, not researching or queued): its CD cost is the target
+  // when CD Farm Auto runs on its own.
+  function nextLockedTech({ catalog, unlocked = [], research = null, queue = [] }) {
+    const C = normalize(catalog);
+    const have = new Set([...unlocked].map(Number));
+    const busy = new Set([research?.building, ...queue.map((q) => q.building)].filter((b) => b != null).map(Number));
+    const open = (catalog.techs ?? C.techs ?? []).filter((t) => !have.has(t.building) && !busy.has(t.building) && (t.requires == null || have.has(t.requires)));
+    const t = open.sort((a, b) => a.cost - b.cost || a.building - b.building)[0];
+    return t ? { b: t.building, name: C.buildings[t.building]?.name ?? 'building ' + t.building, cd: t.cost, prereqsMet: true, note: '' } : null;
+  }
+
+  // How long one run may hold Autopilot / Core plan (ms): 15 min up to $100k/h of income, shorter as income grows (the
+  // held engine's sales and purchases wait), never under 5 min. Nothing held: the full 15 min.
+  const RUN_MAX_MS = 900000, RUN_MIN_MS = 300000, HOLD_REF_CENTS_H = 1e7;
+  function runMaxMs({ incomeCentsPerHour = null, held = true } = {}) {
+    if (!held || !(incomeCentsPerHour > HOLD_REF_CENTS_H)) return RUN_MAX_MS;
+    return Math.max(RUN_MIN_MS, Math.round(RUN_MAX_MS * Math.sqrt(HOLD_REF_CENTS_H / incomeCentsPerHour)));
+  }
+
   const price = (baseCents, owned, i) => Math.floor(baseCents * (20 + owned + i) / 20);
   function batchCost(baseCents, owned, n) {
     let s = 0;
@@ -83,12 +148,20 @@ try {
     return s;
   }
 
-  // Best open bid, else base value while a running recipe consumes it, else 0.
-  function itemValues({ catalog, bids = {}, runningInputs = [] }) {
+  // What one more unit used up costs: the bid it would have been sold into, else base value while a running recipe consumes
+  // it, else 0. bids[item] is a price per unit (any depth) or a list of lots [{ price per unit, amount }]: with `stock`, the
+  // stock fills the best lots first, so the marginal unit sells into the first lot the stock does not fill (none left: 0).
+  function itemValues({ catalog, bids = {}, runningInputs = [], stock = {} }) {
     const C = normalize(catalog);
     const inUse = new Set([...runningInputs].map(Number));
+    const atDepth = (b, have) => {
+      if (!Array.isArray(b)) return b ?? 0;
+      let left = Math.max(0, have);
+      for (const l of [...b].sort((x, y) => y.price - x.price)) { if (left < l.amount) return l.price; left -= l.amount; }
+      return 0;
+    };
     const out = {};
-    for (const it of Object.values(C.items)) out[it.id] = Math.max(bids[it.id] ?? 0, inUse.has(it.id) ? it.base_value : 0);
+    for (const it of Object.values(C.items)) out[it.id] = Math.max(atDepth(bids[it.id], stock[it.id] ?? 0), inUse.has(it.id) ? it.base_value : 0);
     return out;
   }
 
@@ -112,7 +185,8 @@ try {
 
   function candidates(input) {
     const C = normalize(input.catalog);
-    const unlocked = new Set([...(input.unlocked ?? []), ...STARTERS].map(Number));
+    const starters = Object.entries(STARTERS).map(([name, fb]) => Object.values(C.buildings).find((b) => b.name === name)?.id ?? fb);
+    const unlocked = new Set([...(input.unlocked ?? []), ...starters].map(Number));
     const usable = input.usableAcres ?? 0;
     return Object.values(C.buildings).sort((a, b) => a.id - b.id).map((bld) => {
       const items = (bld.build_items ?? []).map(({ item, amount }) => ({ item, amount }));
@@ -292,7 +366,7 @@ try {
     return (h >>> 0).toString(36);
   }
 
-  core.planner = { normalize, cdOf, secsOf, queued, price, batchCost, acrePrice, landCost, itemValues, surplus, itemOk, candidates, plan, gates, land, signature, FRAME_CD };
+  core.planner = { normalize, cdOf, secsOf, queued, ownedAll, regionAcres, pickRegion, starterAcres, firstAcre, manualFloor, nextLockedTech, runMaxMs, price, batchCost, acrePrice, landCost, itemValues, surplus, itemOk, candidates, plan, gates, land, signature, FRAME_CD };
 })();
 } catch (e) { console.error('[IdleCorp] planner failed to load:', e); }
 // @@END planner

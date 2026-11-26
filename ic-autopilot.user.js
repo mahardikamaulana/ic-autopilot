@@ -1319,7 +1319,13 @@ try {
 
   // Frame CD weights, by item name (ids differ between catalogs).
   const FRAME_CD = { 'Wooden Frame': 2, 'Iron Frame': 4, 'Wired Frame': 8, 'Light Frame': 16, 'Machine Frame': 32, 'Automated Frame': 64, 'Smart Frame': 128 };
-  const STARTERS = [0, 10];
+  const STARTERS = { 'Lumber Camp': 0, Farm: 10 };   // by name, with the ids as fallback
+  // Per region (Heartland 0, Industrial Basin 1, Coastal Cities 2, Frontier 3; wiki regions-and-land.md): free acres at start
+  // and the first bought acre in cents. The state carries neither, so these are the wiki's numbers.
+  const STARTER_ACRES = [25, 0, 0, 0];
+  const FIRST_ACRE = [5000, 3500, 4500, 1500];
+  const starterAcres = (r) => STARTER_ACRES[r] ?? 0;
+  const firstAcre = (r) => FIRST_ACRE[r] ?? FIRST_ACRE[0];
   const dollars = (c) => '$' + (c / 100).toFixed(2);
 
   const normCache = new WeakMap();
@@ -1372,6 +1378,65 @@ try {
     return out;
   }
 
+  // Units owned per type for the price: groups and pools in every region plus the queues (the price counts them all).
+  function ownedAll({ st, catalog }) {
+    const out = { ...queued({ st, catalog }).owned };
+    const add = (b, n) => { out[b] = (out[b] ?? 0) + n; };
+    for (const g of Object.values(st.groups ?? {})) add(g.building, g.count);
+    for (const pool of Object.values(st.building_pool ?? {})) for (const [b, n] of Object.entries(pool ?? {})) add(b, n);
+    return out;
+  }
+
+  // Acres in one region: starter + bought, used by groups, the pool and both queues there.
+  function regionAcres({ st, catalog, region = 0 }) {
+    const C = normalize(catalog);
+    const ac = (b) => C.buildings[b]?.acres ?? 1;
+    let used = queued({ st, catalog: C, region }).acres;
+    for (const g of Object.values(st.groups ?? {})) if ((g.region ?? 0) === region) used += ac(g.building) * g.count;
+    for (const [b, n] of Object.entries(st.building_pool?.[region] ?? {})) used += ac(b) * n;
+    const owned = starterAcres(region) + (st.land_bought?.[region] ?? 0);
+    return { owned, used, free: Math.max(0, owned - used) };
+  }
+
+  // The region to farm in: a fixed id, or 'auto' = the region with the most free acres among those the corp holds land or
+  // buildings in. Heartland wins ties (and is the answer when nothing else is held).
+  function pickRegion({ st, catalog, choice = 'auto' }) {
+    if (choice !== 'auto') return Number(choice) || 0;
+    const held = new Set([0]);
+    for (const [r, n] of Object.entries(st.land_bought ?? {})) if (n > 0) held.add(Number(r));
+    for (const g of Object.values(st.groups ?? {})) held.add(g.region ?? 0);
+    for (const [r, pool] of Object.entries(st.building_pool ?? {})) if (Object.values(pool ?? {}).some((n) => n > 0)) held.add(Number(r));
+    let best = 0, bestFree = regionAcres({ st, catalog, region: 0 }).free;
+    for (const r of [...held].sort((a, b) => a - b)) {
+      const f = regionAcres({ st, catalog, region: r }).free;
+      if (f > bestFree) { best = r; bestFree = f; }
+    }
+    return best;
+  }
+
+  // Manual money floor ($). The default floor is capped at half the cash at start, so a young corp is not stopped at once;
+  // a floor you (or Autopilot) set is used as is.
+  const manualFloor = ({ minMoney, isDefault, moneyStart }) => (isDefault ? Math.min(minMoney, Math.max(0, moneyStart) / 2) : minMoney);
+
+  // The cheapest tech that can start now (prerequisite unlocked, not researching or queued): its CD cost is the target
+  // when CD Farm Auto runs on its own.
+  function nextLockedTech({ catalog, unlocked = [], research = null, queue = [] }) {
+    const C = normalize(catalog);
+    const have = new Set([...unlocked].map(Number));
+    const busy = new Set([research?.building, ...queue.map((q) => q.building)].filter((b) => b != null).map(Number));
+    const open = (catalog.techs ?? C.techs ?? []).filter((t) => !have.has(t.building) && !busy.has(t.building) && (t.requires == null || have.has(t.requires)));
+    const t = open.sort((a, b) => a.cost - b.cost || a.building - b.building)[0];
+    return t ? { b: t.building, name: C.buildings[t.building]?.name ?? 'building ' + t.building, cd: t.cost, prereqsMet: true, note: '' } : null;
+  }
+
+  // How long one run may hold Autopilot / Core plan (ms): 15 min up to $100k/h of income, shorter as income grows (the
+  // held engine's sales and purchases wait), never under 5 min. Nothing held: the full 15 min.
+  const RUN_MAX_MS = 900000, RUN_MIN_MS = 300000, HOLD_REF_CENTS_H = 1e7;
+  function runMaxMs({ incomeCentsPerHour = null, held = true } = {}) {
+    if (!held || !(incomeCentsPerHour > HOLD_REF_CENTS_H)) return RUN_MAX_MS;
+    return Math.max(RUN_MIN_MS, Math.round(RUN_MAX_MS * Math.sqrt(HOLD_REF_CENTS_H / incomeCentsPerHour)));
+  }
+
   const price = (baseCents, owned, i) => Math.floor(baseCents * (20 + owned + i) / 20);
   function batchCost(baseCents, owned, n) {
     let s = 0;
@@ -1390,12 +1455,20 @@ try {
     return s;
   }
 
-  // Best open bid, else base value while a running recipe consumes it, else 0.
-  function itemValues({ catalog, bids = {}, runningInputs = [] }) {
+  // What one more unit used up costs: the bid it would have been sold into, else base value while a running recipe consumes
+  // it, else 0. bids[item] is a price per unit (any depth) or a list of lots [{ price per unit, amount }]: with `stock`, the
+  // stock fills the best lots first, so the marginal unit sells into the first lot the stock does not fill (none left: 0).
+  function itemValues({ catalog, bids = {}, runningInputs = [], stock = {} }) {
     const C = normalize(catalog);
     const inUse = new Set([...runningInputs].map(Number));
+    const atDepth = (b, have) => {
+      if (!Array.isArray(b)) return b ?? 0;
+      let left = Math.max(0, have);
+      for (const l of [...b].sort((x, y) => y.price - x.price)) { if (left < l.amount) return l.price; left -= l.amount; }
+      return 0;
+    };
     const out = {};
-    for (const it of Object.values(C.items)) out[it.id] = Math.max(bids[it.id] ?? 0, inUse.has(it.id) ? it.base_value : 0);
+    for (const it of Object.values(C.items)) out[it.id] = Math.max(atDepth(bids[it.id], stock[it.id] ?? 0), inUse.has(it.id) ? it.base_value : 0);
     return out;
   }
 
@@ -1419,7 +1492,8 @@ try {
 
   function candidates(input) {
     const C = normalize(input.catalog);
-    const unlocked = new Set([...(input.unlocked ?? []), ...STARTERS].map(Number));
+    const starters = Object.entries(STARTERS).map(([name, fb]) => Object.values(C.buildings).find((b) => b.name === name)?.id ?? fb);
+    const unlocked = new Set([...(input.unlocked ?? []), ...starters].map(Number));
     const usable = input.usableAcres ?? 0;
     return Object.values(C.buildings).sort((a, b) => a.id - b.id).map((bld) => {
       const items = (bld.build_items ?? []).map(({ item, amount }) => ({ item, amount }));
@@ -1599,7 +1673,7 @@ try {
     return (h >>> 0).toString(36);
   }
 
-  core.planner = { normalize, cdOf, secsOf, queued, price, batchCost, acrePrice, landCost, itemValues, surplus, itemOk, candidates, plan, gates, land, signature, FRAME_CD };
+  core.planner = { normalize, cdOf, secsOf, queued, ownedAll, regionAcres, pickRegion, starterAcres, firstAcre, manualFloor, nextLockedTech, runMaxMs, price, batchCost, acrePrice, landCost, itemValues, surplus, itemOk, candidates, plan, gates, land, signature, FRAME_CD };
 })();
 } catch (e) { console.error('[IdleCorp] planner failed to load:', e); }
 // @@END planner
@@ -1776,20 +1850,22 @@ try {
     else { window.cdFarm.stop(); window.cdFarm.panel(false); }
   }
 
-  const REGION = 0;        // Heartland
   const MONEY = 0;         // items[0], cents
   const CD = 24;           // items[24], Construction Data
-  // Buildings the farm can cycle: money only (no build items), 1 acre and 1 CD each, same price curve.
+  // Buildings the farm can cycle: money only (no build items), 1 acre and 1 CD each, same price curve. Id and base price are
+  // read from the catalog by name (syncIds); these numbers are the fallback.
   const BUILDINGS = [
     { id: 0, name: 'Lumber Camp', plural: 'camps', base: 41 },
     { id: 10, name: 'Farm', plural: 'farms', base: 41 },
   ];
-  const STARTER_ACRES = 25;
+  const isBuilding = (v) => v === 'auto' || v === 'cheapest' || BUILDINGS.some((b) => b.id === v);
+  let RETAIL = 38;   // Retail Store (by name from the catalog; this id is the fallback)
   const RATE_WINDOW_MS = 15 * 60 * 1000;
 
 
   const cfg = {
-    building: 'auto',      // 'auto': the planner picks types and batch every cycle; or an id to cycle: 0 Lumber Camp, 10 Farm
+    building: 'auto',      // 'auto': the planner picks types and batch every cycle; 'cheapest': Lumber Camp or Farm, whichever costs less at start; or an id: 0 Lumber Camp, 10 Farm
+    region: 'auto',        // 'auto': the region you hold with the most free acres (Heartland on a tie); or 0 Heartland, 1 Industrial Basin, 2 Coastal Cities, 3 Frontier
     batch: 10,             // max buildings per cycle
     fullBatch: false,      // true: only build when all `batch` camps fit (land + money); never a smaller batch
     cycles: Infinity,      // stop after this many cycles
@@ -1807,6 +1883,7 @@ try {
     pace: 'balanced',      // Auto: 'thrifty' | 'balanced' | 'fast' (how much waiting for CD costs)
     land: 'plan',          // Auto: 'off' | 'plan' (acres only inside Autopilot's own land plan) | max $ per acre
     autoStart: true,       // Auto: start by itself when the engine needs CD (switched off when you press Stop)
+    solo: false,           // Auto: with Autopilot and Core plan off and no Target CD, farm for the cheapest tech that can start next
     autoFloor: 0,          // Auto: money floor ($) on top of Autopilot's power-bill floor
     maxTypes: 2,           // Auto: building types per cycle (each adds a Buy and a Demolish round trip)
     cmdsPerMin: 20,        // command budget per rolling minute (shared pacer)
@@ -1839,7 +1916,31 @@ try {
 
   // The building the farm cycles. A run (even an interrupted one) keeps the building it started with,
   // so changing the setting can never make cleanup touch the wrong buildings.
-  const farmId = () => { const b = runBuilding(); return typeof b === 'number' ? b : 0; };   // Auto: the shared read() just looks at Lumber Camps
+  const farmId = () => { const b = runBuilding(); return typeof b === 'number' ? b : b === 'cheapest' ? cheaperId() : BUILDINGS[0].id; };   // Auto: the shared read() just looks at Lumber Camps
+  // Lumber Camp or Farm, whichever is cheaper now: the price is base x (20 + owned) / 20, owned counting every region and both queues.
+  function cheaperId() {
+    const { st, catalog } = core.walk();
+    if (!st || !catalog) return BUILDINGS[0].id;
+    const own = PL().ownedAll({ st, catalog });
+    return [...BUILDINGS].sort((a, b) => a.base * (20 + (own[a.id] ?? 0)) - b.base * (20 + (own[b.id] ?? 0)))[0].id;
+  }
+  // The region a run uses is fixed when it starts (stats.region; a run saved before regions existed was in Heartland), so cleanup
+  // never looks at another region's pool. With no run on, it is cfg.region ('auto': PL().pickRegion).
+  function region(st, catalog) {
+    if (running || active || resumable) return stats.region ?? 0;
+    if (!st) ({ st, catalog } = core.walk());
+    return st && catalog ? PL().pickRegion({ st, catalog, choice: cfg.region }) : 0;
+  }
+  const pickRegionNow = () => { const { st, catalog } = core.walk(true); return st && catalog ? PL().pickRegion({ st, catalog, choice: cfg.region }) : 0; };
+  // Ids by name from the catalog (once per catalog), with the numbers above as the fallback.
+  const synced = new WeakSet();
+  function syncIds(catalog) {
+    if (synced.has(catalog)) return;
+    synced.add(catalog);
+    const byName = (n) => (catalog.buildings ?? []).find((b) => b.name === n);
+    for (const b of BUILDINGS) { const x = byName(b.name); if (x) { b.id = x.id; b.base = x.cost / 100; } }
+    RETAIL = byName('Retail Store')?.id ?? RETAIL;
+  }
   const isAuto = () => runBuilding() === 'auto';
   const bld = () => BUILDINGS.find((b) => b.id === farmId()) ?? BUILDINGS[0];
   const unitRefund = () => bld().base / 2; // demolish refunds 50% of base ($)
@@ -1865,45 +1966,44 @@ try {
 
   function campCost(owned, n) {
     let c = 0;
-    for (let i = 0; i < n; i++) c += bld().base * (20 + owned + i) / 20;
+    const base = bld().base;
+    for (let i = 0; i < n; i++) c += base * (20 + owned + i) / 20;
     return c;
   }
 
-  const moneyFloor = () => (cfg.budget === 'income' ? Math.max(cfg.minMoney, stats.moneyStart) : cfg.minMoney);
+  // stats.scaleFloor: the run started on the default floor (nobody set one), so it is capped by the cash at start (PL().manualFloor).
+  const baseFloor = (scale, moneyStart) => PL().manualFloor({ minMoney: cfg.minMoney, isDefault: scale, moneyStart });
+  const moneyFloor = () => { const f = baseFloor(!!stats.scaleFloor, stats.moneyStart); return cfg.budget === 'income' ? Math.max(f, stats.moneyStart) : f; };
 
   // Live snapshot. Every decision in the script goes through this.
   function read(fresh = false) {
     const { ws, st, catalog } = core.walk(fresh);
     if (!st || !catalog) return null;
-    const C = PL().normalize(catalog);
-    const regionPool = st.building_pool?.[REGION] ?? {};
-    const unassignedCamps = regionPool[farmId()] ?? 0;
+    syncIds(catalog);
+    const R = region(st, catalog);
+    const id = farmId();
+    const unassignedCamps = st.building_pool?.[R]?.[id] ?? 0;
     // Queued builds and demolitions count in the price and hold acres: a queued demolition keeps its acre until it finishes.
-    const q = PL().queued({ st, catalog, region: REGION });
+    const q = PL().queued({ st, catalog, region: R });
+    const ra = PL().regionAcres({ st, catalog, region: R });
+    let campsInGroups = 0;
+    for (const g of Object.values(st.groups)) if (g.building === id) campsInGroups += g.count;   // every region: the price counts them all
 
-    let campsInGroups = 0, acresUsed = q.acres;
-    for (const g of Object.values(st.groups)) {
-      if ((g.region ?? REGION) !== REGION) continue;
-      if (g.building === farmId()) campsInGroups += g.count;
-      acresUsed += C.buildings[g.building].acres * g.count;
-    }
-    for (const [b, n] of Object.entries(regionPool)) acresUsed += C.buildings[b].acres * n;
-
-    const acresOwned = STARTER_ACRES + (st.land_bought?.[REGION] ?? 0);
+    const acresOwned = ra.owned, acresUsed = ra.used, freeAcres = ra.free;
     const money = (st.items?.[MONEY] ?? 0) / 100;
-    const ownedCamps = campsInGroups + unassignedCamps + (q.owned[farmId()] ?? 0);
-    const freeAcres = Math.max(0, acresOwned - acresUsed);
+    const ownedCamps = PL().ownedAll({ st, catalog })[id] ?? 0;
     const usableAcres = Math.max(0, freeAcres - cfg.reserveAcres);
-    // 'income' keeps the money you have at Start; with no run on, that is the money now (stats.moneyStart is from the last run).
-    const floor = cfg.budget === 'income' && !(running || active || resumable) ? Math.max(cfg.minMoney, money) : moneyFloor();
+    // With no run on, the floor is what a run started now would use ('income' keeps the money you have at Start).
+    const f0 = baseFloor(cfg.minMoney === DEFAULTS.minMoney, money);
+    const floor = !(running || active || resumable) ? (cfg.budget === 'income' ? Math.max(f0, money) : f0) : moneyFloor();
 
     let affordable = 0;
     while (affordable < cfg.batch && money - campCost(ownedCamps, affordable + 1) >= floor) affordable++;
     const nextBatch = Math.min(cfg.batch, usableAcres, affordable);
-    const sec = PL().secsOf(C, farmId());
+    const sec = PL().secsOf(catalog, id);
 
     return {
-      money, cd: st.items?.[CD] ?? 0,
+      money, cd: st.items?.[CD] ?? 0, region: R,
       unassignedCamps, campsInGroups, ownedCamps,
       acresOwned, acresUsed, freeAcres, usableAcres, moneyFloor: floor,
       nextBatch, nextBatchCost: campCost(ownedCamps, nextBatch),
@@ -1963,7 +2063,7 @@ try {
     await jitter();
     const r0 = mustRead();
     inFlight = { action: 'demolish', amount: n, at: Date.now() }; save();
-    const d = send({ type: 'DemolishBuilding', building: farmId(), amount: n, region: REGION });
+    const d = send({ type: 'DemolishBuilding', building: farmId(), amount: n, region: region() });
     const r1 = await waitConfirm((r) => r.unassignedCamps <= r0.unassignedCamps - n, d);
     if (!r1) throw new Error(`demolish of ${n} not confirmed`);
     if (count) stats.refunded += n * unitRefund();
@@ -2044,7 +2144,7 @@ try {
     const rb = mustRead();       // fresh baseline after the wait
     if (rb.nextBatch < n) { phase = 'waiting: money or land changed'; return 'wait'; } // the plan above no longer fits
     inFlight = { action: 'build', amount: n, at: Date.now() }; save();
-    const d = send({ type: 'BuyBuilding', building: farmId(), amount: n, region: REGION });
+    const d = send({ type: 'BuyBuilding', building: farmId(), amount: n, region: region() });
     const r1 = await waitConfirm((r) => r.unassignedCamps >= rb.unassignedCamps + n, d, read, cfg.timeoutMs + Math.ceil((n * rb.buildSec + rb.queue.build) * 1500));
     if (!r1) {
       const r = mustRead();
@@ -2118,13 +2218,13 @@ try {
     fast: { mult: 1, minUnits: 1, maxHours: 1 },         // as fast as cash and acres allow
   };
   const PL = () => core.planner;
-  const FIRST_ACRE = 5000;
   const MIN_FLOOR_C = 10000;          // Auto never spends the last $100, whatever the other floors say
   let graceMs = 2000;                 // a timed-out Demolish gets this long to land before the retry looks again
   let waitMaxMs = 600000;             // a run waits this long for cash/items inside the run, then ends and lets Autopilot go
-  const RUN_MAX_MS = 900000;          // a run ends after 15 min so Autopilot gets its turn (sales, power, resuming groups); the controller restarts it
-  let segStart = 0;                   // when this run segment began (a start or a resume): RUN_MAX_MS counts from here, so time spent interrupted does not end a resumed run
-  const ERR_COOLDOWN_MS = 300000;     // after an error stop: 5 min, doubling, off after 3 in a row               // cents: first bought acre in Heartland
+  // A run ends after PL().runMaxMs (15 min, shorter at high income while it holds Autopilot / Core plan) so they get their turn
+  // (sales, power, resuming groups); the controller restarts it.
+  let segStart = 0;                   // when this run segment began (a start or a resume): the cap counts from here, so time spent interrupted does not end a resumed run
+  const ERR_COOLDOWN_MS = 300000;     // after an error stop: 5 min, doubling, off after 3 in a row
   const HIST_MS = 30 * 60 * 1000;        // window for income, organic CD, net supply
   const SAMPLE_MS = 5000;
   const BOOT_DELAY_MS = 15000;           // let the first snapshot and Autopilot settle before Auto starts itself
@@ -2149,11 +2249,12 @@ try {
 
   // Light state for confirming commands: no catalog needed.
   function readPool(fresh = false) {
-    const { ws, st } = core.walk(fresh);
+    const { ws, st, catalog } = core.walk(fresh);
     if (!st) return null;
+    const R = region(st, catalog);
     return {
-      ws, wsOpen: ws?.readyState === 1, pool: { ...(st.building_pool?.[REGION] ?? {}) }, money: st.items?.[MONEY] ?? 0, cd: st.items?.[CD] ?? 0,
-      landBought: st.land_bought?.[REGION] ?? 0, mutTick: st.ssi?.last_user_mutation_tick ?? 0,
+      ws, wsOpen: ws?.readyState === 1, pool: { ...(st.building_pool?.[R] ?? {}) }, money: st.items?.[MONEY] ?? 0, cd: st.items?.[CD] ?? 0,
+      landBought: st.land_bought?.[R] ?? 0, mutTick: st.ssi?.last_user_mutation_tick ?? 0,
     };
   }
 
@@ -2161,37 +2262,32 @@ try {
   function readAuto(fresh = false) {
     const { ws, st, catalog, deals } = core.walk(fresh);
     if (!st || !catalog || !PL()) return null;
+    syncIds(catalog);
+    const R = region(st, catalog);   // before `running` below shadows the run flag
     const cat = PL().normalize(catalog);
-    const pool = { ...(st.building_pool?.[REGION] ?? {}) };   // a copy: confirms compare against what it was before the command
-    const owned = { ...pool }, running = new Set(), recipes = [];
-    let acresUsed = 0;
-    for (const [b, n] of Object.entries(pool)) acresUsed += (cat.buildings[b]?.acres ?? 1) * n;
+    const pool = { ...(st.building_pool?.[R] ?? {}) };   // a copy: confirms compare against what it was before the command
+    // The price counts every unit in every region and both queues; acres, stock, bids and recipes are this region's.
+    const owned = PL().ownedAll({ st, catalog: cat }), running = new Set(), recipes = [];
     for (const g of Object.values(st.groups ?? {})) {
-      if ((g.region ?? REGION) !== REGION) continue;
-      owned[g.building] = (owned[g.building] ?? 0) + g.count;
-      acresUsed += (cat.buildings[g.building]?.acres ?? 1) * g.count;
-      if (g.paused) continue;
+      if ((g.region ?? 0) !== R || g.paused) continue;
       recipes.push(g.recipe);
       for (const i of cat.recipes[g.recipe]?.inputs ?? []) running.add(i.item);
     }
-    // Queued builds and demolitions count in the price and hold acres (see PL().queued).
-    const q = PL().queued({ st, catalog, region: REGION });
-    for (const [b, n] of Object.entries(q.owned)) owned[b] = (owned[b] ?? 0) + n;
-    acresUsed += q.acres;
-    // Best open bid per unit (side 'Sell' rows are bids you can sell into).
+    const q = PL().queued({ st, catalog: cat, region: R });
+    const ra = PL().regionAcres({ st, catalog: cat, region: R });
+    // Open bids per item as lots (per-unit price, amount); side 'Sell' rows are bids you can sell into.
     const bids = {};
-    for (const d of deals ?? []) if (d.region === REGION && d.side === 'Sell' && d.amount > 0) bids[d.item] = Math.max(bids[d.item] ?? 0, d.price / d.amount);
+    for (const d of deals ?? []) if (d.region === R && d.side === 'Sell' && d.amount > 0) (bids[d.item] ||= []).push({ price: d.price / d.amount, amount: d.amount });
     const unlocked = st.unlocked_buildings ?? [];
-    const landBought = st.land_bought?.[REGION] ?? 0;
-    const acresOwned = STARTER_ACRES + landBought;
+    const landBought = st.land_bought?.[R] ?? 0;
     return {
-      ws, wsOpen: ws?.readyState === 1, cat, pool, owned, running, recipes, bids, unlocked, landBought, acresOwned, acresUsed, queue: { build: q.build, demolish: q.demolish },
-      freeAcres: Math.max(0, acresOwned - acresUsed), stock: st.stock?.[REGION] ?? {},
+      ws, wsOpen: ws?.readyState === 1, cat, region: R, pool, owned, running, recipes, bids, unlocked, landBought, acresOwned: ra.owned, acresUsed: ra.used, queue: { build: q.build, demolish: q.demolish },
+      freeAcres: ra.free, stock: st.stock?.[R] ?? {},
       money: st.items?.[MONEY] ?? 0, cd: st.items?.[CD] ?? 0, retail: unlocked.includes(RETAIL) || (owned[RETAIL] ?? 0) > 0,
+      nextTech: cfg.solo ? PL().nextLockedTech({ catalog, unlocked, research: st.research, queue: st.research_queue ?? [] }) : null,
       mutTick: st.ssi?.last_user_mutation_tick ?? 0,
     };
   }
-  const RETAIL = 38;   // Retail Store
 
   // Items whose stock matters: the build items of every type that is not a starter.
   function watchItems(c) {
@@ -2279,10 +2375,13 @@ try {
     const sig = detectRegime(c, ap);
     const pace = PACE[cfg.pace] ?? PACE.balanced;
     const userTarget = Number.isFinite(cfg.targetCd) ? cfg.targetCd : null;
-    const next = userTarget == null ? ap?.nextTech : null;
+    // On its own (cfg.solo, nothing else live): the target is the cheapest tech that can start next (PL().nextLockedTech).
+    const live = othersBusy(), solo = userTarget == null && !live && cfg.solo;
+    const next = userTarget != null ? null : solo ? c.nextTech : ap?.nextTech;
     const need = userTarget ?? next?.cd ?? null;
-    const base = { c, ap, sig, need, pace };
-    if (userTarget == null && !othersBusy()) return { ...base, idle: true, gate: 'G0', reason: 'waiting for Autopilot or Core plan to run live (or set a Target CD)' };
+    const base = { c, ap, sig, need, next, pace };
+    if (userTarget == null && !live && !solo) return { ...base, idle: true, gate: 'G0', reason: 'waiting for Autopilot or Core plan to run live (or set a Target CD, or switch on Run without Autopilot)' };
+    if (solo && !next) return { ...base, idle: true, gate: 'G0', reason: 'no tech can start next' };
     const g = PL().gates({ need: need ?? 0, cd: c.cd, prereqsMet: next ? next.prereqsMet !== false : true, prereqNote: next?.note || 'its prerequisites', organicCdPerHour: hist.slopes.cd ?? null, maxHours: pace.maxHours });
     if (!g.run) return { ...base, idle: true, gate: g.gate, reason: g.reason };
 
@@ -2295,7 +2394,7 @@ try {
     for (const it of watchItems(c)) { const s = hist.slopes['s' + it]; if (s != null) netSupply[it] = s; burn[it] = Math.max(0, hist.slopes['u' + it] ?? 0); }
     const input = {
       catalog: c.cat, unlocked: c.unlocked, owned: c.owned, usableAcres: Math.max(0, c.freeAcres - cfg.reserveAcres), money: c.money, floor: floorC,
-      stock: c.stock, reserve: ap?.items ?? {}, netSupply, burn, itemValue: PL().itemValues({ catalog: c.cat, bids: c.bids, runningInputs: [...c.running] }),
+      stock: c.stock, reserve: ap?.items ?? {}, netSupply, burn, itemValue: PL().itemValues({ catalog: c.cat, bids: c.bids, runningInputs: [...c.running], stock: c.stock }),
       quarantine: activeQuarantine(), R: need - c.cd, T: t.T, TperType: t.perType, I, queue: c.queue, cdHave: c.cd,
       minUnits: recovering ? 1 : pace.minUnits, maxBatch: recovering ? 1 : cfg.batch, maxTypes: recovering ? 1 : cfg.maxTypes,
     };
@@ -2303,17 +2402,21 @@ try {
     const plan = PL().plan(input);
     reportDrops(plan);
 
-    // Land only matters while acres cap the batch. With no free acre at all, ask what one acre would buy.
+    // Land only matters while acres cap the batch. With no free acre at all, ask what one acre would buy. Only in Heartland: the
+    // state does not show a charter's acre cap, and land is never refunded.
     let landR = { buy: 0, note: '' };
-    if (plan.binding === 'acres' || plan.wait?.reason === 'no free acres above the spare') {
+    if (c.region === 0 && (plan.binding === 'acres' || plan.wait?.reason === 'no free acres above the spare')) {
       const p2 = plan.units.length ? plan : PL().plan({ ...input, usableAcres: 1 });
       const u = p2.units[0];
       if (u) {
-        const wallC = cfg.land === 'plan' ? (window.earlyGame?.cfg?.maxAcrePrice ?? 0) * 100 : Infinity;
+        // Autopilot's land wall when it is loaded; without it the payback test in PL().land decides (plus its cash floor).
+        const apWall = window.earlyGame?.cfg?.maxAcrePrice;
+        const wallC = cfg.land === 'plan' && apWall != null ? apWall * 100 : Infinity;
         const share = window.earlyGame?.cfg?.landCashShare ?? 0.02;   // Autopilot's own pace of land buying
+        const first = PL().firstAcre(c.region);
         landR = PL().land({
-          allow: cfg.land === 'plan' || cfg.land === 'off' ? cfg.land : cfg.land * 100, landBought: c.landBought, firstAcre: FIRST_ACRE, wall: wallC, paybackHours: 20,
-          hoursUntilBought: (k) => (income > 0 ? PL().landCost(FIRST_ACRE, c.landBought, k) / (income * share) : Infinity),
+          allow: cfg.land === 'plan' || cfg.land === 'off' ? cfg.land : cfg.land * 100, landBought: c.landBought, firstAcre: first, wall: wallC, paybackHours: 20,
+          hoursUntilBought: (k) => (income > 0 ? PL().landCost(first, c.landBought, k) / (income * share) : Infinity),
           plan: p2, unitNeed: { cd: u.cd, acres: c.cat.buildings[u.b].acres }, R: need - c.cd, T: t.T, I, money: c.money, floor: floorC,
         });
       }
@@ -2364,9 +2467,9 @@ try {
     const rb = readAuto(true);
     if (!rb) throw new ConnError('game state not found');
     // Land is never refunded: send only if nothing moved since the plan and the floor still holds.
-    if (rb.landBought !== ev.c.landBought || rb.money - ev.land.priceCents < ev.floorC) return;
+    if (rb.region !== ev.c.region || rb.landBought !== ev.c.landBought || rb.money - ev.land.priceCents < ev.floorC) return;
     inFlight = { action: 'land', amount: k, at: Date.now() }; save();
-    const d = send({ type: 'BuyLand', amount: k, region: REGION });
+    const d = send({ type: 'BuyLand', amount: k, region: rb.region });
     const r1 = await waitConfirm((r) => r.landBought >= rb.landBought + k, d, readPool);
     inFlight = null;
     if (!r1) throw new Error(`land purchase of ${k} acre(s) not confirmed`);
@@ -2388,7 +2491,7 @@ try {
       // Never more than the farm holds: a first attempt that the server applied late must not make the retry eat your own buildings.
       const amt = Math.min(want, (r0.pool[b] ?? 0) - (stats.baseline?.[b] ?? 0));
       if (amt <= 0) return { ok: true, rtt: 0 };
-      const d = send({ type, building: b, amount: amt, region: REGION });
+      const d = send({ type, building: b, amount: amt, region: region() });
       if (await waitConfirm((r) => (r.pool[b] ?? 0) <= (r0.pool[b] ?? 0) - amt, d, readPool)) return { ok: true, rtt: core.lastRtt() ?? 0 };
     }
     return { ok: false, rtt: 0 };
@@ -2416,7 +2519,7 @@ try {
     lastEval = ev;
     if (ev.idle) return stopWith(ev.reason);
     if (netSpend() >= cfg.maxSpend) return stopWith(`reached max spend $${fmt(cfg.maxSpend)}`);
-    if (Date.now() - segStart > RUN_MAX_MS) return stopWith('giving Autopilot its turn');
+    if (Date.now() - segStart > PL().runMaxMs({ incomeCentsPerHour: ev.income, held: othersBusy() })) return stopWith('giving Autopilot its turn');
     if (cfg.dryRun) {
       // Nothing is sent, land included. Log the plan a few times, then end (a dry run must not hold Autopilot forever).
       const u = ev.plan.units;
@@ -2458,7 +2561,7 @@ try {
       if (halted) break;
       const base = rb.cat.buildings[u.b], owned = rb.owned[u.b] ?? 0;
       inFlight.units.push({ b: u.b, n: u.n }); save();   // from here on a reload or error counts these as possibly built
-      const d = send({ type: 'BuyBuilding', building: u.b, amount: u.n, region: REGION });
+      const d = send({ type: 'BuyBuilding', building: u.b, amount: u.n, region: region() });
       const bw0 = hr();
       // The game charges on the Buy, but refunds of queued demolishes and income keep landing until the build is done: read the
       // charge from the first state that has applied a player command since the send (the state's own mutation tick: the game can
@@ -2569,7 +2672,7 @@ try {
       }
       console.log(`[cdFarm] cleanup: demolishing ${extra} leftover ${base.name}`);
       await jitter();
-      const d = send({ type: 'DemolishBuilding', building: b, amount: extra, region: REGION });
+      const d = send({ type: 'DemolishBuilding', building: b, amount: extra, region: region() });
       const r1 = await waitConfirm((r) => (r.pool[b] ?? 0) <= (rp.pool[b] ?? 0) - extra, d, readPool);
       if (!r1) throw new Error(`cleanup demolish of ${extra} ${base.name} not confirmed`);
       const refund = Math.floor(base.cost / 2) * extra;
@@ -2613,14 +2716,16 @@ try {
     if (!r) return console.error('[cdFarm] game state not found');
     const miss = core.missingFields(core.walk(true).st, ['groups', 'items']);
     if (miss.length) return console.error('[cdFarm] the game state no longer has ' + miss.join(', ') + ': refusing to run (did the game update?)');
-    if (rest.building != null && rest.building !== 'auto' && !BUILDINGS.some((b) => b.id === rest.building)) {
-      return console.error(`[cdFarm] building must be 'auto' or one of: ${BUILDINGS.map((b) => `${b.id} (${b.name})`).join(', ')}`);
+    if (rest.building != null && !isBuilding(rest.building)) {
+      return console.error(`[cdFarm] building must be 'auto', 'cheapest' or one of: ${BUILDINGS.map((b) => `${b.id} (${b.name})`).join(', ')}`);
     }
+    if (rest.region != null && rest.region !== 'auto' && ![0, 1, 2, 3].includes(rest.region)) return console.error("[cdFarm] region must be 'auto' or 0-3");
     // runOnly: these settings are for this run only; yours come back when it stops.
     if (runOnly && !restoreCfg) restoreCfg = { ...cfg };
     // cycles and maxSpend apply to one run only; other settings are remembered.
     if (!resume) { cfg.cycles = Infinity; cfg.maxSpend = Infinity; }
     Object.assign(cfg, rest);
+    const scaleFloor = !('minMoney' in rest) && cfg.minMoney === DEFAULTS.minMoney;   // a floor passed in (Autopilot's booster) is never scaled
 
     active = true;
     running = true; stopReason = '';
@@ -2639,8 +2744,10 @@ try {
           await reconcile();
           r = mustRead();
         }
+        // Fix the building ('cheapest' resolves to one type now) and the region for the whole run, before resetting stats.
+        const building = cfg.building === 'cheapest' ? cheaperId() : cfg.building, reg = pickRegionNow();
         stats = freshStats();
-        stats.building = cfg.building;
+        stats.building = building; stats.region = reg; stats.scaleFloor = scaleFloor;
         r = mustRead(); // re-read: the pool count must be for the building this run uses
         Object.assign(stats, { cdStart: r.cd, moneyStart: r.money, startedAt: Date.now(), baselinePool: r.unassignedCamps, by: by || '' });
         stats.baseline = { ...(readPool()?.pool ?? {}) }; strikes = 0; recovering = 0; dryCycles = 0; waitSince = 0;
@@ -2889,7 +2996,7 @@ try {
   }
 
   // Floor the run would use if started now.
-  const plannedFloor = (r) => (cfg.budget === 'income' ? Math.max(cfg.minMoney, r.money) : cfg.minMoney);
+  const plannedFloor = (r) => r.moneyFloor;   // read() gives the floor a run started now would use
   const netPerCd = (r) => (campCost(r.ownedCamps, cfg.batch) - cfg.batch * unitRefund()) / cfg.batch;
 
 
@@ -2913,12 +3020,13 @@ try {
       out.push({ field: 'minMoney', level: 'error', text: `Only $${fmt(Math.max(0, room))} above the floor, and a batch costs $${fmt(batchCost)}. Spend down would stop right away.` });
     } else if (cfg.budget === 'floor' && room < batchCost) {
       out.push({ field: 'minMoney', level: 'warn', text: `It will wait until you earn $${fmt(batchCost - room)} more before the first batch.` });
-    } else if (cfg.budget === 'income' && cfg.minMoney > r.money) {
-      out.push({ field: 'minMoney', level: 'warn', text: `Money is below this floor; it will wait until money passes $${fmt(cfg.minMoney)}.` });
+    } else if (cfg.budget === 'income' && floor > r.money) {
+      out.push({ field: 'minMoney', level: 'warn', text: `Money is below this floor; it will wait until money passes $${fmt(floor)}.` });
     }
-    if (cfg.budget !== 'income' && cfg.minMoney < r.money * 0.1) {
-      out.push({ field: 'minMoney', level: 'warn', text: `Low floor: up to $${fmt(r.money - cfg.minMoney)} of your $${fmt(r.money)} can be spent.` });
+    if (cfg.budget !== 'income' && floor < r.money * 0.1) {
+      out.push({ field: 'minMoney', level: 'warn', text: `Low floor: up to $${fmt(r.money - floor)} of your $${fmt(r.money)} can be spent.` });
     }
+    if (floor < cfg.minMoney) out.push({ field: 'minMoney', level: 'warn', text: `The default floor is capped at half your cash: $${fmt(floor)}. Set a floor to use your own.` });
     return out;
   }
 
@@ -2938,14 +3046,14 @@ try {
     return parts.join(' ');
   }
 
-  const bldLabel = (id) => (id === 'auto' ? 'Auto' : BUILDINGS.find((b) => b.id === id)?.name ?? '');
+  const REGIONS = [{ id: 'auto', label: 'Auto' }, { id: 0, label: 'Heartland' }, { id: 1, label: 'Industrial Basin' }, { id: 2, label: 'Coastal Cities' }, { id: 3, label: 'Frontier' }];
   function autoRows() {
     const ev = lastEval, c = ev?.c, m = core.measure.snapshot();
     const rows = [['Mode', `Auto · ${cap(cfg.pace)}${cfg.autoStart ? '' : ' · off'}`]];
     rows.push(['Why', cap(running ? phase : (idleNote || (ev?.idle ? ev.reason : '') || stopReason || 'idle'))]);
-    if (ev?.need != null && c) rows.push(['Need', `${fmt(c.cd)} of ${fmt(ev.need)} CD${ev.ap?.nextTech ? ' (' + ev.ap.nextTech.name + ')' : ''}`]);
+    if (ev?.need != null && c) rows.push(['Need', `${fmt(c.cd)} of ${fmt(ev.need)} CD${ev.next ? ' (' + ev.next.name + ')' : ''}`]);
     if (ev?.plan?.units?.length) rows.push(['Next cycle', `${unitsText(ev.plan.units)} · ${fmt(ev.plan.cdTotal)} CD · $${fmt(ev.plan.netCents / 100)} net`]);
-    if (c) rows.push(['Free acres', `${c.freeAcres} of ${c.acresOwned} (${cfg.reserveAcres} spare)`]);
+    if (c) rows.push(['Free acres', `${c.freeAcres} of ${c.acresOwned} (${cfg.reserveAcres} spare)${c.region ? ' · ' + REGIONS[c.region + 1].label : ''}`]);
     if (ev?.floorC != null) rows.push(['Floor', `$${fmt(ev.floorC / 100)}`]);
     rows.push(['Cycles', `${fmt(stats.cycles)}${stats.built ? ` · +${fmt(stats.built)} CD` : ''}`], ['Net cost', stats.built ? `$${perCd()} / CD` : '—']);
     const rtt = m.rtt;
@@ -2991,7 +3099,9 @@ try {
 
     // ---- Settings tab
     refs.budget = K.segField('Budget', MODES, { get: () => cfg.budget, set: (id) => setCfg('budget', id), def: DEFAULTS.budget, describe: (v) => MODES.find((m) => m.id === v)?.desc || '' });
-    refs.building = K.segField('Building', [{ id: 'auto', label: 'Auto' }, ...BUILDINGS.map((b) => ({ id: b.id, label: b.name }))], { get: () => cfg.building, set: (id) => setCfg('building', id), def: DEFAULTS.building });
+    refs.building = K.segField('Building', [{ id: 'auto', label: 'Auto' }, { id: 'cheapest', label: 'Cheaper' }, ...BUILDINGS.map((b) => ({ id: b.id, label: b.name }))], { get: () => cfg.building, set: (id) => setCfg('building', id), def: DEFAULTS.building });
+    refs.region = K.segField('Region', REGIONS, { get: () => cfg.region, set: (id) => setCfg('region', id), def: DEFAULTS.region, describe: (v) => (v === 'auto' ? 'The region you hold with the most free acres; Heartland on a tie. Auto buys land only in Heartland.' : '') });
+    refs.solo = K.toggleField('Run without Autopilot', 'With Autopilot and Core plan off and no Target CD, farms CD for the cheapest tech you can research next.', { get: () => cfg.solo, set: (v) => { cfg.solo = v; save(); render(); }, def: DEFAULTS.solo });
     refs.pace = K.segField('Pace', [{ id: 'thrifty', label: 'Thrifty' }, { id: 'balanced', label: 'Balanced' }, { id: 'fast', label: 'Fast' }], { get: () => cfg.pace, set: (id) => setCfg('pace', id), def: DEFAULTS.pace, describe: (v) => PACE_DESC[v] || '' });
     refs.land = K.segField('Buy land', [{ id: 'off', label: 'Off' }, { id: 'plan', label: 'Within the plan' }], { get: () => (cfg.land === 'off' ? 'off' : 'plan'), set: (id) => setCfg('land', id), def: DEFAULTS.land, describe: (v) => (v === 'off' ? LAND_OFF : LAND_PLAN) });
     refs.floorPicks = K.quickPicks((v) => setCfg('minMoney', v));
@@ -3006,13 +3116,13 @@ try {
     refs.auto = K.toggleField('Resume after reload', 'Continues an interrupted run when the page loads again.', { get: () => cfg.autoResume, set: (v) => { cfg.autoResume = v; save(); render(); }, def: DEFAULTS.autoResume });
     refs.full = K.toggleField('Full batches only', '', { get: () => cfg.fullBatch, set: (v) => setCfg('fullBatch', v), def: DEFAULTS.fullBatch });
     refs.landMsg = h('div', { class: 'idc-msg', hidden: true });
-    refs.grpAuto = K.group('Auto', refs.autoOn.el, refs.pace.el, refs.land.el, refs.autoFloor.el);
+    refs.grpAuto = K.group('Auto', refs.autoOn.el, refs.solo.el, refs.pace.el, refs.land.el, refs.autoFloor.el);
     refs.grpBudget = K.group('Budget', refs.budget.el, refs.minMoney.el);
     refs.grpBatches = K.group('Batches', refs.full.el, refs.landMsg);
     const settings = K.settingsTab({
       lockText: 'Stop the farm to change settings.',
       groups: [K.group('Building', refs.building.el), refs.grpAuto, refs.grpBudget, K.group('Goal', refs.targetCd.el), refs.grpBatches],
-      advanced: K.disclosure('Advanced', [K.group(null, h('div', { class: 'idc-two' }, refs.batch.el, refs.reserveAcres.el), refs.maxSpendPerMin.el, refs.auto.el)],
+      advanced: K.disclosure('Advanced', [K.group(null, refs.region.el, h('div', { class: 'idc-two' }, refs.batch.el, refs.reserveAcres.el), refs.maxSpendPerMin.el, refs.auto.el)],
         { open: !!ui.advOpen, onToggle: (o) => { ui.advOpen = o; saveUi(); } }),
       backup: { onExport: () => core.exportFile(), onImport: () => core.importFile(), onReset: () => K.resetSettings('CD Farm', { snapshot: exportCfg, reset: resetCfg, restore: importCfg }) },
     });
@@ -3048,7 +3158,7 @@ try {
     let changed = 0;
     const count = (m) => { if (m) changed++; };
     count(refs.building.sync(bldText)); count(refs.budget.sync()); count(refs.pace.sync()); count(refs.land.sync());
-    count(refs.full.sync()); count(refs.auto.sync()); count(refs.autoOn.sync());
+    count(refs.full.sync()); count(refs.auto.sync()); count(refs.autoOn.sync()); count(refs.solo.sync()); count(refs.region.sync());
     refs.floorPicks.sync(FLOOR_ITEMS, cfg.minMoney);
     if (r) refs.targetPicks.sync(targetItems(r), cfg.targetCd);
     const issues = r && !busy && !auto ? checkPlan(r) : [];
@@ -3167,7 +3277,7 @@ try {
     if (running || active) throw new Error('stop the CD Farm run first');
     const applied = [], skipped = [];
     for (const [k, v] of Object.entries(o?.cfg ?? {})) {
-      if (k in cfg && !RUN_ONLY.includes(k) && (k === 'building' ? v === 'auto' || BUILDINGS.some((b) => b.id === v) : typeof v === typeof cfg[k] && !Number.isNaN(v)) && (k !== 'pace' || v in PACE) && (k !== 'land' || v === 'off' || v === 'plan') && (!['batch', 'maxTypes'].includes(k) || v >= 1)) { cfg[k] = v; applied.push(k); } else skipped.push(k);
+      if (k in cfg && !RUN_ONLY.includes(k) && (k === 'building' ? isBuilding(v) : k === 'region' ? v === 'auto' || [0, 1, 2, 3].includes(v) : typeof v === typeof cfg[k] && !Number.isNaN(v)) && (k !== 'pace' || v in PACE) && (k !== 'land' || v === 'off' || v === 'plan') && (!['batch', 'maxTypes'].includes(k) || v >= 1)) { cfg[k] = v; applied.push(k); } else skipped.push(k);
     }
     save(); render();
     return { applied, skipped };
@@ -3189,7 +3299,8 @@ try {
     get farmPool() { return Object.values(this.farmUnits).reduce((a, n) => a + n, 0); },
     // Unassigned buildings per type that belong to a running or interrupted run (Autopilot leaves them alone).
     get farmUnits() {
-      if (!(running || active || resumable)) return {};
+      // Callers compare this with the Heartland pool: a run in another region holds nothing there.
+      if (!(running || active || resumable) || region() !== 0) return {};
       const p = readPool();
       if (!p) return {};
       const out = {};
