@@ -11,7 +11,7 @@
     // Pure pieces for the offline simulator.
     _core: {
       checkGame, watchStall, stalledNow: () => stalled, resetWatch: () => { stalled = ''; prog.at = 0; lastPhase = null; },
-      snapshot: fullSnapshot, normalize, decide, checklist, phaseOf, finish, observe, userPaused, billPaused, floorTable, bomOf, transferMsg,
+      snapshot: fullSnapshot, normalize, decide, checklist, phaseOf, planDone, mineTarget, goldTarget, incomePerMin, buildCost, buildSteps, sellersOf, priceCents, idMissing, finish, observe, userPaused, billPaused, floorTable, bomOf, transferMsg,
       setClock: (fn) => { nowMs = fn; courierHoldUntil = 0; courierMisses = 0; cooldowns.clear(); successes.clear(); failures.clear(); for (const k in boosterLeft) delete boosterLeft[k]; },
     },
     _unload: () => {

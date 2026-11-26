@@ -21,7 +21,7 @@
 // What it never sends: QueueResearch. The research queue is shared with the construction slot, and
 // Autopilot treats anything in it as "research busy", so a project is only ever started (StartResearch)
 // when that region's Lab slot is free. dryRun is on by default and is never remembered or imported:
-// nothing is sent until you turn it off and confirm the start.
+// nothing is sent until you turn it off and confirm the start. Opt-in keepLive: a Live run still going at a reload starts Live again.
 // @@MODULE lab
 try {
 (() => {
@@ -58,9 +58,10 @@ try {
   const MODE_IDS = ['process', 'modules', 'list'];
   const cfg = {
     mode: 'process',       // 'process' (focus 0) | 'modules' (focus 1) | 'list' (your own list)
-    tierMode: 'best',      // 'best' (highest tier you can pay for) | 1 | 2 | 3 (that tier only: waits, never falls back)
+    tierMode: 'best',      // 'best' (Tier I; a higher tier only out of surplus MD, see richOk) | 1 | 2 | 3 (that tier only: waits, never falls back)
     mdReserve: 5000,       // MD never spent below this
     autoClaim: true,       // claim finished results
+    keepLive: false,       // a Live run that was still running when the page reloaded starts Live again (off: it stays stopped)
     dryRun: true,          // log "would send ..." instead of sending (session-only: never remembered or imported)
     list: [],              // [{ product, focus: 0 | 1 | 2, tier: 'default' | 1 | 2 | 3 }], cycled in order
     intervalMs: 10000,     // look this often
@@ -79,6 +80,7 @@ try {
     tierMode: (v) => v === 'best' || v === 1 || v === 2 || v === 3,
     mdReserve: (v) => isNum(v) && v >= 0,
     autoClaim: (v) => typeof v === 'boolean',
+    keepLive: (v) => typeof v === 'boolean',
     list: (v) => Array.isArray(v) && v.length <= LIST_MAX && v.every(validEntry),
     intervalMs: (v) => isNum(v) && v >= 500 && v <= 600000,
     delayMs: (v) => isNum(v) && v >= 0 && v <= 60000,
@@ -103,7 +105,8 @@ try {
   let unloaded = false;
   function save() {
     if (unloaded) return;
-    try { store?.setItem(KEY, JSON.stringify({ cfg: persistable(), mem })); } catch {}
+    // live: a Live run is going (cleared when it stops; a reload does not stop it), for cfg.keepLive.
+    try { store?.setItem(KEY, JSON.stringify({ cfg: persistable(), mem, live: running && !cfg.dryRun })); } catch {}
   }
 
   // ---- the Lab, as the game state shows it ---------------------------------------------------
@@ -174,14 +177,24 @@ try {
   }
   const successPct = (tier, focus, bonus) => Math.min(95, Math.floor((TIERS[tier].base - 5 * focus) * (100 + bonus) / 100));
 
-  // Items the groups make now (output of each group's current recipe) that the Lab accepts.
+  // Items the unpaused groups make now (output of each group's current recipe) that the Lab accepts, with what that output is
+  // worth per tick at base value (cents): item -> value.
   function produced(st, ix) {
-    const out = new Set();
+    const out = new Map();
     for (const g of Object.values(st.groups ?? {})) {
-      if (g.recipe == null || !(g.count > 0)) continue;
-      for (const o of ix.recipes.get(g.recipe)?.outputs ?? []) if (ix.products.has(o.item)) out.add(o.item);
+      if (g.recipe == null || !(g.count > 0) || g.paused) continue;
+      const rc = ix.recipes.get(g.recipe);
+      for (const o of rc?.outputs ?? []) {
+        if (ix.products.has(o.item)) out.set(o.item, (out.get(o.item) ?? 0) + (ix.products.get(o.item).base_value || 0) * (o.amount || 0) * g.count / Math.max(1, rc.ticks || 1));
+      }
     }
     return out;
+  }
+  // Project hours for a product: clamp(4 x its fastest input-using recipe, 1 h, 12 h) (wiki research.md, Duration).
+  function projectHours(ix, id) {
+    let t = Infinity;
+    for (const r of ix.recipes.values()) if (r.inputs?.length && (r.outputs ?? []).some((o) => o.item === id) && r.ticks > 0) t = Math.min(t, r.ticks);
+    return Math.min(12, Math.max(1, Number.isFinite(t) ? 4 * t / 7200 : 1));
   }
   // Which project comes next: { product, focus, tier: 'default' | 1 | 2 | 3, index? } or { wait }.
   function pick(st, ix, c, counts, next) {
@@ -196,14 +209,16 @@ try {
       return { wait: 'no list entry is a qualifying product' };
     }
     const focus = c.mode === 'modules' ? 1 : 0;
-    const pool = [...produced(st, ix)];
+    const made = produced(st, ix), pool = [...made.keys()];
     if (!pool.length) {
       // Module fabrication doesn't care which product; Process study needs one the corp actually makes.
       const top = focus === 1 ? [...ix.products.values()].sort((a, b) => b.base_value - a.base_value || a.id - b.id)[0] : null;
       return top ? { product: top.id, focus, tier: 'default' } : { wait: 'no produced product qualifies' };
     }
-    // Fewest projects started so far; the pricier product on a tie.
-    pool.sort((a, b) => (counts[a] ?? 0) - (counts[b] ?? 0) || ix.products.get(b).base_value - ix.products.get(a).base_value || a - b);
+    // The most output value the corp makes per project hour; each project already started on a product divides its score
+    // (1 / (1 + started)), so the pick still rotates instead of studying one product forever.
+    const score = (id) => (made.get(id) || 0) / projectHours(ix, id) / (1 + (counts[id] ?? 0));
+    pool.sort((a, b) => score(b) - score(a) || a - b);
     return { product: pool[0], focus, tier: 'default' };
   }
   // Why tier t (0-2) can't be paid now ('' = it can): its cost against what is left, with the reserve kept back.
@@ -214,6 +229,11 @@ try {
     if (have.md - k.md < reserve) return `MD ${fmt(have.md)} < ${fmt(k.md)} + reserve ${fmt(reserve)}`;
     return '';
   }
+  // 'best' tier: success per MD is 0.09% for Tier I, 0.007% for II, 0.0005% for III (90/1,000, 70/10,000, 50/100,000), so Tier I
+  // gives the most results per MD. A higher tier (rarer results) is taken only when the MD left above the reserve after paying is at
+  // least RICH x its cost, and it can pay its RD / Catalyst (the Catalyst has no other use).
+  const RICH = 10;
+  const richOk = (t, have, region, reserve) => t === 0 || (!shortfall(t, have, region, reserve) && have.md - TIERS[t].md >= reserve + RICH * TIERS[t].md);
 
   // The next step, from state alone: no I/O, no side effects (the test seam, also what the panel shows).
   // Returns { msg, kind, reason, ... } for the first thing to send, or { wait } when there is nothing to do,
@@ -256,8 +276,9 @@ try {
       if (p.wait) { row.wait = p.wait; continue; }
       const have = { md: left.md, rd: left.rd, cat: left.cat[r] ?? row.catalyst };
       const setting = p.tier === 'default' ? c.tierMode : p.tier;
-      const ladder = setting === 'best' || !TIERS[setting - 1] ? [2, 1, 0] : [setting - 1];
-      const tier = ladder.find((t) => !shortfall(t, have, r, c.mdReserve));
+      const best = setting === 'best' || !TIERS[setting - 1];
+      const ladder = best ? [2, 1, 0] : [setting - 1];
+      const tier = ladder.find((t) => !shortfall(t, have, r, c.mdReserve) && (!best || richOk(t, have, r, c.mdReserve)));
       if (tier === undefined) { row.wait = shortfall(ladder[ladder.length - 1], have, r, c.mdReserve); continue; }
       const k = TIERS[tier], pct = successPct(tier, p.focus, bonus);
       const label = `${pname(ix, p.product)} · ${focusName(p.focus)} · Tier ${k.name}`;

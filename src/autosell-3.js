@@ -3,7 +3,7 @@
   W.autoSell = {
     start, stop, jobs: listJobs, status, items, open: openMenu, cfg,
     get running() { return jobs.size > 0; },
-    _decide: decide, _unitCost: unitCost,
+    _decide: decide, _unitCost: unitCost, _order: jobOrder,
     _unload() { unloaded = true; jobs.clear(); wake?.(); if (mounted) unmountUi(); },
   };
 

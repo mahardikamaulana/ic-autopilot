@@ -162,7 +162,7 @@ try {
       if (it.category === 'Raw') return 'raw';
       if (/ Sheet$/.test(it.name)) return 'sheet';
       // Saturated: output keeps up with demand and the stock is a stretch of demand deep (wiki 6).
-      const g = rf?.share != null ? rf.goods?.find((x) => x.id === i) : null;
+      const g = rf?.share != null && storeItems(v).includes(i) ? rf.goods?.find((x) => x.id === i) : null;   // only goods on the shelf
       if (g) { const dem = cp._retail.demandH(g, rf.share); if (g.outTick * TPH >= dem && g.stock >= cfg.sellSaturatedHours * dem) return 'saturated shelf'; }
       return null;
     };

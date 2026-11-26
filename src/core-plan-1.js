@@ -38,7 +38,7 @@ try {
     dryRun: true,
     intervalMs: 5000, confirmMs: 8000, maxFails: 3, cmdsPerMin: 20,
     landPaybackAB: 20,            // Stage A-B: buy an acre + Cotton Farm while payback <= this many hours (wiki 4.6)
-    cottonFarmHourly: 790,        // dollars per hour one Cotton Farm earns (wiki 4.6)
+    cottonFarmHourly: 790,        // dollars per hour one Cotton Farm earns (wiki 4.6); fallback when no live Cotton bid prices it
     landPaybackFraction: 1 / 3,   // Stage C-D: payback <= T_wall x this
     cashReserve: 0,               // cents kept on top of the other modules' money floors
     ifReserve: 44,                // upper cap on the Iron Frames kept back for the prototypes and first builds (ifNeed counts what is still needed)
@@ -55,7 +55,8 @@ try {
   const ENGINE_ITEMS = ['Wood', 'Planks', 'Iron Sheet', 'Concrete', 'Glass', 'Bookshelf', 'Table', 'Chair', 'Bench', 'Wooden Frame', 'Iron Frame',
     'Iron Ore', 'Coal', 'Limestone', 'Sand', 'Copper Ore', 'Copper Wire', 'Wired Frame'];   // cp-cadence NEVER plus the ores the kits use
   const UNLOCKS = ['Assembly Plant', 'Retail Store', 'Oil Rig'];   // in this order (wiki 9)
-  const S2_NEEDS = ['Mine', 'Quarry', 'Sawmill', 'Smelter', 'Workshop', 'Kiln', 'Factory', 'Paper Mill', 'Manufacturing Lab'];
+  const S2_NEEDS = ['Mine', 'Quarry', 'Sawmill', 'Smelter', 'Workshop', 'Kiln', 'Manufacturing Lab'];   // Factory and Paper Mill are not on the plan's path
+  const REFINERY_CD = 500000;   // fallback when the tech tree lacks it (wiki data/tech-tree.md, 2026-11-24 patch); ladder and endgame share it
 
   // ---- ids by name (the client catalog array is not indexed by id) ------------------------------------------------------
   const idxRef = new WeakMap();
@@ -73,7 +74,8 @@ try {
   const acrePriceCents = (n) => { let p = FIRST_ACRE; for (let i = 0; i < n; i++) p = Math.floor(p * 41 / 40); return p; };
   const usd = (c) => '$' + (c / 100).toLocaleString('en-US', { maximumFractionDigits: 0 });
   // ---- purchase and floor pieces shared by the buildout, lab and endgame directors ----------------------------------------------------
-  const billNeed = (v, newMW) => newMW * 2000 + (v.st.subscriptions?.[REGION]?.power ?? 0) * 12000;   // cents: $20 per new MW + 2 h of bills ($60/MW/h)
+  // cents: $20 per new MW + 2 h of bills ($60/MW/h), times a world event's NPC power price multiplier
+  const billNeed = (v, newMW) => (newMW * 2000 + (v.st.subscriptions?.[REGION]?.power ?? 0) * 12000) * (core.powerPriceMult?.() ?? 1);
   // One purchase: BuyLand (if acres), BuyBuilding, then the building into group g, else a new group of `amount` named `name`.
   function buySteps(v, b, acres, g, name, amount = 1) {
     const p0 = v.pool[b] ?? 0, l0 = v.landBought, steps = [];
@@ -114,8 +116,18 @@ try {
     const idB = (n) => N.b[n], idI = (n) => N.i[n], idR = (n) => N.r[n];
     const ownedId = (b) => groups.filter((g) => g.building === b).reduce((a, g) => a + g.count, 0) + (pool[b] ?? 0);
     const owned = (n) => (N.b[n] == null ? 0 : ownedId(N.b[n]));
+    // Building prices count every region and the build / demolish queues (planner.queued): owned() is Heartland only.
+    const q = P.queued({ st, catalog: raw, region: REGION });
+    const ownedAll = (n) => {
+      const b = N.b[n];
+      if (b == null) return 0;
+      let c = q.owned[b] ?? 0;
+      for (const g of Object.values(st.groups ?? {})) if (g.building === b) c += g.count ?? 0;
+      for (const p of Object.values(st.building_pool ?? {})) c += p?.[b] ?? 0;
+      return c;
+    };
     const landBought = st.land_bought?.[REGION] ?? 0;
-    let acresUsed = 0;
+    let acresUsed = q.acres;   // a queued build or demolition holds its acres
     for (const g of groups) acresUsed += bld(g.building).acres * g.count;
     for (const [b, n] of Object.entries(pool)) acresUsed += bld(+b).acres * n;
     const acresOwned = STARTER_ACRES + landBought;
@@ -125,10 +137,12 @@ try {
     const running = (bn, rn) => groups.filter((g) => g.building === N.b[bn] && g.recipe === N.r[rn] && !g.paused && g.count > 0).reduce((a, g) => a + g.count, 0);
     const cottonGroup = groups.find((g) => g.building === N.b.Farm && g.recipe === N.r['Grow Cotton'] && !g.paused);
     const engineAcres = ['Lumber Camp', 'Farm', 'Sawmill', 'Workshop'].reduce((a, n) => a + owned(n) * (N.b[n] == null ? 0 : bld(N.b[n]).acres), 0);
-    const cottonBid = deals.some((d) => d.side === 'Sell' && d.item === N.i.Cotton && (d.region ?? REGION) === REGION);
+    const cottonBids = deals.filter((d) => d.side === 'Sell' && d.item === N.i.Cotton && (d.region ?? REGION) === REGION && d.amount > 0);
     return {
       catalog: raw,
-      N, C, st, groups, pool, bld, idB, idI, idR, owned, has, unlocked, running, cottonGroup, cottonBid,
+      N, C, st, groups, pool, bld, idB, idI, idR, owned, ownedAll, has, unlocked, running, cottonGroup,
+      cottonBid: cottonBids.length > 0, dealsLoaded: deals.length > 0,
+      cottonUnit: cottonBids.reduce((a, d) => Math.max(a, d.price / d.amount), 0) || null,   // cents per unit, best Heartland Cotton bid
       money: items[MONEY] ?? 0, cd: items[CD] ?? 0,
       landBought, acresUsed, acresOwned, freeAcres: Math.max(0, acresOwned - acresUsed), fixedAcres: Math.max(0, acresUsed - engineAcres),
       nextAcreCents: acrePriceCents(landBought),

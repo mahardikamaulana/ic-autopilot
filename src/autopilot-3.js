@@ -25,27 +25,33 @@
       { msg: { type: 'SetRecipe', group: id, recipe: r }, until: (x) => x.st.groups[id]?.recipe === r });
   }
 
-  // Sellers of an item, cheapest first, under the price cap, big enough for `amount`.
+  // Sellers of an item, cheapest first, under the price cap. A lot smaller than `amount` is bought whole (n), so several
+  // small lots add up: each is its own action and the next decision buys the rest.
   function sellersOf(s, item, amount) {
     const it = s.catalog.items[item] ?? {};
     const cap = (it.base_value || 0) * cfg.maxBuyPrice;
     return [
-      ...s.deals.filter((d) => d.side === 'Buy' && d.item === item && d.amount >= amount)
-        .map((d) => ({ key: `fill:${d.id}`, unit: d.price / d.amount, msg: { type: 'FillDeal', deal: d.id, amount, hire: null, region: REGION, courier: true } })),
+      ...s.deals.filter((d) => d.side === 'Buy' && d.item === item && d.amount > 0).map((d) => {
+        const n = Math.min(amount, d.amount);
+        return { key: `fill:${d.id}`, n, unit: d.price / d.amount, msg: { type: 'FillDeal', deal: d.id, amount: n, hire: null, region: REGION, courier: true } };
+      }),
       // A player fill lands at the Exchange, no shipment (the client sends courier:false since 2026-11-25); withdrawActions brings it home.
-      ...s.orders.filter((o) => o.side === 'Sell' && o.item === item && o.amount >= amount)
-        .map((o) => ({ key: `order:${o.id}`, unit: o.unit_price * 1.02, msg: { type: 'FillOrder', order: o.id, amount, hire: null, region: REGION, courier: false } })),
+      ...s.orders.filter((o) => o.side === 'Sell' && o.item === item && o.amount > 0).map((o) => {
+        const n = Math.min(amount, o.amount);
+        return { key: `order:${o.id}`, n, unit: o.unit_price * 1.02, msg: { type: 'FillOrder', order: o.id, amount: n, hire: null, region: REGION, courier: false } };
+      }),
     ].filter((o) => !cap || o.unit <= cap).sort((a, z) => a.unit - z.unit);
   }
+  // Buy order / floor part price: a cfg multiple of the item's base value, in cents (at least 1 cent).
+  const priceCents = (s, item, mult) => Math.max(1, Math.round((s.catalog.items[item]?.base_value ?? 0) * mult));
 
-  // One open player buy order per item, at `usd` per unit; none again within orderHoldHours
+  // One open player buy order per item, at `unit` cents per unit; none again within orderHoldHours
   // unless the last one was seen filled. Yields an action or a wait.
-  function* postBuyOrder(s, item, amount, usdPerUnit, why) {
+  function* postBuyOrder(s, item, amount, unit, why) {
     const mine = s.myOrders.find((o) => o.side === 'Buy' && o.item === item);
     if (mine) { yield { wait: `${why}: your buy order for ${mine.amount} @ ${usd(mine.unit_price)} is waiting for a player` }; return; }
     const since = nowMs() - (posted[item] ?? -Infinity);
     if (since < cfg.orderHoldHours * 3600000) { yield { wait: `${why}: buy order posted ${Math.round(since / 60000)} min ago, waiting for a player` }; return; }
-    const unit = Math.max(1, Math.round(usdPerUnit * 100)); // cents
     if (!cfg.postBuyOrders || s.money - unit * amount * 1.02 < moneyFloor(s)) return;
     const n0 = s.myOrders.length;
     yield withMeta({ item }, act(`post:${item}`, `${why}: post a buy order for ${amount} ${iname(s, item)} @ ${usd(unit)} (escrows ${usd(unit * amount)})`,
@@ -53,16 +59,16 @@
         until: (x) => x.myOrders.length > n0 || x.myOrders.some((o) => o.side === 'Buy' && o.item === item) }));
   }
 
-  // Floorplan parts from the player market only, at up to cfg.floorBuyUsd per unit (2% fee
+  // Floorplan parts from the player market only, at up to cfg.floorBuyMult × base value per unit (2% fee
   // included): cheapest sell orders first, part-filling small ones. With no such seller, a buy
   // order at that price for parts you don't make (home-made parts just build up).
   function* floorPartBuys(s, item, need, why) {
-    if (!(cfg.floorBuyUsd > 0) || need <= 0) return;
+    if (!(cfg.floorBuyMult > 0) || need <= 0) return;
     s.bookWanted = true;   // the loop subscribes to the player order book (core.orderBook.need)
     if (!s.ordersKnown) { yield { wait: `${why}: player order book not loaded yet` }; return; }
     const it = s.catalog.items[item] ?? {};
-    const amount = Math.max(1, Math.min(Math.ceil(need), Math.floor(COURIER_CU / (it.cargo_weight || 1))));
-    const cap = cfg.floorBuyUsd * 100;
+    const amount = Math.max(1, Math.min(Math.ceil(need), Math.floor(courierCU() / (it.cargo_weight || 1))));
+    const cap = priceCents(s, item, cfg.floorBuyMult);
     const offers = s.orders.filter((o) => o.side === 'Sell' && o.item === item && o.unit_price * 1.02 <= cap)
       .sort((a, z) => a.unit_price - z.unit_price);
     for (const o of offers) {
@@ -73,28 +79,28 @@
       yield act(`order:${o.id}`, `${why}: buy ${n} ${iname(s, item)} from a player @ ${usd(o.unit_price)} (lands at the Exchange)`,
         { msg: { type: 'FillOrder', order: o.id, amount: n, hire: null, region: REGION, courier: false }, until: (x) => x.atExchange(item) > u0 || x.money < m0 - cost / 2 });
     }
-    if (!s.madeHere.has(item)) yield* postBuyOrder(s, item, amount, cfg.floorBuyUsd, why);
+    if (!s.madeHere.has(item)) yield* postBuyOrder(s, item, amount, cap, why);
   }
 
   // Buy actions (one per seller, best first) for `need` of an item, capped at one courier load.
   function* buyActions(s, item, need, why) {
     const it = s.catalog.items[item] ?? {};
-    const amount = Math.max(1, Math.min(Math.ceil(need), Math.floor(COURIER_CU / (it.cargo_weight || 1))));
+    const amount = Math.max(1, Math.min(Math.ceil(need), Math.floor(courierCU() / (it.cargo_weight || 1))));
     s.bookWanted = true;
     if (!s.dealsKnown) { yield { wait: `${why}: market board not loaded (open the Market page once)` }; return; }
     if (!s.ordersKnown) { yield { wait: `${why}: player order book not loaded yet` }; return; }
     const offers = sellersOf(s, item, amount);
     if (!offers.length) {
-      yield* postBuyOrder(s, item, amount, cfg.buyOrderUsd, `no seller for ${iname(s, item)}`);
+      yield* postBuyOrder(s, item, amount, priceCents(s, item, cfg.buyOrderMult), `no seller for ${iname(s, item)}`);
       yield { wait: `no seller for ${Math.ceil(need)} ${iname(s, item)} under ${cfg.maxBuyPrice}× base (buy it by hand)` };
       return;
     }
     for (const o of offers) {
-      const cost = Math.ceil(o.unit * amount);
-      if (s.money - cost < moneyFloor(s)) { yield { wait: `${why}: need ${usd(cost)} for ${amount} ${iname(s, item)}` }; return; }
+      const cost = Math.ceil(o.unit * o.n);
+      if (s.money - cost < moneyFloor(s)) { yield { wait: `${why}: need ${usd(cost)} for ${o.n} ${iname(s, item)}` }; return; }
       if (o.msg.courier && !s.courierFree) { yield { wait: `courier busy (${courierEta(s)}): ${why}` }; return; }
       const id0 = s.shipId, m0 = s.money, u0 = s.atExchange(item);
-      yield act(o.key, `${why}: buy ${amount} ${iname(s, item)} for ~${usd(cost)}`,
+      yield act(o.key, `${why}: buy ${o.n} ${iname(s, item)} for ~${usd(cost)}`,
         { msg: o.msg, until: (x) => x.shipId > id0 || x.atExchange(item) > u0 || x.money < m0 - cost / 2 });
     }
   }
@@ -109,7 +115,7 @@
   // Auto-deliver on for this region it ships them itself.
   function* withdrawActions(s, item, want, why) {
     if (s.autoDeliver) return;
-    const load = Math.floor(COURIER_CU / (s.catalog.items[item]?.cargo_weight || 1));
+    const load = Math.floor(courierCU() / (s.catalog.items[item]?.cargo_weight || 1));
     const n = Math.min(s.atExchange(item), Math.ceil(want - s.has(item) - (s.inbound[item] ?? 0)), load);
     if (!(n > 0)) return;
     if (!s.courierFree) { yield { wait: `courier busy (${courierEta(s)}): ${why}: withdraw ${n} ${iname(s, item)} from the Exchange` }; return; }
@@ -166,13 +172,20 @@
     return Math.min(cfg.boosterAcres, s.freeAcres);
   }
 
-  function buildSteps(s, b, why, maxAcre) {
+  // r (a recipe): land for this building only while (acres + building) pay back from its own income within
+  // cfg.landPaybackHours; with that income unknown (no bid), the old maxAcre wall. r null: maxAcre only (plan buildings).
+  // orWall: either rule is enough (Gold Mines are bought for their CD as much as for their ore).
+  function buildSteps(s, b, why, maxAcre, r = null, orWall = false) {
     const needAcres = Math.max(0, s.bld(b).acres - (s.freeAcres - boosterAcresHeld(s)));
     const floor = moneyFloor(s, s.drawOf(b));
     if (needAcres > 0) {
-      const top = acrePrice(s.landBought + needAcres - 1);
-      if (top > maxAcre * 100) return { wait: `${why}: next acre ${usd(top)} is above the ${usd(maxAcre * 100)} land wall`, wall: true };
+      if (s.acresOwned + needAcres > ACRE_CAP) return { wait: `${why}: Heartland is at its ${ACRE_CAP}-acre cap`, wall: true };
       const lc = landCost(s, needAcres);
+      const inc = r == null ? 0 : incomePerMin(s, r);
+      const top = acrePrice(s.landBought + needAcres - 1);
+      const h = inc > 0 ? (lc + buildCost(s, b)) / inc / 60 : Infinity;
+      if (inc > 0 && !orWall && h > cfg.landPaybackHours) return { wait: `${why}: ${needAcres} acre(s) + ${bname(s, b)} would pay back in ${h.toFixed(1)} h (limit ${cfg.landPaybackHours} h)`, wall: true };
+      if ((!(inc > 0) || orWall) && h > cfg.landPaybackHours && top > maxAcre * 100) return { wait: `${why}: next acre ${usd(top)} is above the ${usd(maxAcre * 100)} land wall`, wall: true };
       if (s.money - lc - buildCost(s, b) < floor) return { wait: `${why}: saving for ${needAcres} acre(s) + ${bname(s, b)} (${usd(lc + buildCost(s, b))})`, money: true };
       const l0 = s.landBought;
       return act('land', `${why}: buy ${needAcres} acre(s) for ${usd(lc)}`,
@@ -243,8 +256,8 @@
         { msg: { type: 'SetRecipe', group: g.id, recipe: r }, until: (x) => x.st.groups[g.id]?.recipe === r });
     }
 
-    // 5. Kit / prototype parts the corp can't make yet.
-    if (cfg.buyKits) {
+    // 5. Kit / prototype parts the corp can't make yet (not after the hand-off: Autopilot stops buying then).
+    if (cfg.buyKits && !owns) {
       for (const p of partsToBuy(s)) {
         yield* withdrawActions(s, p.item, p.want, 'parts for kits/prototype');
         if (p.need > 0) yield* buyActions(s, p.item, p.need, 'parts for kits/prototype');
@@ -252,29 +265,32 @@
     }
 
     // 6. Next plan tech.
+    // Premium with research_queue in the state: while the slot is busy, the next unlock is queued (QueueTech) instead of waiting.
     const nt = nextTech(s);
-    if (nt) {
-      const tech = s.catalog.techs.find((t) => t.building === nt.b);
-      const proto = s.bld(nt.b).build_items ?? [];
-      const why = `unlock ${bname(s, nt.b)}`;
+    const qt = nt ? null : nextQueueable(s);
+    const t6 = nt ?? qt;
+    if (t6) {
+      const tech = s.catalog.techs.find((t) => t.building === t6.b);
+      const proto = s.bld(t6.b).build_items ?? [];
+      const why = `${qt ? 'queue' : 'unlock'} ${bname(s, t6.b)}`;
       if (!tech) yield { wait: `${why}: not in the tech tree` };
-      else if (!s.researchIdle) yield { wait: `${why}: research slot busy` };
-      else if (tech.requires != null && !s.unlocked(tech.requires)) yield { wait: `${why}: needs ${bname(s, tech.requires)} first` };
+      else if (!s.researchIdle && !qt) yield { wait: `${why}: research slot busy` };
+      else if (tech.requires != null && !s.unlocked(tech.requires) && !(qt && pendingTech(s, tech.requires))) yield { wait: `${why}: needs ${bname(s, tech.requires)} first` };
       else if (s.cd < tech.cost) yield { wait: `${why}: ${s.cd} / ${tech.cost} CD` };
       else {
-        const gate = nt.gate ? nt.gate(s) : true;
+        const gate = t6.gate ? t6.gate(s) : true;
         const lack = proto.filter((i) => s.has(i.item) < i.amount);
         if (gate !== true) yield { wait: `${why}: ${gate}` };
         else if (lack.length) yield { wait: `${why}: need ${lack.map((i) => `${Math.ceil(i.amount - s.has(i.item))} more ${iname(s, i.item)}${whyNoneMade(s, i.item)}`).join(', ')}` };
         else {
-          yield act(`tech:${nt.b}`, `${why} (${tech.cost} CD${proto.length ? ' + ' + proto.map((i) => `${i.amount} ${iname(s, i.item)}`).join(', ') : ''})`,
-            { msg: { type: 'StartTech', building: nt.b, region: REGION }, until: (x) => x.research?.building === nt.b || x.unlocked(nt.b) });
+          yield act(`tech:${t6.b}`, `${why} (${tech.cost} CD${proto.length ? ' + ' + proto.map((i) => `${i.amount} ${iname(s, i.item)}`).join(', ') : ''})`,
+            { msg: { type: qt ? 'QueueTech' : 'StartTech', building: t6.b, region: REGION }, until: (x) => pendingTech(x, t6.b) || x.unlocked(t6.b) });
         }
       }
     }
 
-    // 6b. Better floorplans.
-    yield* floorActions(s);
+    // 6b. Better floorplans (they buy parts; not after the hand-off).
+    if (!owns) yield* floorActions(s);
 
     // 7. Selling.
     yield* sellActions(s);
@@ -289,9 +305,10 @@
       if (short) { yield { wait: `${label}: waiting for ${iname(s, short.item)}${whyNoneMade(s, short.item)}` }; continue; }
       if (s.owned(t.b) > s.equipped(t.b)) { yield { wait: `${label}: a ${bname(s, t.b)} is still waiting for its floor kit` }; continue; }
       // One-off plan buildings take land at any price they can afford; only the open-ended
-      // Gold Mines are held to the land wall.
-      const wall = t.recipe === R.MINE_GOLD ? Math.max(cfg.maxAcrePriceCritical, s.money / 100 * cfg.landCashShare) : Infinity;
-      const a = buildSteps(s, t.b, label, wall);
+      // Gold Mines are held to the land wall or land payback, whichever allows more.
+      const gold = t.recipe === R.MINE_GOLD;
+      const wall = gold ? Math.max(cfg.maxAcrePriceCritical, s.money / 100 * cfg.landCashShare) : Infinity;
+      const a = buildSteps(s, t.b, label, wall, gold ? R.MINE_GOLD : null, gold);
       if (a.steps) { yield a; continue; }
       if (a.money && cfg.saveForCritical) { yield { ...a, final: true }; return; }
       yield a;
@@ -300,13 +317,16 @@
     // 9. CD booster.
     yield* boosterActions(s, nt);
 
-    // 10. Cheaper of Lumber Camp / Farm (tie → camp).
+    // 10. Lumber Camp or Farm: the one whose next building (and its acres) pays back sooner from live income per acre
+    // (best bid × output × floor rate). Its price climbs with each one owned, so the two alternate. No income known → the cheaper; tie → camp.
     if (farmInfo()?.resumable) { yield { wait: 'camps/farms wait: CD Farm has an interrupted run (resume or discard it in CD Farm)' }; return; }
-    const b =buildCost(s, B.FARM) < buildCost(s, B.CAMP) ? B.FARM : B.CAMP;
+    const payback = (x) => { const inc = incomePerMin(s, TASK[x]); return inc > 0 ? (buildCost(s, x) + s.bld(x).acres * acrePrice(s.landBought)) / inc : Infinity; };
+    const pf = payback(B.FARM), pc = payback(B.CAMP);
+    const b = pf < pc || (pf === pc && buildCost(s, B.FARM) < buildCost(s, B.CAMP)) ? B.FARM : B.CAMP;
     const unequipped = s.owned(B.CAMP) + s.owned(B.FARM) - s.equipped(B.CAMP) - s.equipped(B.FARM);
     if (unequipped >= cfg.maxUnequippedCamps) { yield { wait: `${unequipped} camps/farms still waiting for their Wood kit` }; return; }
     const workshopStarted = s.unlocked(B.WORKSHOP) || s.research?.building === B.WORKSHOP;
-    yield buildSteps(s, b, `${bname(s, b)} #${s.owned(b) + 1}`, workshopStarted ? cfg.maxAcrePrice : cfg.maxAcrePriceEarly);
+    yield buildSteps(s, b, `${bname(s, b)} #${s.owned(b) + 1}`, workshopStarted ? cfg.maxAcrePrice : cfg.maxAcrePriceEarly, TASK[b], true);
   }
 
   function* boosterActions(s, nt) {
@@ -320,6 +340,7 @@
     if (s.money < cfg.boosterMinCash * 100) return;
     if (s.freeAcres < 1) {
       const want = Math.max(1, cfg.boosterAcres);
+      if (s.acresOwned + want > ACRE_CAP) return;
       // A few acres bought once and reused for every cycle: allowed up to 10% of cash per acre.
       const cap = Math.max(cfg.maxAcrePriceCritical, s.money / 100 * Math.max(cfg.landCashShare, 0.1)) * 100;
       if (acrePrice(s.landBought + want - 1) > cap) { yield { wait: `CD booster: next acre ${usd(acrePrice(s.landBought))} above the land wall` }; return; }
@@ -339,7 +360,7 @@
     const opts = {
       targetCd: tech.cost, budget: 'reserve', minMoney: Math.ceil(keep / 100), batch: cfg.boosterBatch,
       reserveAcres: 0, fullBatch: false, existingPool: 'keep', maxSpendPerMin: Infinity,
-      building: B.CAMP, runOnly: true, by: `Autopilot: CD for ${bname(s, nt.b)}`,
+      building: B.CAMP, region: REGION, runOnly: true, by: `Autopilot: CD for ${bname(s, nt.b)}`,
     };
     const a = act('booster:cdfarm', `CD booster via CD Farm: farm ${tech.cost - s.cd} CD for ${bname(s, nt.b)} (keeps ${usd(keep)})`);
     a.call = () => { fi.f.start(opts); return !!W.cdFarm?.running; };
@@ -356,7 +377,7 @@
 
   function* sellActions(s) {
     if (!s.dealsKnown) { yield { wait: 'selling: market board not loaded (open the Market page once)' }; return; }
-    const load = (item) => Math.floor(COURIER_CU / (s.catalog.items[item]?.cargo_weight || 1));
+    const load = (item) => Math.floor(courierCU() / (s.catalog.items[item]?.cargo_weight || 1));
     const bids = (item) => s.deals.filter((d) => d.side === 'Sell' && d.item === item)
       .sort((a, z) => z.price / z.amount - a.price / a.amount);
 
@@ -398,8 +419,6 @@
         { msg: { type: 'FillDeal', deal: d.id, amount: n, hire: null, region: REGION, courier: true }, until: (x) => x.shipId > id0 });
     }
   }
-  // Never sold: what the plan builds with, and corp-wide data.
-  const NEVER_SELL = [PLANKS, WFRAME, IFRAME, MONEY, CD, 25, 26, LD];
 
   // First candidate action not cooling down. Waits are collected; a final wait (saving for a
   // plan building) stops the search so camps don't eat the money.

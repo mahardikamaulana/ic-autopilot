@@ -35,25 +35,61 @@
     return ok ? e.R[ok.k] : e.R.ft;
   }
 
-  // 1. Pool tidy: own engine buildings sitting in the pool, and engine groups without a recipe.
+  // Ownership memory, like kilnMine: units this director left in the pool (mem poolMine { building: n }: + on a confirmed BuyBuilding or
+  // UnassignBuildings, - on AssignBuildings / CreateGroup) and the groups it made (groupsMine). Each step records once.
+  function track(v, ctx, b, a) {
+    const ids = new Set(v.groups.map((g) => g.id));
+    for (const st of a.steps) {
+      const t = st.msg?.type, n = st.msg?.amount ?? 1, u = st.until;
+      const sign = t === 'BuyBuilding' || t === 'UnassignBuildings' ? 1 : t === 'AssignBuildings' || t === 'CreateGroup' ? -1 : 0;
+      if (!sign) continue;
+      let seen = false;
+      st.until = (x) => {
+        const ok = u(x), m = ctx.mem?.('buildout');
+        if (ok && !seen && m) {
+          seen = true;
+          const pm = { ...(m.get().poolMine ?? {}) }, patch = { poolMine: pm };
+          pm[b] = Math.max(0, (pm[b] ?? 0) + sign * n);
+          if (t === 'CreateGroup') patch.groupsMine = [...new Set([...(m.get().groupsMine ?? []), ...x.groups.filter((g) => !ids.has(g.id) && g.building === b).map((g) => g.id)])];
+          m.set(patch);
+        }
+        return ok;
+      };
+    }
+    return a;
+  }
+  // A plan group of engine building bn: made here, on a plan recipe, or without one but named after a plan recipe (how groups are named here).
+  function planGroupOf(v, e, bn, mineG) {
+    const b = v.idB(bn), pr = (bn === 'Lumber Camp' ? [e.R.wood] : bn === 'Sawmill' ? [e.R.planks] : [e.R.ft, e.R.rivet, e.R.bookshelf, e.R.table, e.R.chair, e.R.bench]).filter(Boolean);
+    return (g) => mineG.has(g.id) || pr.some((r) => r.id === g.recipe || (g.recipe == null && r.name === g.name && r.building === b));
+  }
+  // 1. Pool tidy: own engine buildings sitting in the pool, and engine groups without a recipe. Pooled units are taken only when this
+  // director left them there, or no group outside the plan uses that building (then nobody else is waiting to place them).
+  // Pooled units of bn tidy may take (the wave gate waits on the same count).
+  function poolTake(v, ctx, e, bn) {
+    const mm = ctx.mem?.('buildout')?.get?.() ?? {}, b = v.idB(bn), plan = planGroupOf(v, e, bn, new Set(mm.groupsMine ?? []));
+    return v.groups.some((g) => g.building === b && g.count > 0 && !plan(g)) ? Math.min(e.ownPool(b), mm.poolMine?.[b] ?? 0) : e.ownPool(b);
+  }
   function tidy(v, ctx, e, tg) {
+    const mineG = new Set(ctx.mem?.('buildout')?.get?.()?.groupsMine ?? []);
     for (const bn of ENGINE) {
       const b = v.idB(bn);
       if (bn === 'Lumber Camp' && ctx.boCdBusy) continue;            // a CD run may be cycling Camps through the pool
-      const n = e.ownPool(b);
+      const n = poolTake(v, ctx, e, bn);
       if (!n) continue;
       let r = bn === 'Lumber Camp' ? e.R.wood : bn === 'Sawmill' ? e.R.planks : null;
       if (bn === 'Workshop') r = poolWorkshopRecipe(v, ctx, e, tg, n);
       const g = homeGroup(e, b, r);
       const k = bn === 'Workshop' ? 1 : n;                            // Workshops one at a time: each goes where the split is shortest
-      return g ? assignAction(v, b, g, k, 'pool') : createAction(v, b, k, r.name, 'pool');
+      return track(v, ctx, b, g ? assignAction(v, b, g, k, 'pool') : createAction(v, b, k, r.name, 'pool'));
     }
     for (const bn of ENGINE) {
-      const b = v.idB(bn);
-      const g = v.groups.find((x) => x.building === b && x.count > 0 && (x.recipe == null || !v.C.recipes[x.recipe]));
+      const b = v.idB(bn), plan = planGroupOf(v, e, bn, mineG);
+      const named = (g) => Object.values(v.C.recipes).find((r) => r.building === b && r.name === g.name);
+      // Workshops: only a plan group (a user's recipe-less Workshop group waits for the user)
+      const g = v.groups.find((x) => x.building === b && x.count > 0 && (x.recipe == null || !v.C.recipes[x.recipe]) && (bn !== 'Workshop' || plan(x)));
       if (!g) continue;
-      const named = Object.values(v.C.recipes).find((r) => r.building === b && r.name === g.name);
-      const r = named ?? (bn === 'Lumber Camp' ? e.R.wood : bn === 'Sawmill' ? e.R.planks : (tg ? nextWorkshopRecipe(e, tg)?.r : null) ?? e.R.ft);
+      const r = named(g) ?? (bn === 'Lumber Camp' ? e.R.wood : bn === 'Sawmill' ? e.R.planks : (tg ? nextWorkshopRecipe(e, tg)?.r : null) ?? e.R.ft);
       return recipeAction(v, g, r, 'new group');
     }
     return null;
@@ -226,8 +262,8 @@
     const place = home
       ? { msg: { type: 'AssignBuildings', group: home.id, amount: take }, until: ((h0) => (x) => (groupById(x, home.id)?.count ?? 0) >= h0 + take)(home.count) }
       : { msg: { type: 'CreateGroup', building: e.id.ws, amount: take, name: r.name, region: REGION }, until: (x) => x.groups.some((y) => !ids.has(y.id) && y.building === e.id.ws && y.count >= take) };
-    return { action: { id: 'bo:split:' + g.id, text: 'switch spare Frame Timber to furniture (' + split.source + '): move ' + take + ' Workshop(s) from group ' + g.id + ' to ' + r.name + (home ? ' (group ' + home.id + ')' : ' (new group)'),
-      steps: [{ msg: { type: 'UnassignBuildings', group: g.id, amount: take }, until: (x) => (groupById(x, g.id)?.count ?? 0) <= c0 - take }, place] } };
+    return { action: track(v, ctx, e.id.ws, { id: 'bo:split:' + g.id, text: 'switch spare Frame Timber to furniture (' + split.source + '): move ' + take + ' Workshop(s) from group ' + g.id + ' to ' + r.name + (home ? ' (group ' + home.id + ')' : ' (new group)'),
+      steps: [{ msg: { type: 'UnassignBuildings', group: g.id, amount: take }, until: (x) => (groupById(x, g.id)?.count ?? 0) <= c0 - take }, place] }) };
   }
 
   // 3b. Furniture rebalance (wiki 4.7 step 3, plan D3): today's furniture Workshops against the board's split of the same total.
@@ -267,8 +303,8 @@
         const place = home
           ? { msg: { type: 'AssignBuildings', group: home.id, amount: 1 }, until: ((h0) => (x) => (groupById(x, home.id)?.count ?? 0) >= h0 + 1)(home.count) }
           : { msg: { type: 'CreateGroup', building: e.id.ws, amount: 1, name: r.name, region: REGION }, until: (x) => x.groups.some((y) => !ids.has(y.id) && y.building === e.id.ws) };
-        return { action: { id: 'bo:rebal:' + g.id, text: 'rebalance furniture to the board (' + line + '): move 1 Workshop from group ' + g.id + ' (' + e.R[from].name + ') to ' + r.name + (home ? ' (group ' + home.id + ')' : ' (new group)'),
-          steps: [{ msg: { type: 'UnassignBuildings', group: g.id, amount: 1 }, until: (x) => (groupById(x, g.id)?.count ?? 0) <= c0 - 1 }, place] } };
+        return { action: track(v, ctx, e.id.ws, { id: 'bo:rebal:' + g.id, text: 'rebalance furniture to the board (' + line + '): move 1 Workshop from group ' + g.id + ' (' + e.R[from].name + ') to ' + r.name + (home ? ' (group ' + home.id + ')' : ' (new group)'),
+          steps: [{ msg: { type: 'UnassignBuildings', group: g.id, amount: 1 }, until: (x) => (groupById(x, g.id)?.count ?? 0) <= c0 - 1 }, place] }) };
       }
     }
     return { wait: 'rebalance: ' + line + ' waits: ' + why.join('; ') };
@@ -286,7 +322,7 @@
     const ftHeld = new Set(ctx.mem?.('buildout')?.get?.()?.ftMine ?? []);   // paused by the WF gate on purpose
     for (const bn of ENGINE) {
       const b = v.idB(bn);
-      if (e.ownPool(b) > 0) return v.bld(b).name + ' in the pool';
+      if (poolTake(v, ctx, e, bn) > 0) return v.bld(b).name + ' in the pool';
       const g = v.groups.find((x) => x.building === b && x.count > 0 && !ftHeld.has(x.id) && (x.paused || (x.equipped ?? x.count) < x.count));
       if (g) return 'group ' + g.id + ' (' + (g.name ?? v.bld(b).name) + ') ' + (g.paused ? 'paused' : 'equipped ' + g.equipped + '/' + g.count);
     }
@@ -304,7 +340,7 @@
     const lack = short(v, e.kitOf(s.b, s.pick.r), ahead);
     if (lack.length) return { wait: 'kit short for ' + ahead + ' x ' + s.pick.label + ': ' + lack.join(', ') };
     let cost = 0;
-    for (let i = 0; i < ahead; i++) cost += W.idleCore.planner.price(bd.cost, v.owned(s.pick.bn), i);
+    for (let i = 0; i < ahead; i++) cost += W.idleCore.planner.price(bd.cost, v.ownedAll(s.pick.bn), i);
     const bill = cp._billNeed(v, (bd.draws?.power ?? 0) * ahead), floor = ctx.floorCents ?? 0;
     if (v.money - cost < floor + bill) return { wait: 'cash ' + usd(v.money) + ' < ' + usd(cost + floor + bill) + ' for ' + ahead + ' x ' + s.pick.label + ' + bill floor + money floor', need: cost + floor + bill };
     return { ok: true, need: cost + floor + bill };
@@ -322,6 +358,8 @@
     if (w.wave >= w.waves) return { status, wait: 'conversion: all ' + w.waves + ' waves done, ' + w.farms + ' Farms left' };
     if (ctx.retailOk === false) return { status, wait: 'retail checkpoint failed: remaining Farms stay on Cotton' };   // plan A2: any fail, measured or not; the capped engine needs no more acres
     if (ctx.retailFail) return { status, wait: 'retail fail path: Farms stay on Cotton' };   // a pass of the re-run proves only the capped output sells
+    const cot = v.idI('Cotton'), eater = v.groups.find((g) => g.count > 0 && (v.C.recipes[g.recipe]?.inputs ?? []).some((i) => i.item === cot));
+    if (eater) return { status, wait: 'conversion: group ' + eater.id + ' (' + (eater.name ?? v.C.recipes[eater.recipe].name) + ') eats Cotton: Farms stay' };   // the plan sells Cotton; a group outside it needs the Farms
     if (ctx.boCdBusy) return { status, wait: 'conversion: CD Farm is running' };
     // Fail closed: without saved wave memory every step would look like wave 1 and demolish another quarter of the Farms.
     if (!ctx.boMemOk || ctx.mem?.('buildout')?.get?.()?.base == null) return { status, wait: 'conversion: wave memory not saved (browser storage), no wave' };
@@ -342,6 +380,15 @@
     return { status, action: { id: 'bo:wave:' + w.wave, text: 'Farm conversion wave ' + (w.wave + 1) + '/' + w.waves + ': unassign and demolish ' + n + ' Farms', hold: true,
       steps: [{ msg: { type: 'UnassignBuildings', group: g.id, amount: n }, until: (x) => (groupById(x, g.id)?.count ?? 0) <= c0 - n },
         { msg: { type: 'DemolishBuilding', building: e.id.farm, amount: n, region: REGION }, until: (x) => x.owned('Farm') <= o0 - n }] } };
+  }
+
+  // Dollars an engine acre earns an hour (plan D-1): BLOCK_HOURLY at board price 160% and quality 0, scaled by the live board price of the
+  // furniture mix, and 0 once the planks made already cover what the shelves sell (appetite x share). BLOCK_HOURLY without a board.
+  function blockHourly(ctx, e) {
+    const f = ctx.retail, gs = FURN.map(([, n]) => f?.goods?.find((g) => g.name === n));
+    if (f?.share == null || gs.some((g) => !(g?.base > 0))) return BLOCK_HOURLY;
+    if (f.demandPlanksH > 0 && e.planksSupply >= f.demandPlanksH) return 0;
+    return BLOCK_HOURLY * gs.reduce((a, g, i) => a + MIX[FURN[i][0]] * g.unit / g.base, 0) / (1.6 * 0.952);
   }
 
   // 5. The next purchase: a consumer only when its supplier covers it; otherwise its supplier.
@@ -390,7 +437,7 @@
     let landCents = 0;
     if (acres > 0) {
       if (stage === 'B') {
-        const last = cp._acrePriceCents(v.landBought + acres - 1), pb = (last / 100 + BLOCK_SHARE) / BLOCK_HOURLY;
+        const last = cp._acrePriceCents(v.landBought + acres - 1), pb = (last / 100 + BLOCK_SHARE) / blockHourly(ctx, e);
         if (pb > cfg.landPaybackAB) return { closed: true, wait: why + ': acre #' + (v.acresOwned + acres) + ' ' + usd(last) + ' + block ' + usd(BLOCK_SHARE * 100) + ' pays back in ' + pb.toFixed(1) + ' h > ' + cfg.landPaybackAB + ' h (Stage A-B rule closed)' };
         if (v.acresOwned + acres > ACRE_CAP) return { closed: true, wait: why + ': no free acre and Heartland is at its cap (' + ACRE_CAP + ' acres)' };
       } else {
@@ -405,7 +452,7 @@
       const need = (e.saws + 1) * cfg.woodRunsPerSawmill * amt(e.R.planks.inputs, e.woodId);
       if (v.has('Wood') < need) return { wait: why + ': wood gate: Wood ' + Math.floor(v.has('Wood')) + ' < ' + need + ' (Sawmills x ' + cfg.woodRunsPerSawmill + ' runs)' };
     }
-    const price = W.idleCore.planner.price(bd.cost, v.owned(pick.bn), 0), cost = price + landCents;
+    const price = W.idleCore.planner.price(bd.cost, v.ownedAll(pick.bn), 0), cost = price + landCents;
     const mw = bd.draws?.power ?? 0, bill = cp._billNeed(v, mw), floor = ctx.floorCents ?? 0;
     if (ctx._boNoCash) return { pick, b, acres, cost, landCents, price, why };   // the wave gate checks cash itself, for several buildings
     if (v.money - cost < bill) return { saving: pick.label, wait: why + ': bill floor: cash ' + usd(v.money) + ' - ' + usd(cost) + ' < ' + usd(bill) + ' (' + mw + ' new MW x $20 + 2 h of bills)' };

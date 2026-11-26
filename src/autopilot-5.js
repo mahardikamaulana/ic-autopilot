@@ -19,10 +19,11 @@
   const FIELDS = {
     workshops: { kind: 'count', label: 'Frame Timber Workshops', min: 0, max: 50 },
     sawmills: { kind: 'count', label: 'Sawmills (at least)', min: 0, max: 200 },
-    ironMines: { kind: 'count', label: 'Iron Mines', min: 0, max: 100 },
-    coalMines: { kind: 'count', label: 'Coal Mines', min: 0, max: 100 },
-    goldMines: { kind: 'count', label: 'Gold Mines', min: 0, optional: true, empty: 'No limit' },
+    ironMines: { kind: 'count', label: 'Iron Mines (at least)', min: 0, max: 100 },
+    coalMines: { kind: 'count', label: 'Coal Mines (at least)', min: 0, max: 100 },
+    goldMines: { kind: 'count', label: 'Gold Mines', min: 0, optional: true, empty: 'Auto' },
     ironFrameWorkshops: { kind: 'count', label: 'Iron Frame Workshops', min: 0, max: 50 },
+    landPaybackHours: { kind: 'count', label: 'Land pays back within', min: 0, max: 1000, unit: 'h' },
     maxAcrePriceEarly: { kind: 'money', label: 'Land wall, early', min: 0 },
     maxAcrePrice: { kind: 'money', label: 'Land wall, later', min: 0 },
     boosterBatch: { kind: 'count', label: 'Booster batch', min: 1, max: 100 },
@@ -37,15 +38,15 @@
     woodReserve: { kind: 'count', label: 'Wood never sold below', min: 0, max: 1000000 },
     sellKeepMinutes: { kind: 'count', label: 'Keep minutes of use', min: 0, max: 1440, unit: 'min' },
     maxBuyPrice: { kind: 'mult', label: 'Max buy price (× base)', min: 0.1, max: 100, unit: '×' },
-    floorBuyUsd: { kind: 'usd', label: 'Floor parts, $ per unit', min: 0, max: 1000 },
-    buyOrderUsd: { kind: 'usd', label: 'Buy order, $ per unit', min: 0.01, max: 1000 },
+    floorBuyMult: { kind: 'mult', label: 'Floor parts, max × base', min: 0, max: 100, unit: '×' },
+    buyOrderMult: { kind: 'mult', label: 'Buy order price (× base)', min: 0.1, max: 100, unit: '×' },
     orderHoldHours: { kind: 'count', label: 'Order hold', min: 0, max: 720, unit: 'h' },
     maxActionsPerMin: { kind: 'count', label: 'Max actions per minute', min: 1, max: 60 },
     intervalMs: { kind: 'count', label: 'Check every', min: 500, max: 60000, unit: 'ms' },
     maxIdleMs: { kind: 'count', label: 'Slowest idle check', min: 500, max: 120000, unit: 'ms' },
     stallMinutes: { kind: 'count', label: 'Stall alert after', min: 0, max: 600, unit: 'min' },
   };
-  const ADV_FIELDS = ['quarries', 'smelters', 'maxAcrePriceCritical', 'landCashShare', 'boosterAcres', 'woodReserve', 'sellKeepMinutes', 'maxBuyPrice', 'floorBuyUsd', 'buyOrderUsd', 'orderHoldHours', 'maxActionsPerMin', 'intervalMs', 'maxIdleMs', 'stallMinutes'];
+  const ADV_FIELDS = ['quarries', 'smelters', 'maxAcrePriceCritical', 'landCashShare', 'boosterAcres', 'woodReserve', 'sellKeepMinutes', 'maxBuyPrice', 'floorBuyMult', 'buyOrderMult', 'orderHoldHours', 'maxActionsPerMin', 'intervalMs', 'maxIdleMs', 'stallMinutes'];
   const CHECKS = [
     ['sellAll', 'Sell spare full courier loads'],
     ['cdBooster', 'CD booster (build + demolish)'],
@@ -123,8 +124,8 @@
       tail: [K.group('Experimental', refs.dryRunSwitch.el)],
       groups: [
         K.group('Build targets', mk('div', { class: 'idc-two' }, ...amount('workshops', 'sawmills', 'ironMines', 'coalMines', 'goldMines', 'ironFrameWorkshops'))),
-        K.group('Land price limits', mk('div', { class: 'idc-two' }, ...amount('maxAcrePriceEarly', 'maxAcrePrice')),
-          mk('div', { class: 'idc-desc' }, 'The most per acre Autopilot will pay for land, early on and later.')),
+        K.group('Land price limits', mk('div', { class: 'idc-two' }, ...amount('landPaybackHours', 'maxAcrePriceEarly', 'maxAcrePrice')),
+          mk('div', { class: 'idc-desc' }, 'Camps, farms and Gold Mines get land while it and the building pay back from their own income within this time; with no bid for what they make, the walls (most per acre, early on and later) apply.')),
         K.group('CD booster', mk('div', { class: 'idc-two' }, ...amount('boosterBatch', 'boosterMinCash', 'boosterKeepCash')), tog('cdBooster')),
         K.group('Automation', ...['sellAll', 'floorUpgrades', 'buyKits', 'postBuyOrders', 'dispatchOffice', 'autoResume'].map(tog)),
         K.group('Power bills', K.field('Going offline: keep power bills for', mk('div', { class: 'idc-inline' }, refs.hours.box, offBtn), refs.billNow)),

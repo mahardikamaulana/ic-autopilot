@@ -20,6 +20,7 @@
     }
     if (unloaded) return;
     mountUi();
+    if (cfg.keepLive && saved.live === true && !running) start({ dryRun: false });   // start() still refuses Live when the game data changed
     console.log('[labRunner] ready (dry run by default). Open "Lab" in the sidebar, or labRunner.status() / labRunner.start()');
   })();
 })();

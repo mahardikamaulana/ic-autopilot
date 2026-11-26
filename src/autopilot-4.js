@@ -140,6 +140,8 @@
     if (!fell || !Array.isArray(fell.inputs) || !Array.isArray(fell.outputs) || typeof fell.ticks !== 'number') bad.push('Fell Wood recipe changed');
     if (typeof c.items[WOOD]?.base_value !== 'number') bad.push('Wood has no base_value');
     if (typeof s.st.items?.[MONEY] !== 'number') bad.push('money is not items[0]');
+    // Every building, recipe and item id the plan uses is found by name in the catalog (resolveIds in snapshot()).
+    if (idMissing.length) bad.push('not in the catalog: ' + idMissing.join(', '));
     return bad;
   }
   // Why Live must not run right now ('' = fine). Dry runs and the offline sim (no DOM) are never blocked.
@@ -376,11 +378,11 @@
       ...techPlan().map((t) => [`P${t.phase} unlock ${bname(s, t.b)}`, techState(t.b)]),
       row('Sawmills', s.owned(B.SAWMILL), sawTarget(s)),
       row('Workshops (Frame Timber)', s.running(B.WORKSHOP, R.FRAME_TIMBER), cfg.workshops),
-      row('Iron Mines', s.running(B.MINE, R.MINE_IRON), cfg.ironMines),
-      row('Coal Mines', s.running(B.MINE, R.MINE_COAL), cfg.coalMines),
+      row('Iron Mines', s.running(B.MINE, R.MINE_IRON), mineTarget(s, R.MINE_IRON)),
+      row('Coal Mines', s.running(B.MINE, R.MINE_COAL), mineTarget(s, R.MINE_COAL)),
       row('Limestone Quarries', s.owned(B.QUARRY), cfg.quarries),
       row('Smelters', s.owned(B.SMELTER), cfg.smelters),
-      row('Gold Mines', s.running(B.MINE, R.MINE_GOLD), cfg.goldMines),
+      row('Gold Mines', s.running(B.MINE, R.MINE_GOLD), goldTarget(s)),
       row('Workshops (Iron Frames)', s.running(B.WORKSHOP, R.RIVET), cfg.ironFrameWorkshops),
       ['Planks / Wooden / Iron Frames', `${Math.floor(s.has(PLANKS))} / ${Math.floor(s.has(WFRAME))} / ${Math.floor(s.has(IFRAME))}`],
       ['Unequipped (no kit)', s.groups.filter((g) => g.count > (g.equipped ?? 0)).map((g) => `${g.name} ${g.count - (g.equipped ?? 0)}`).join(', ') || '—'],
@@ -411,9 +413,11 @@
     return rows;
   }
 
-  // "Before you go offline": keep `hours` of power bills, and say what to check.
+  // "Before you go offline": keep `hours` of power bills, start the longest plan unlock that is ready, and say what to check.
+  // The unlock goes through the loop (all guards, dry run sends nothing) in the next 10 minutes; nothing is sent from here.
   function offline(hours = 8) {
     cfg.billHours = Math.max(1, hours); save();
+    longUnlockUntil = nowMs() + 600000;
     const s = read();
     if (!s) return console.error('[earlyGame] game state not found');
     const need = moneyFloor(s);
@@ -422,7 +426,7 @@
       `\n  • power ${s.powerHave} MW → keep ${usd(need)} for bills (have ${usd(s.money)})${s.money < need ? '  ⚠ NOT ENOUGH: powered groups will pause' : ' ✓'}` +
       '\n  • the script now never spends below that, until the page reloads (earlyGame.cfg.billHours = 1 to undo)' +
       "\n  • auto-ship and selling stop while you're offline; stock piles up (24 h cap on the free plan)" +
-      `\n  • research: ${s.research ? `${bname(s, s.research.building)} running ✓` : nt ? `idle — next is ${bname(s, nt.b)} (start a long unlock before leaving)` : 'idle'}`);
+      `\n  • research: ${s.research ? `${bname(s, s.research.building)} running ✓` : nt ? `idle — ${running ? `Autopilot starts ${bname(s, nt.b)} (the longest ready unlock)` : `next is ${bname(s, nt.b)} (start a long unlock before leaving)`}` : 'idle'}`);
   }
 
 

@@ -2,11 +2,13 @@
 // CORE PLAN DIRECTOR: 5. Engine build-out and Farm conversion
 // ============================================================================
 // Director "buildout" (wiki/guides/core-game-plan.md 4.2-4.5, 4.8, 8.1, 11.2-11.3, 14 R8). One message (or one purchase) per step:
-//   - pool tidy: own Camps / Sawmills / Workshops left in the pool go into their group (never cdFarm's units), named groups get their recipe;
+//   - pool tidy: Camps / Sawmills / Workshops it left in the pool (mem poolMine), or any pooled when no group outside the plan uses the
+//     building, go into their group (never cdFarm's units); groups it made or named after a plan recipe get their recipe;
 //   - Kiln stock gate: unpause / switch the Kiln until Glass and Concrete reach their gates, pause again after;
 //   - Wooden Frame gate: pause Frame Timber at the WF keep line (Rivet use for cfg.ftKeepHours), resume below half (plan D-3);
 //   - Stage B-D: spare Frame Timber Workshops switch to furniture (split from the retail board), keeping 1 on Frame Timber;
-//   - Stage C-D: Farms go in 4 waves 3 h apart (UnassignBuildings + DemolishBuilding), only when the last wave's acres are built and running;
+//   - Stage C-D: Farms go in 4 waves 3 h apart (UnassignBuildings + DemolishBuilding), only when the last wave's acres are built and running
+//     and no group eats Cotton;
 //   - build-out toward core-math landRule: a consumer only when its supplier covers it, each buy gated by acre, kit, wood (R8), bill floor
 //     and the money floor; Stage C-D buys the acre too while the land rule is open, Stage B while (acre + $1,200) / $1,444 <= 20 h (plan D-1).
 //   - Stage B-D: furniture Workshops follow the board: a recipe 1+ Workshops over / under the split for cfg.rebalanceHours moves one (plan D3);
@@ -27,7 +29,7 @@ try {
   const ENGINE = ['Lumber Camp', 'Sawmill', 'Workshop'];
   const HOUR = 3600000;
   const BENCH_FLOOR = 3, BENCH_HOURS = 48;                    // Make Bench on the Rivet x3 floor; Concrete kept for this many hours of Bench use (plan D4)
-  const BLOCK_SHARE = 1200, BLOCK_HOURLY = 1444;               // dollars: a block's buildings per acre, and what an engine acre earns an hour (plan D-1)
+  const BLOCK_SHARE = 1200, BLOCK_HOURLY = 1444;               // dollars: a block's buildings per acre, and what an engine acre earns an hour (plan D-1; blockHourly scales it to the board)
 
   const DEFAULTS = {
     keepFrameTimber: 1,          // Workshops kept on Frame Timber (wiki 4.8 step 1)

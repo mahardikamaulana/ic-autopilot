@@ -18,7 +18,7 @@ try {
   if (!W.corePlan?.addDirector) throw new Error('Core plan did not load');
   const M = W.idleCore?.coreMath;
   if (!M) throw new Error('core-math did not load');
-  const NAME = 'ladder', WALL_CD = 505000;   // Oil Rig 5,000 + Refinery 500,000 (2026-11-24 catalog)
+  const NAME = 'ladder', WALL_CD = 5000 + W.corePlan._refineryCd;   // Oil Rig 5,000 + Refinery 500,000 (2026-11-24 catalog)
   const fmt = (n) => Math.round(n).toLocaleString('en-US');
   const cfgOf = () => W.corePlan.cfg;
   // A Live session = Core plan stepping live without a long gap; a reload starts a new one (new LOAD token).

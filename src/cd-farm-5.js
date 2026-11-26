@@ -25,7 +25,7 @@
     if (running || active) throw new Error('stop the CD Farm run first');
     const applied = [], skipped = [];
     for (const [k, v] of Object.entries(o?.cfg ?? {})) {
-      if (k in cfg && !RUN_ONLY.includes(k) && (k === 'building' ? v === 'auto' || BUILDINGS.some((b) => b.id === v) : typeof v === typeof cfg[k] && !Number.isNaN(v)) && (k !== 'pace' || v in PACE) && (k !== 'land' || v === 'off' || v === 'plan') && (!['batch', 'maxTypes'].includes(k) || v >= 1)) { cfg[k] = v; applied.push(k); } else skipped.push(k);
+      if (k in cfg && !RUN_ONLY.includes(k) && (k === 'building' ? isBuilding(v) : k === 'region' ? v === 'auto' || [0, 1, 2, 3].includes(v) : typeof v === typeof cfg[k] && !Number.isNaN(v)) && (k !== 'pace' || v in PACE) && (k !== 'land' || v === 'off' || v === 'plan') && (!['batch', 'maxTypes'].includes(k) || v >= 1)) { cfg[k] = v; applied.push(k); } else skipped.push(k);
     }
     save(); render();
     return { applied, skipped };
@@ -47,7 +47,8 @@
     get farmPool() { return Object.values(this.farmUnits).reduce((a, n) => a + n, 0); },
     // Unassigned buildings per type that belong to a running or interrupted run (Autopilot leaves them alone).
     get farmUnits() {
-      if (!(running || active || resumable)) return {};
+      // Callers compare this with the Heartland pool: a run in another region holds nothing there.
+      if (!(running || active || resumable) || region() !== 0) return {};
       const p = readPool();
       if (!p) return {};
       const out = {};

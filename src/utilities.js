@@ -9,11 +9,13 @@
 //   autoUtil.cfg                                                 // timings; autoUtil.conf: spare per utility, hold minutes
 //
 // What it follows (the game's own page shows the same numbers, except that bought contracts count their capacity less any shortfall; autoUtil._measure is the pure version, used by the tests):
-//   need = load (running groups' building draw + recipe draw) + power sold on contracts (the promised amount) + what stalled groups wait for
-//          - self-generated (generators, at the day/night rate) - storage that can discharge - bought on contracts
+//   need = load (running groups' building draw + recipe draw) + power sold on contracts (the promised amount) + lines out + what stalled
+//          groups wait for - self-generated (generators, at the day/night rate) - storage that can discharge (at most stored / ticks to
+//          the bill it pays for) - bought on contracts - lines in (transmission lines, power)
 //   The subscription is set to ceil(need) plus the spare you set (default 0), at most 200 MW / 500 kL, one region at a time.
 // Money rules, from how the game bills (power $10 per MW, water $4 per kL, every 10 minutes):
-//   - raising charges the extra level for the current period up front; lowering refunds nothing. So a raise is made at once,
+//   - raising charges the extra level for the current period up front; lowering refunds nothing. So a raise is made at once (one that
+//     only stalled groups need waits out the last 60 ticks before a bill, which would charge it again),
 //     but a lower only when the highest need of the last "hold" minutes (default 10) is below the level, and only in the minute
 //     before a bill, so the level never drops and has to be bought again inside one period. It never lowers the first hold minutes.
 //   - cash must cover the raise now AND the next bill, which is for the higher level (every subscription is billed together): a raise
@@ -38,7 +40,8 @@ try {
   const h = core.h;
 
   // ---- game facts (from the game's own bundle) -----------------------------------------------------------------
-  // rate: cents per unit per 10-minute bill; tile: the label of the tile the switch sits on.
+  // rate: cents per unit per 10-minute bill (power: times core.powerPriceMult() during an 'NPC power xN' event); tile: the label of
+  // the tile the switch sits on. max: the client's own caps (constants in its bundle, not in the game state).
   const UTILS = {
     power: { unit: 'MW', rate: 1000, max: 200, tile: 'Load', noun: 'grid service' },
     water: { unit: 'kL', rate: 400, max: 500, tile: 'Supply', noun: 'waterworks' },
@@ -49,7 +52,7 @@ try {
   const BILL_TICKS = 1200;                                   // a bill every 10 minutes at 2 ticks a second
   const INTANGIBLE = new Set([0, 24, 25, 26, 106, 107, 108, 109, 110, 111]);   // items held in st.items, not in stock
   const MAX_FAILS = 3;
-  const cfg = { cycleMs: 2000, confirmMs: 10000, backoffMs: 5000, lowerWindowTicks: 120 };   // timings; the tests shorten them
+  const cfg = { cycleMs: 2000, confirmMs: 10000, backoffMs: 5000, lowerWindowTicks: 120, raiseHoldTicks: 60 };   // timings; the tests shorten them. raiseHoldTicks: a raise only stalled groups need waits for the bill this close to it
   const conf = { power: { on: false, spare: 0 }, water: { on: false, spare: 0 }, holdMin: 10 };
   const REGION_NAMES = ['Heartland', 'Industrial Basin', 'Coastal Cities', 'Frontier'];
   const regionName = (r) => REGION_NAMES[r] ?? 'Region ' + r;
@@ -77,11 +80,15 @@ try {
   // ---- reading the game ----------------------------------------------------------------------------------------------
   let lastContracts = null;    // contracts are a prop of the page router: unreadable while a Corporation profile is open, so keep the last look
   function read(fresh = false) {
-    const { ws, st, catalog, contracts } = core.walk(fresh);
+    const { ws, st, catalog, contracts, engine } = core.walk(fresh);
     if (!st || !catalog) return null;
     core.seeTick(st.ssi?.last_user_mutation_tick);
     if (Array.isArray(contracts)) lastContracts = contracts;
-    return { st, catalog, contracts: lastContracts, ws, wsOpen: ws?.readyState === 1, tick: core.nowTick(), mutTick: st.ssi?.last_user_mutation_tick ?? 0 };
+    const tick = core.nowTick();
+    // Transmission lines: the client asks its engine for the flows (lineFlows, a BigInt tick) only when the state has lines.
+    let flows = [];
+    try { if ((st.lines ?? []).length && tick > 0 && typeof engine?.lineFlows === 'function') flows = JSON.parse(engine.lineFlows(BigInt(tick))) ?? []; } catch { flows = []; }
+    return { st, catalog, contracts: lastContracts, flows, ws, wsOpen: ws?.readyState === 1, tick, mutTick: st.ssi?.last_user_mutation_tick ?? 0, priceMult: core.powerPriceMult?.() ?? 1 };
   }
 
   const ixRef = new WeakMap();
@@ -95,7 +102,8 @@ try {
   // ---- what is needed (pure: no I/O) -----------------------------------------------------------------------------------
   // The page's numbers for one utility in one region. Returns what the groups draw, what is generated, stored or bought, what
   // stalled groups wait for, and need: the subscription that covers all of it (can be negative: the Corporation has a surplus).
-  function measure(util, region, st, catalog, tick, contracts) {
+  // flows: the engine's line flows [{ from, to, sent, delivered }] (power only): Lines in add supply, Lines out count as load, as on the page.
+  function measure(util, region, st, catalog, tick, contracts, flows = []) {
     const R = String(region), ix = idx(catalog);
     const have = st.subscriptions?.[R]?.[util] ?? 0;
     const groups = Object.values(st.groups ?? {}).filter((g) => (g.region ?? 0) === region);
@@ -115,7 +123,13 @@ try {
     const owned = (id) => (st.building_pool?.[R]?.[id] ?? 0) + groups.filter((g) => g.building === id).reduce((a, g) => a + g.count, 0);
     let dischargeCap = 0;
     for (const b of catalog.buildings ?? []) { const s = b.storage?.[util]; if (s) dischargeCap += (s.discharge_limit ?? 0) * owned(b.id); }
-    const discharge = Math.min(dischargeCap, st.stored?.[R]?.[util] ?? 0);
+    // Stored is in MW-ticks (7,200 = 1 MWh): count only the rate it can keep up until the next bill, so a Battery Bank that would run
+    // dry mid-period does not cut the subscription. Right after a bill that is stored / 1,200, and the hold window keeps that sample.
+    const stored = st.stored?.[R]?.[util] ?? 0, toBill = tick > 0 ? BILL_TICKS - (tick % BILL_TICKS) : 0;
+    const discharge = Math.min(dischargeCap, stored, toBill ? stored / toBill : stored);
+    const lines = util === 'power' && Array.isArray(flows) ? flows : [];
+    const lineIn = lines.filter((f) => f.to === region).reduce((a, f) => a + (Number(f.delivered) || 0), 0);
+    const lineOut = lines.filter((f) => f.from === region && f.delivered > 0).reduce((a, f) => a + (Number(f.sent) || 0), 0);
     const corp = st.ssi?.corp_id;
     const deal = (who, field) => (contracts ?? []).filter((c) => c.utility === util && c.region === region && c.state === 'Active' && c[who] === corp).reduce((a, c) => a + (c[field] ?? 0), 0);
     // A bought contract counts its whole capacity, less the part of what the buyer draws (up to the contract) that the seller is not
@@ -125,7 +139,7 @@ try {
     const imported = bought.reduce((a, c) => a + (c.amount ?? 0) - short(c), 0), sold = deal('seller', 'amount');
     // A group that could start but whose draw is more than the free capacity is stalled; it starts once that much more is free.
     // A group with no machines yet (equipped 0) cannot start whatever the power: the game calls it "unequipped", not stalled.
-    const free = Math.max(0, have + gen + discharge + imported - load - sold);
+    const free = Math.max(0, have + gen + discharge + imported + lineIn - load - sold - lineOut);
     let waiting = 0;
     for (const g of groups) {
       if (g.paused || g.equipped === 0 || (g.work ?? []).length) continue;
@@ -135,7 +149,7 @@ try {
       if (!rc || !(rc.inputs ?? []).every((i) => stockOf(i.item) >= i.amount)) continue;
       waiting += draw;
     }
-    return { util, region, have, load, sold, gen, discharge, imported, waiting, need: load + sold + waiting - gen - discharge - imported };
+    return { util, region, have, load, sold, gen, discharge, imported, lineIn, lineOut, waiting, need: load + sold + lineOut + waiting - gen - discharge - imported - lineIn };
   }
 
   // The level that covers a measurement: ceil(need) plus the spare (only when something needs it), over the cap flagged.
@@ -146,16 +160,21 @@ try {
   }
 
   // What the game bills at the next bill, all subscriptions together (cents).
-  function billsOf(st) {
+  // mult: the NPC power price multiplier (never below 1 here, so a misread can only make it more careful).
+  function billsOf(st, mult = 1) {
     let t = (st.isp ?? 0) * RATES.bandwidth;
-    for (const o of Object.values(st.subscriptions ?? {})) for (const [k, l] of Object.entries(o ?? {})) t += (l ?? 0) * (RATES[k] ?? 0);
+    for (const o of Object.values(st.subscriptions ?? {})) for (const [k, l] of Object.entries(o ?? {})) t += (l ?? 0) * (RATES[k] ?? 0) * (k === 'power' ? Math.max(1, mult) : 1);
     return t;
   }
 
   // What to do about one level. peak: the highest want over the hold window; observedMs: how long it has been watched;
   // ticksToBill: ticks until the next bill (null: unknown); bills: what that bill is now. Returns { kind: 'ok' | 'raise' | 'lower' | 'hold' | 'broke', ... }.
-  function decide({ util, have, want, peak, observedMs, holdMs, money, bills = 0, ticksToBill, canLower = true, lowerWindowTicks = cfg.lowerWindowTicks }) {
-    const rate = UTILS[util].rate;
+  // urgent: the want without what stalled groups wait for (null: all of it is urgent). mult: the NPC power price multiplier.
+  function decide({ util, have, want, peak, observedMs, holdMs, money, bills = 0, ticksToBill, canLower = true, lowerWindowTicks = cfg.lowerWindowTicks, urgent = null, mult = 1, raiseHoldTicks = cfg.raiseHoldTicks }) {
+    const rate = UTILS[util].rate * (util === 'power' ? Math.max(1, mult) : 1);
+    // A raise is charged up front for the period and the bill charges the level again: one only stalled groups need waits out the
+    // last raiseHoldTicks before the bill instead of paying twice for a few seconds.
+    if (want > have && urgent != null && urgent <= have && ticksToBill != null && ticksToBill < raiseHoldTicks) return { kind: 'hold', why: 'raising for stalled groups after the bill' };
     if (want > have) {
       // Each extra unit costs its rate now and again in the next bill: cash left after the bill as it is must pay both.
       const afford = have + Math.floor(Math.max(0, money - bills) / (2 * rate));
@@ -227,15 +246,17 @@ try {
     const key = util + ':' + region, u = UTILS[util];
     let c = ctl.get(key);
     if (!c) ctl.set(key, c = { samples: [], first: now, fails: 0, retryAt: 0 });
-    const m = measure(util, region, r.st, r.catalog, r.tick, r.contracts);
+    const m = measure(util, region, r.st, r.catalog, r.tick, r.contracts, r.flows);
     const { want, over } = wantOf(m, conf[util].spare);
+    const urgent = wantOf({ ...m, need: m.need - m.waiting }, conf[util].spare).want;
+    const mult = util === 'power' ? Math.max(1, r.priceMult ?? 1) : 1;
     const holdMs = conf.holdMin * 60000;
     c.samples.push({ t: now, want });
     while (c.samples.length > 1 && c.samples[0].t < now - holdMs) c.samples.shift();
     const peak = Math.max(...c.samples.map((s) => s.want));
-    const money = r.st.items?.[0] ?? 0, bills = billsOf(r.st);
+    const money = r.st.items?.[0] ?? 0, bills = billsOf(r.st, r.priceMult ?? 1);
     const ticksToBill = r.tick > 0 ? BILL_TICKS - (r.tick % BILL_TICKS) : null;
-    const d = decide({ util, have: m.have, want, peak, observedMs: now - c.first, holdMs, money, bills, ticksToBill, canLower: Array.isArray(r.contracts) });
+    const d = decide({ util, have: m.have, want, peak, observedMs: now - c.first, holdMs, money, bills, ticksToBill, canLower: Array.isArray(r.contracts), urgent, mult });
     const where = regionName(region);
     const row = { region, util, have: m.have, need: m.need, want, kind: d.kind };
     if (d.kind === 'raise' || d.kind === 'lower') {
@@ -262,7 +283,7 @@ try {
     }
     c.fails = 0; c.retryAt = 0;                                   // nothing to send: earlier failures are not "in a row" any more
     const lowNote = m.need < 0 ? ' (surplus ' + Math.round(-m.need) + ')' : '';
-    if (d.kind === 'broke') return { ...row, text: 'Needs ' + want + ' ' + unit(util) + ' but cash cannot cover the upfront ' + usd((want - m.have) * u.rate) + ' and the next bill', tone: 'warn' };
+    if (d.kind === 'broke') return { ...row, text: 'Needs ' + want + ' ' + unit(util) + ' but cash cannot cover the upfront ' + usd((want - m.have) * u.rate * mult) + ' and the next bill' + (mult > 1 ? ' (NPC power x' + mult + ')' : ''), tone: 'warn' };
     if (over) return { ...row, text: 'Needs ' + Math.ceil(over) + ' ' + unit(util) + ', the cap is ' + u.max, tone: 'warn' };
     if (d.kind === 'hold') return { ...row, text: 'Holding ' + m.have + ' ' + unit(util) + ': ' + d.why, tone: 'muted' };
     return { ...row, text: 'Following the load: ' + m.have + ' ' + unit(util) + ' for ' + Math.max(0, Math.ceil(m.need)) + ' needed' + lowNote, tone: 'muted' };

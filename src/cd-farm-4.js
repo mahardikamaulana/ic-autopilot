@@ -75,7 +75,7 @@
   }
 
   // Floor the run would use if started now.
-  const plannedFloor = (r) => (cfg.budget === 'income' ? Math.max(cfg.minMoney, r.money) : cfg.minMoney);
+  const plannedFloor = (r) => r.moneyFloor;   // read() gives the floor a run started now would use
   const netPerCd = (r) => (campCost(r.ownedCamps, cfg.batch) - cfg.batch * unitRefund()) / cfg.batch;
 
 
@@ -99,12 +99,13 @@
       out.push({ field: 'minMoney', level: 'error', text: `Only $${fmt(Math.max(0, room))} above the floor, and a batch costs $${fmt(batchCost)}. Spend down would stop right away.` });
     } else if (cfg.budget === 'floor' && room < batchCost) {
       out.push({ field: 'minMoney', level: 'warn', text: `It will wait until you earn $${fmt(batchCost - room)} more before the first batch.` });
-    } else if (cfg.budget === 'income' && cfg.minMoney > r.money) {
-      out.push({ field: 'minMoney', level: 'warn', text: `Money is below this floor; it will wait until money passes $${fmt(cfg.minMoney)}.` });
+    } else if (cfg.budget === 'income' && floor > r.money) {
+      out.push({ field: 'minMoney', level: 'warn', text: `Money is below this floor; it will wait until money passes $${fmt(floor)}.` });
     }
-    if (cfg.budget !== 'income' && cfg.minMoney < r.money * 0.1) {
-      out.push({ field: 'minMoney', level: 'warn', text: `Low floor: up to $${fmt(r.money - cfg.minMoney)} of your $${fmt(r.money)} can be spent.` });
+    if (cfg.budget !== 'income' && floor < r.money * 0.1) {
+      out.push({ field: 'minMoney', level: 'warn', text: `Low floor: up to $${fmt(r.money - floor)} of your $${fmt(r.money)} can be spent.` });
     }
+    if (floor < cfg.minMoney) out.push({ field: 'minMoney', level: 'warn', text: `The default floor is capped at half your cash: $${fmt(floor)}. Set a floor to use your own.` });
     return out;
   }
 
@@ -124,14 +125,14 @@
     return parts.join(' ');
   }
 
-  const bldLabel = (id) => (id === 'auto' ? 'Auto' : BUILDINGS.find((b) => b.id === id)?.name ?? '');
+  const REGIONS = [{ id: 'auto', label: 'Auto' }, { id: 0, label: 'Heartland' }, { id: 1, label: 'Industrial Basin' }, { id: 2, label: 'Coastal Cities' }, { id: 3, label: 'Frontier' }];
   function autoRows() {
     const ev = lastEval, c = ev?.c, m = core.measure.snapshot();
     const rows = [['Mode', `Auto · ${cap(cfg.pace)}${cfg.autoStart ? '' : ' · off'}`]];
     rows.push(['Why', cap(running ? phase : (idleNote || (ev?.idle ? ev.reason : '') || stopReason || 'idle'))]);
-    if (ev?.need != null && c) rows.push(['Need', `${fmt(c.cd)} of ${fmt(ev.need)} CD${ev.ap?.nextTech ? ' (' + ev.ap.nextTech.name + ')' : ''}`]);
+    if (ev?.need != null && c) rows.push(['Need', `${fmt(c.cd)} of ${fmt(ev.need)} CD${ev.next ? ' (' + ev.next.name + ')' : ''}`]);
     if (ev?.plan?.units?.length) rows.push(['Next cycle', `${unitsText(ev.plan.units)} · ${fmt(ev.plan.cdTotal)} CD · $${fmt(ev.plan.netCents / 100)} net`]);
-    if (c) rows.push(['Free acres', `${c.freeAcres} of ${c.acresOwned} (${cfg.reserveAcres} spare)`]);
+    if (c) rows.push(['Free acres', `${c.freeAcres} of ${c.acresOwned} (${cfg.reserveAcres} spare)${c.region ? ' · ' + REGIONS[c.region + 1].label : ''}`]);
     if (ev?.floorC != null) rows.push(['Floor', `$${fmt(ev.floorC / 100)}`]);
     rows.push(['Cycles', `${fmt(stats.cycles)}${stats.built ? ` · +${fmt(stats.built)} CD` : ''}`], ['Net cost', stats.built ? `$${perCd()} / CD` : '—']);
     const rtt = m.rtt;
@@ -177,7 +178,9 @@
 
     // ---- Settings tab
     refs.budget = K.segField('Budget', MODES, { get: () => cfg.budget, set: (id) => setCfg('budget', id), def: DEFAULTS.budget, describe: (v) => MODES.find((m) => m.id === v)?.desc || '' });
-    refs.building = K.segField('Building', [{ id: 'auto', label: 'Auto' }, ...BUILDINGS.map((b) => ({ id: b.id, label: b.name }))], { get: () => cfg.building, set: (id) => setCfg('building', id), def: DEFAULTS.building });
+    refs.building = K.segField('Building', [{ id: 'auto', label: 'Auto' }, { id: 'cheapest', label: 'Cheaper' }, ...BUILDINGS.map((b) => ({ id: b.id, label: b.name }))], { get: () => cfg.building, set: (id) => setCfg('building', id), def: DEFAULTS.building });
+    refs.region = K.segField('Region', REGIONS, { get: () => cfg.region, set: (id) => setCfg('region', id), def: DEFAULTS.region, describe: (v) => (v === 'auto' ? 'The region you hold with the most free acres; Heartland on a tie. Auto buys land only in Heartland.' : '') });
+    refs.solo = K.toggleField('Run without Autopilot', 'With Autopilot and Core plan off and no Target CD, farms CD for the cheapest tech you can research next.', { get: () => cfg.solo, set: (v) => { cfg.solo = v; save(); render(); }, def: DEFAULTS.solo });
     refs.pace = K.segField('Pace', [{ id: 'thrifty', label: 'Thrifty' }, { id: 'balanced', label: 'Balanced' }, { id: 'fast', label: 'Fast' }], { get: () => cfg.pace, set: (id) => setCfg('pace', id), def: DEFAULTS.pace, describe: (v) => PACE_DESC[v] || '' });
     refs.land = K.segField('Buy land', [{ id: 'off', label: 'Off' }, { id: 'plan', label: 'Within the plan' }], { get: () => (cfg.land === 'off' ? 'off' : 'plan'), set: (id) => setCfg('land', id), def: DEFAULTS.land, describe: (v) => (v === 'off' ? LAND_OFF : LAND_PLAN) });
     refs.floorPicks = K.quickPicks((v) => setCfg('minMoney', v));
@@ -192,13 +195,13 @@
     refs.auto = K.toggleField('Resume after reload', 'Continues an interrupted run when the page loads again.', { get: () => cfg.autoResume, set: (v) => { cfg.autoResume = v; save(); render(); }, def: DEFAULTS.autoResume });
     refs.full = K.toggleField('Full batches only', '', { get: () => cfg.fullBatch, set: (v) => setCfg('fullBatch', v), def: DEFAULTS.fullBatch });
     refs.landMsg = h('div', { class: 'idc-msg', hidden: true });
-    refs.grpAuto = K.group('Auto', refs.autoOn.el, refs.pace.el, refs.land.el, refs.autoFloor.el);
+    refs.grpAuto = K.group('Auto', refs.autoOn.el, refs.solo.el, refs.pace.el, refs.land.el, refs.autoFloor.el);
     refs.grpBudget = K.group('Budget', refs.budget.el, refs.minMoney.el);
     refs.grpBatches = K.group('Batches', refs.full.el, refs.landMsg);
     const settings = K.settingsTab({
       lockText: 'Stop the farm to change settings.',
       groups: [K.group('Building', refs.building.el), refs.grpAuto, refs.grpBudget, K.group('Goal', refs.targetCd.el), refs.grpBatches],
-      advanced: K.disclosure('Advanced', [K.group(null, h('div', { class: 'idc-two' }, refs.batch.el, refs.reserveAcres.el), refs.maxSpendPerMin.el, refs.auto.el)],
+      advanced: K.disclosure('Advanced', [K.group(null, refs.region.el, h('div', { class: 'idc-two' }, refs.batch.el, refs.reserveAcres.el), refs.maxSpendPerMin.el, refs.auto.el)],
         { open: !!ui.advOpen, onToggle: (o) => { ui.advOpen = o; saveUi(); } }),
       backup: { onExport: () => core.exportFile(), onImport: () => core.importFile(), onReset: () => K.resetSettings('CD Farm', { snapshot: exportCfg, reset: resetCfg, restore: importCfg }) },
     });
@@ -234,7 +237,7 @@
     let changed = 0;
     const count = (m) => { if (m) changed++; };
     count(refs.building.sync(bldText)); count(refs.budget.sync()); count(refs.pace.sync()); count(refs.land.sync());
-    count(refs.full.sync()); count(refs.auto.sync()); count(refs.autoOn.sync());
+    count(refs.full.sync()); count(refs.auto.sync()); count(refs.autoOn.sync()); count(refs.solo.sync()); count(refs.region.sync());
     refs.floorPicks.sync(FLOOR_ITEMS, cfg.minMoney);
     if (r) refs.targetPicks.sync(targetItems(r), cfg.targetCd);
     const issues = r && !busy && !auto ? checkPlan(r) : [];
