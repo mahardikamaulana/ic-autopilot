@@ -78,7 +78,8 @@ try {
     const out = {};
     if (rows && typeof rows === 'object') for (const id of Object.keys(rows)) {
       const n = v.C.items[id]?.name;
-      if (!n) continue;
+      // engine items (Planks, frames: Core plan never sells them) are not shelf goods even when the board lists them
+      if (!n || (W.corePlan.ENGINE_ITEMS.includes(n) && !RECIPE[n])) continue;
       const rs = Object.values(v.C.recipes).filter((r) => r.outputs?.[0]?.item === +id && v.unlocked(v.bld(r.building).name));
       const r = rs.find((x) => x.name === RECIPE[n]) ?? rs[0];
       if (r) out[n] = r.name;

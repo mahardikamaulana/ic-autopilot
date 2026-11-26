@@ -995,6 +995,13 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       assert.match(d(asJob(), asBase({ reserved: { [COTTON]: 5000 } })).why, /above 5,000 \(reserved\)/);
       assert.strictEqual(d(asJob({ keep: 4900 }), asBase({ reserved: { [COTTON]: 4800 } })).n, 100, 'the higher of the two');
       assert.strictEqual(d(asJob(), asBase({ reserved: { [COTTON]: Infinity } })).kind, 'wait', 'an item reserved whole is never sold');
+      // Reserves are Heartland stock: a bid in another region ships that region's stock past them.
+      const ib = asBase({ st: { stock: { 1: { [COTTON]: 5000 } }, courier_ready_at: 0, standing_fills: {} }, deals: [bid(1, COTTON, 100000, 150, { region: 1 })], reserved: { [COTTON]: 5000 } });
+      assert.strictEqual(d(asJob({ region: 1 }), ib).n, cottonLoad, 'region 1: the Heartland reserve does not hold it back');
+      // Send order: runs within 10% of the best go least recently served first; a run far below waits its turn.
+      const j = (id, last) => ({ deal: id, last });
+      assert.deepStrictEqual(as._order([[j(1, 50), 100], [j(2, 10), 95], [j(3, 0), 50]]).map((x) => x.deal), [2, 1, 3], 'within the band: least recently served');
+      assert.deepStrictEqual(as._order([[j(1, 50), 100], [j(2, 10), 80], [j(3, 0), 50]]).map((x) => x.deal), [1, 2, 3], 'outside the band: by run value');
     } finally { as._unload(); globalThis.autoSell = undefined; globalThis.idleCore._unload(); globalThis.idleCore = undefined; }
   });
 

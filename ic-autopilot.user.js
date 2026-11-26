@@ -3561,7 +3561,7 @@ try {
       if (g.recipe == null || !(g.count > 0) || g.paused) continue;
       const rc = ix.recipes.get(g.recipe);
       for (const o of rc?.outputs ?? []) {
-        if (ix.products.has(o.item)) out.set(o.item, (out.get(o.item) ?? 0) + ix.products.get(o.item).base_value * o.amount * g.count / Math.max(1, rc.ticks || 1));
+        if (ix.products.has(o.item)) out.set(o.item, (out.get(o.item) ?? 0) + (ix.products.get(o.item).base_value || 0) * (o.amount || 0) * g.count / Math.max(1, rc.ticks || 1));
       }
     }
     return out;
@@ -3593,7 +3593,7 @@ try {
     }
     // The most output value the corp makes per project hour; each project already started on a product divides its score
     // (1 / (1 + started)), so the pick still rotates instead of studying one product forever.
-    const score = (id) => made.get(id) / projectHours(ix, id) / (1 + (counts[id] ?? 0));
+    const score = (id) => (made.get(id) || 0) / projectHours(ix, id) / (1 + (counts[id] ?? 0));
     pool.sort((a, b) => score(b) - score(a) || a - b);
     return { product: pool[0], focus, tier: 'default' };
   }
@@ -4403,7 +4403,8 @@ try {
     const load = loadOf(it, r.st);
     const stock = r.st.stock?.[deal.region]?.[deal.item] ?? 0;
     // r.reserved: core.reserves.merged().items (cycle() reads it): what Autopilot / Core plan keep of each item is never sold.
-    const keep = Math.max(job.keep, Number(r.reserved?.[deal.item]) || 0);
+    // Those reserves are Heartland stock: a bid in another region ships that region's stock and keeps only job.keep.
+    const keep = Math.max(job.keep, deal.region === 0 ? Number(r.reserved?.[deal.item]) || 0 : 0);
     const spare = Math.floor(stock - keep);
     const want = Math.min(load, job.left ?? Infinity, deal.amount);
     const n = Math.min(want, spare);
@@ -4476,17 +4477,23 @@ try {
     return true;
   }
 
+  // [[job, runValue]] -> jobs in send order: runs within 10% of the best first, least recently served (job.last) first among them.
+  function jobOrder(runs) {
+    const top = Math.max(0, ...runs.map(([, v]) => v)), band = (v) => top > 0 && v >= top * 0.9;
+    return runs.sort((a, z) => band(z[1]) - band(a[1]) || (band(a[1]) ? a[0].last - z[0].last : z[1] - a[1]) || a[0].last - z[0].last).map(([j]) => j);
+  }
   async function cycle() {
     const r = read();
     if (!r) { for (const j of jobs.values()) { j.status = 'Waiting for the game'; j.tone = 'muted'; } return; }
     r.now = Date.now();
     r.reserved = core.reserves?.merged?.()?.items ?? {};
-    // The run worth most goes first (unit price x what one run carries); equal runs: least recently served, so they share the courier.
+    // The run worth most goes first (unit price x what one run carries); runs within 10% of the best: least recently served first,
+    // so a job that can always ship does not starve the others.
     const runOf = (j) => {
       const d = Array.isArray(r.deals) ? r.deals.find((x) => x.id === j.deal) : null;
       return d?.side === 'Sell' && d.amount > 0 ? runValue(d, j, r) : 0;
     };
-    const order = [...jobs.values()].map((j) => [j, runOf(j)]).sort((a, z) => z[1] - a[1] || a[0].last - z[0].last).map(([j]) => j);
+    const order = jobOrder([...jobs.values()].map((j) => [j, runOf(j)]));
     let sent = false;
     for (const job of order) {
       if (unloaded || !jobs.has(job.deal)) continue;
@@ -4776,7 +4783,7 @@ try {
   W.autoSell = {
     start, stop, jobs: listJobs, status, items, open: openMenu, cfg,
     get running() { return jobs.size > 0; },
-    _decide: decide, _unitCost: unitCost,
+    _decide: decide, _unitCost: unitCost, _order: jobOrder,
     _unload() { unloaded = true; jobs.clear(); wake?.(); if (mounted) unmountUi(); },
   };
 
@@ -5354,7 +5361,9 @@ try {
     const s4 = cond('S4', lab >= 1 && kiln >= 1 && mine >= 1 && quarry >= 1, lab >= 1 && kiln >= 1 && mine >= 1 && quarry >= 1 ? 'built' : 'missing: ' + [['Manufacturing Lab', lab], ['Kiln', kiln], ['Mine', mine], ['Quarry', quarry]].filter(([, n]) => n < 1).map(([n]) => n).join(', '));
     const s1 = cond('S1', ctx.planDone === true || (s2.ok && s3.ok && s4.ok), ctx.planDone === true ? 'Autopilot: Plan done' : (s2.ok && s3.ok && s4.ok) ? 'S2-S4 hold' : 'Autopilot has not finished the Early-Game Plan, and S2-S4 do not all hold');
     // Autopilot's Plan done stands for S2-S4: a corp that finished the early plan its own way still starts Stage A.
-    if (ctx.planDone === true) for (const c of [s2, s3, s4]) if (!c.ok) { c.ok = true; c.why = 'Autopilot: Plan done (' + c.why + ')'; }
+    // Plan done implies a running Rivet group (Core plan never builds one); without it S3 still fails, or the prototype's Iron Frames never come.
+    const rivet = v.running('Workshop', 'Rivet Iron Frame');
+    if (ctx.planDone === true) for (const c of [s2, s3, s4]) if (!c.ok && (c !== s3 || rivet)) { c.ok = true; c.why = 'Autopilot: Plan done (' + c.why + ')'; }
     const s5 = cond('S5', !v.unlocked('Assembly Plant'), v.unlocked('Assembly Plant') ? 'Assembly Plant is already unlocked (join at stage B or later)' : 'not unlocked yet');
     const c10 = ctx.cashDelta10;
     const s6 = cond('S6', c10 == null ? null : c10 > 0, c10 == null ? 'not enough cash samples yet (needs 10 min)' : 'money ' + (c10 > 0 ? 'rose ' : 'fell ') + usd(Math.abs(c10)) + ' over 10 min');
@@ -5367,7 +5376,8 @@ try {
     if (v.unlocked('Assembly Plant')) return 'C';
     const ap = v.idB('Assembly Plant');
     if (ap != null && (v.research?.building === ap || (v.st.research_queue ?? []).some((q) => q?.building === ap))) return 'B';
-    const ok = S.filter((c) => c.id !== 'S5').every((c) => c.ok !== false);
+    // S6 unknown (too few cash samples) does not block; S7 unknown (Market never opened) does: a Cotton bid must be seen.
+    const ok = S.filter((c) => c.id !== 'S5').every((c) => (c.id === 'S7' ? c.ok === true : c.ok !== false));
     return ok && S[0].ok ? 'A' : null;
   }
   function landInput(v, ctx) {
@@ -6711,7 +6721,8 @@ try {
     const out = {};
     if (rows && typeof rows === 'object') for (const id of Object.keys(rows)) {
       const n = v.C.items[id]?.name;
-      if (!n) continue;
+      // engine items (Planks, frames: Core plan never sells them) are not shelf goods even when the board lists them
+      if (!n || (W.corePlan.ENGINE_ITEMS.includes(n) && !RECIPE[n])) continue;
       const rs = Object.values(v.C.recipes).filter((r) => r.outputs?.[0]?.item === +id && v.unlocked(v.bld(r.building).name));
       const r = rs.find((x) => x.name === RECIPE[n]) ?? rs[0];
       if (r) out[n] = r.name;
@@ -8830,11 +8841,14 @@ try {
   // ---- prices -----------------------------------------------------------------
 
   const buildCost = (s, b) => Math.round(s.bld(b).cost * (20 + s.ownedAll(b)) / 20);
-  // Cents per minute one more building on recipe r earns at the current floor rate: outputs at the best Heartland bid (or base
-  // value while the corp eats the item itself), less its inputs at the same values. 0 = not known (no bid, nothing eats it).
-  function unitValue(s, item) {
-    let v = 0;
-    for (const d of s.deals ?? []) if (d.side === 'Sell' && d.item === item) v = Math.max(v, d.price / d.amount);
+  // Cents per minute one more building on recipe r earns at the current floor rate: outputs at the Heartland bid that still takes
+  // the stock plus 1 h of this building's output (bid depth: one small high bid does not count), or base value while
+  // the corp eats the item itself; less its inputs at the best bid. 0 = not known (no bid deep enough, nothing eats it).
+  function unitValue(s, item, depth = 0) {
+    // same walk as planner.itemValues (not loaded in every harness): best bids first, the price of the lot the depth lands in
+    const lots = (s.deals ?? []).filter((d) => d.side === 'Sell' && d.item === item).sort((x, y) => y.price / y.amount - x.price / x.amount);
+    let v = 0, left = Math.max(0, depth);
+    for (const d of lots) { if (left < d.amount) { v = d.price / d.amount; break; } left -= d.amount; }
     return Math.max(v, s.eatPerMin[item] > 0 ? s.catalog.items[item]?.base_value ?? 0 : 0);
   }
   function incomePerMin(s, r) {
@@ -8842,7 +8856,7 @@ try {
     if (!rc) return 0;
     const runs = (s.st.layouts?.[r]?.fx?.rate ?? 1) * 120 / rc.ticks;
     let v = 0;
-    for (const o of rc.outputs) v += o.amount * unitValue(s, o.item);
+    for (const o of rc.outputs) v += o.amount * unitValue(s, o.item, s.has(o.item) + o.amount * runs * 60);
     for (const i of rc.inputs) v -= i.amount * unitValue(s, i.item);
     return Math.max(0, v * runs);
   }
@@ -9168,10 +9182,12 @@ try {
   }
 
   // Plan done (the hand-off to Core plan): every plan unlock is in and the core buildings exist, whatever route the corp took.
-  // Frame Timber / Iron Frame running and 16 Iron Frames stay plan targets, not hand-off conditions.
-  const CORE_BUILDINGS = () => [B.SAWMILL, B.WORKSHOP, B.MINE, B.QUARRY, B.KILN, B.LAB];
+  // A running Rivet group is required: Core plan never builds the Smelter/Rivet chain, and the Assembly Plant prototype needs Iron Frames.
+  // Frame Timber running and 16 Iron Frames stay plan targets, not hand-off conditions.
+  const CORE_BUILDINGS = () => [B.SAWMILL, B.WORKSHOP, B.MINE, B.QUARRY, B.KILN, B.LAB, B.SMELTER];
   function planDone(s) {
-    return techPlan().every((t) => t.optional || s.unlocked(t.b)) && CORE_BUILDINGS().every((b) => s.owned(b) >= 1);
+    return techPlan().every((t) => t.optional || s.unlocked(t.b)) && CORE_BUILDINGS().every((b) => s.owned(b) >= 1)
+      && s.running(B.WORKSHOP, R.RIVET) >= 1;
   }
 
   function phaseOf(s) {
@@ -9440,8 +9456,8 @@ try {
         { msg: { type: 'SetRecipe', group: g.id, recipe: r }, until: (x) => x.st.groups[g.id]?.recipe === r });
     }
 
-    // 5. Kit / prototype parts the corp can't make yet.
-    if (cfg.buyKits) {
+    // 5. Kit / prototype parts the corp can't make yet (not after the hand-off: Autopilot stops buying then).
+    if (cfg.buyKits && !owns) {
       for (const p of partsToBuy(s)) {
         yield* withdrawActions(s, p.item, p.want, 'parts for kits/prototype');
         if (p.need > 0) yield* buyActions(s, p.item, p.need, 'parts for kits/prototype');
@@ -9473,8 +9489,8 @@ try {
       }
     }
 
-    // 6b. Better floorplans.
-    yield* floorActions(s);
+    // 6b. Better floorplans (they buy parts; not after the hand-off).
+    if (!owns) yield* floorActions(s);
 
     // 7. Selling.
     yield* sellActions(s);
@@ -9544,7 +9560,7 @@ try {
     const opts = {
       targetCd: tech.cost, budget: 'reserve', minMoney: Math.ceil(keep / 100), batch: cfg.boosterBatch,
       reserveAcres: 0, fullBatch: false, existingPool: 'keep', maxSpendPerMin: Infinity,
-      building: B.CAMP, runOnly: true, by: `Autopilot: CD for ${bname(s, nt.b)}`,
+      building: B.CAMP, region: REGION, runOnly: true, by: `Autopilot: CD for ${bname(s, nt.b)}`,
     };
     const a = act('booster:cdfarm', `CD booster via CD Farm: farm ${tech.cost - s.cd} CD for ${bname(s, nt.b)} (keeps ${usd(keep)})`);
     a.call = () => { fi.f.start(opts); return !!W.cdFarm?.running; };

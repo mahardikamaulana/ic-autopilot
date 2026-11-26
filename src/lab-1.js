@@ -185,7 +185,7 @@ try {
       if (g.recipe == null || !(g.count > 0) || g.paused) continue;
       const rc = ix.recipes.get(g.recipe);
       for (const o of rc?.outputs ?? []) {
-        if (ix.products.has(o.item)) out.set(o.item, (out.get(o.item) ?? 0) + ix.products.get(o.item).base_value * o.amount * g.count / Math.max(1, rc.ticks || 1));
+        if (ix.products.has(o.item)) out.set(o.item, (out.get(o.item) ?? 0) + (ix.products.get(o.item).base_value || 0) * (o.amount || 0) * g.count / Math.max(1, rc.ticks || 1));
       }
     }
     return out;
@@ -217,7 +217,7 @@ try {
     }
     // The most output value the corp makes per project hour; each project already started on a product divides its score
     // (1 / (1 + started)), so the pick still rotates instead of studying one product forever.
-    const score = (id) => made.get(id) / projectHours(ix, id) / (1 + (counts[id] ?? 0));
+    const score = (id) => (made.get(id) || 0) / projectHours(ix, id) / (1 + (counts[id] ?? 0));
     pool.sort((a, b) => score(b) - score(a) || a - b);
     return { product: pool[0], focus, tier: 'default' };
   }

@@ -32,10 +32,19 @@ const snap = (st, d = deals, o = []) => k.snapshot(st, C, d, o, 1);
 let n = 0, failed = 0;
 const t = (name, fn) => { n++; try { fn(); console.log('ok  ' + name); } catch (e) { failed++; console.log('FAIL ' + name + '\n  ' + e.message); } };
 
-t('hand-off: plan unlocks in + core buildings exist → done, without Frame Timber, Rivet or 16 Iron Frames', () => {
+t('hand-off: plan unlocks in + core buildings + a running Rivet group → done, without Frame Timber or 16 Iron Frames', () => {
   const st = base();
   st.unlocked_buildings = ['Sawmill', 'Workshop', 'Mine', 'Quarry', 'Smelter', 'Factory', 'Kiln', 'Paper Mill', 'Manufacturing Lab'].map(B);
-  st.building_pool[0] = { [B('Sawmill')]: 1, [B('Workshop')]: 1, [B('Mine')]: 1, [B('Quarry')]: 1, [B('Kiln')]: 1, [B('Manufacturing Lab')]: 1 };
+  st.building_pool[0] = { [B('Sawmill')]: 1, [B('Mine')]: 1, [B('Quarry')]: 1, [B('Kiln')]: 1, [B('Manufacturing Lab')]: 1, [B('Smelter')]: 1 };
+  st.groups = { 7: { building: B('Workshop'), count: 1, equipped: 1, recipe: R('Rivet Iron Frame'), region: 0, name: 'rivet' } };
+  assert.strictEqual(k.phaseOf(snap(st)), 'done');
+  // Core plan never builds the Smelter / Rivet chain and the Assembly Plant prototype needs Iron Frames: no hand-off without them
+  st.groups[7].recipe = R('Frame Timber');
+  assert.notStrictEqual(k.phaseOf(snap(st)), 'done', 'no Rivet group: not done');
+  st.groups[7].recipe = R('Rivet Iron Frame');
+  delete st.building_pool[0][B('Smelter')];
+  assert.notStrictEqual(k.phaseOf(snap(st)), 'done', 'no Smelter: not done');
+  st.building_pool[0][B('Smelter')] = 1;
   assert.strictEqual(k.phaseOf(snap(st)), 'done');
   delete st.building_pool[0][B('Manufacturing Lab')];
   assert.notStrictEqual(k.phaseOf(snap(st)), 'done', 'no Lab: not done');
@@ -100,6 +109,10 @@ t('land: payback from live income allows land above the wall; no bid → the wal
   const noBid = snap(st, []);
   assert.strictEqual(k.incomePerMin(noBid, R('Fell Wood')), 0);
   assert.ok(k.buildSteps(noBid, camp, 'camp', 500, R('Fell Wood'), true).wall, 'no bid: the wall');
+  // one tiny bid at 10× the market: it cannot take an hour of output, so it is no income and the wall holds
+  const tiny = snap(st, [{ id: 9, side: 'Sell', item: I('Wood'), amount: 5, price: 5 * 1000, region: 0, expires_at: 99999999 }]);
+  assert.strictEqual(k.incomePerMin(tiny, R('Fell Wood')), 0, 'a shallow bid is not income');
+  assert.ok(k.buildSteps(tiny, camp, 'camp', 500, R('Fell Wood'), true).wall, 'shallow bid: the wall');
   ap.cfg.landPaybackHours = 1000;
   assert.ok(k.buildSteps(s, camp, 'camp', 500, R('Fell Wood')).steps, 'payback-only rule');
   st.land_bought[0] = 335;
@@ -135,6 +148,22 @@ t('ids by name: a renumbered catalog resolves, missing names are reported by che
   // The live catalog resolves everything.
   const live = snap(base());
   assert.deepStrictEqual(k.checkGame(live), []);
+});
+
+t('after the hand-off Autopilot buys no kit parts (step 5)', () => {
+  const st = base();
+  st.unlocked_buildings = [B('Sawmill')]; st.land_bought[0] = 20;
+  st.groups = { 3: { building: B('Sawmill'), count: 2, equipped: 0, recipe: R('Saw Planks'), region: 0, name: 'saw' },
+    4: { building: B('Lumber Camp'), count: 4, equipped: 4, recipe: R('Fell Wood'), region: 0, name: 'camps' } };
+  const buys = (d) => /^(PostOrder|FillDeal|FillOrder)$/.test(d.steps?.[0]?.msg?.type ?? '');
+  k.setClock(() => 1e12);
+  assert.ok(buys(k.decide(snap(st))), 'before the hand-off the Sawmill kit parts are bought');
+  globalThis.corePlan = { busy: true, plan: () => ({ stage: 'A' }), status: () => ({}) };
+  try {
+    k.setClock(() => 1e12);
+    const d = k.decide(snap(st));
+    assert.ok(!buys(d), 'Core plan owns: no buying, got ' + (d.reason ?? d.wait));
+  } finally { globalThis.corePlan = undefined; }
 });
 
 console.log(failed ? `\n${failed} of ${n} failed` : `\nall ${n} passed`);

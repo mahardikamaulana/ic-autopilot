@@ -145,11 +145,14 @@
   // ---- prices -----------------------------------------------------------------
 
   const buildCost = (s, b) => Math.round(s.bld(b).cost * (20 + s.ownedAll(b)) / 20);
-  // Cents per minute one more building on recipe r earns at the current floor rate: outputs at the best Heartland bid (or base
-  // value while the corp eats the item itself), less its inputs at the same values. 0 = not known (no bid, nothing eats it).
-  function unitValue(s, item) {
-    let v = 0;
-    for (const d of s.deals ?? []) if (d.side === 'Sell' && d.item === item) v = Math.max(v, d.price / d.amount);
+  // Cents per minute one more building on recipe r earns at the current floor rate: outputs at the Heartland bid that still takes
+  // the stock plus 1 h of this building's output (bid depth: one small high bid does not count), or base value while
+  // the corp eats the item itself; less its inputs at the best bid. 0 = not known (no bid deep enough, nothing eats it).
+  function unitValue(s, item, depth = 0) {
+    // same walk as planner.itemValues (not loaded in every harness): best bids first, the price of the lot the depth lands in
+    const lots = (s.deals ?? []).filter((d) => d.side === 'Sell' && d.item === item).sort((x, y) => y.price / y.amount - x.price / x.amount);
+    let v = 0, left = Math.max(0, depth);
+    for (const d of lots) { if (left < d.amount) { v = d.price / d.amount; break; } left -= d.amount; }
     return Math.max(v, s.eatPerMin[item] > 0 ? s.catalog.items[item]?.base_value ?? 0 : 0);
   }
   function incomePerMin(s, r) {
@@ -157,7 +160,7 @@
     if (!rc) return 0;
     const runs = (s.st.layouts?.[r]?.fx?.rate ?? 1) * 120 / rc.ticks;
     let v = 0;
-    for (const o of rc.outputs) v += o.amount * unitValue(s, o.item);
+    for (const o of rc.outputs) v += o.amount * unitValue(s, o.item, s.has(o.item) + o.amount * runs * 60);
     for (const i of rc.inputs) v -= i.amount * unitValue(s, i.item);
     return Math.max(0, v * runs);
   }
@@ -483,10 +486,12 @@
   }
 
   // Plan done (the hand-off to Core plan): every plan unlock is in and the core buildings exist, whatever route the corp took.
-  // Frame Timber / Iron Frame running and 16 Iron Frames stay plan targets, not hand-off conditions.
-  const CORE_BUILDINGS = () => [B.SAWMILL, B.WORKSHOP, B.MINE, B.QUARRY, B.KILN, B.LAB];
+  // A running Rivet group is required: Core plan never builds the Smelter/Rivet chain, and the Assembly Plant prototype needs Iron Frames.
+  // Frame Timber running and 16 Iron Frames stay plan targets, not hand-off conditions.
+  const CORE_BUILDINGS = () => [B.SAWMILL, B.WORKSHOP, B.MINE, B.QUARRY, B.KILN, B.LAB, B.SMELTER];
   function planDone(s) {
-    return techPlan().every((t) => t.optional || s.unlocked(t.b)) && CORE_BUILDINGS().every((b) => s.owned(b) >= 1);
+    return techPlan().every((t) => t.optional || s.unlocked(t.b)) && CORE_BUILDINGS().every((b) => s.owned(b) >= 1)
+      && s.running(B.WORKSHOP, R.RIVET) >= 1;
   }
 
   function phaseOf(s) {

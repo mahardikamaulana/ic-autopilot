@@ -163,7 +163,8 @@ try {
     const load = loadOf(it, r.st);
     const stock = r.st.stock?.[deal.region]?.[deal.item] ?? 0;
     // r.reserved: core.reserves.merged().items (cycle() reads it): what Autopilot / Core plan keep of each item is never sold.
-    const keep = Math.max(job.keep, Number(r.reserved?.[deal.item]) || 0);
+    // Those reserves are Heartland stock: a bid in another region ships that region's stock and keeps only job.keep.
+    const keep = Math.max(job.keep, deal.region === 0 ? Number(r.reserved?.[deal.item]) || 0 : 0);
     const spare = Math.floor(stock - keep);
     const want = Math.min(load, job.left ?? Infinity, deal.amount);
     const n = Math.min(want, spare);
@@ -236,17 +237,23 @@ try {
     return true;
   }
 
+  // [[job, runValue]] -> jobs in send order: runs within 10% of the best first, least recently served (job.last) first among them.
+  function jobOrder(runs) {
+    const top = Math.max(0, ...runs.map(([, v]) => v)), band = (v) => top > 0 && v >= top * 0.9;
+    return runs.sort((a, z) => band(z[1]) - band(a[1]) || (band(a[1]) ? a[0].last - z[0].last : z[1] - a[1]) || a[0].last - z[0].last).map(([j]) => j);
+  }
   async function cycle() {
     const r = read();
     if (!r) { for (const j of jobs.values()) { j.status = 'Waiting for the game'; j.tone = 'muted'; } return; }
     r.now = Date.now();
     r.reserved = core.reserves?.merged?.()?.items ?? {};
-    // The run worth most goes first (unit price x what one run carries); equal runs: least recently served, so they share the courier.
+    // The run worth most goes first (unit price x what one run carries); runs within 10% of the best: least recently served first,
+    // so a job that can always ship does not starve the others.
     const runOf = (j) => {
       const d = Array.isArray(r.deals) ? r.deals.find((x) => x.id === j.deal) : null;
       return d?.side === 'Sell' && d.amount > 0 ? runValue(d, j, r) : 0;
     };
-    const order = [...jobs.values()].map((j) => [j, runOf(j)]).sort((a, z) => z[1] - a[1] || a[0].last - z[0].last).map(([j]) => j);
+    const order = jobOrder([...jobs.values()].map((j) => [j, runOf(j)]));
     let sent = false;
     for (const job of order) {
       if (unloaded || !jobs.has(job.deal)) continue;

@@ -11,7 +11,9 @@
     const s4 = cond('S4', lab >= 1 && kiln >= 1 && mine >= 1 && quarry >= 1, lab >= 1 && kiln >= 1 && mine >= 1 && quarry >= 1 ? 'built' : 'missing: ' + [['Manufacturing Lab', lab], ['Kiln', kiln], ['Mine', mine], ['Quarry', quarry]].filter(([, n]) => n < 1).map(([n]) => n).join(', '));
     const s1 = cond('S1', ctx.planDone === true || (s2.ok && s3.ok && s4.ok), ctx.planDone === true ? 'Autopilot: Plan done' : (s2.ok && s3.ok && s4.ok) ? 'S2-S4 hold' : 'Autopilot has not finished the Early-Game Plan, and S2-S4 do not all hold');
     // Autopilot's Plan done stands for S2-S4: a corp that finished the early plan its own way still starts Stage A.
-    if (ctx.planDone === true) for (const c of [s2, s3, s4]) if (!c.ok) { c.ok = true; c.why = 'Autopilot: Plan done (' + c.why + ')'; }
+    // Plan done implies a running Rivet group (Core plan never builds one); without it S3 still fails, or the prototype's Iron Frames never come.
+    const rivet = v.running('Workshop', 'Rivet Iron Frame');
+    if (ctx.planDone === true) for (const c of [s2, s3, s4]) if (!c.ok && (c !== s3 || rivet)) { c.ok = true; c.why = 'Autopilot: Plan done (' + c.why + ')'; }
     const s5 = cond('S5', !v.unlocked('Assembly Plant'), v.unlocked('Assembly Plant') ? 'Assembly Plant is already unlocked (join at stage B or later)' : 'not unlocked yet');
     const c10 = ctx.cashDelta10;
     const s6 = cond('S6', c10 == null ? null : c10 > 0, c10 == null ? 'not enough cash samples yet (needs 10 min)' : 'money ' + (c10 > 0 ? 'rose ' : 'fell ') + usd(Math.abs(c10)) + ' over 10 min');
@@ -24,7 +26,8 @@
     if (v.unlocked('Assembly Plant')) return 'C';
     const ap = v.idB('Assembly Plant');
     if (ap != null && (v.research?.building === ap || (v.st.research_queue ?? []).some((q) => q?.building === ap))) return 'B';
-    const ok = S.filter((c) => c.id !== 'S5').every((c) => c.ok !== false);
+    // S6 unknown (too few cash samples) does not block; S7 unknown (Market never opened) does: a Cotton bid must be seen.
+    const ok = S.filter((c) => c.id !== 'S5').every((c) => (c.id === 'S7' ? c.ok === true : c.ok !== false));
     return ok && S[0].ok ? 'A' : null;
   }
   function landInput(v, ctx) {

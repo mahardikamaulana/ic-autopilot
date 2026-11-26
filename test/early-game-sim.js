@@ -310,6 +310,7 @@ function run(scenario, HOURS, quiet) {
     running: false, active: false, resumable: false, stats: { baselinePool: 0 },
     start(o) {
       if (farm.running) return;
+      if (o.region !== 0) err('cdFarm.start without region 0 (Heartland): ' + JSON.stringify(o.region));
       farm.running = true; farmRuns++; farmStopNext = true;
       farm.stats.baselinePool = st.building_pool[0][0] ?? 0;
       const base = C.buildings[0].cost;

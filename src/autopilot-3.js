@@ -256,8 +256,8 @@
         { msg: { type: 'SetRecipe', group: g.id, recipe: r }, until: (x) => x.st.groups[g.id]?.recipe === r });
     }
 
-    // 5. Kit / prototype parts the corp can't make yet.
-    if (cfg.buyKits) {
+    // 5. Kit / prototype parts the corp can't make yet (not after the hand-off: Autopilot stops buying then).
+    if (cfg.buyKits && !owns) {
       for (const p of partsToBuy(s)) {
         yield* withdrawActions(s, p.item, p.want, 'parts for kits/prototype');
         if (p.need > 0) yield* buyActions(s, p.item, p.need, 'parts for kits/prototype');
@@ -289,8 +289,8 @@
       }
     }
 
-    // 6b. Better floorplans.
-    yield* floorActions(s);
+    // 6b. Better floorplans (they buy parts; not after the hand-off).
+    if (!owns) yield* floorActions(s);
 
     // 7. Selling.
     yield* sellActions(s);
@@ -360,7 +360,7 @@
     const opts = {
       targetCd: tech.cost, budget: 'reserve', minMoney: Math.ceil(keep / 100), batch: cfg.boosterBatch,
       reserveAcres: 0, fullBatch: false, existingPool: 'keep', maxSpendPerMin: Infinity,
-      building: B.CAMP, runOnly: true, by: `Autopilot: CD for ${bname(s, nt.b)}`,
+      building: B.CAMP, region: REGION, runOnly: true, by: `Autopilot: CD for ${bname(s, nt.b)}`,
     };
     const a = act('booster:cdfarm', `CD booster via CD Farm: farm ${tech.cost - s.cd} CD for ${bname(s, nt.b)} (keeps ${usd(keep)})`);
     a.call = () => { fi.f.start(opts); return !!W.cdFarm?.running; };

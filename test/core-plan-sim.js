@@ -149,10 +149,10 @@ const fastPacer = () => ({ beforeCommand: async () => { }, noteConfirm() { }, no
     assert.strictEqual(d2.stage, null, 'money falling');
     const d3 = cp._decide(view(cp, stageA(), [{ id: 2, side: 'Sell', item: I('Wood'), amount: 1000, price: 100000, region: 0, expires_at: 99999999 }]), ctxOf());
     assert.strictEqual(d3.stage, null, 'no Cotton bid');
-    // Market never opened (no deals at all): S7 is unknown, not a fail, so it does not block Stage A
+    // Market never opened (no deals at all): S7 reports unknown, not a fail, but unknown still blocks Stage A
     const d4 = cp._decide(view(cp, stageA(), []), ctxOf());
     assert.strictEqual(d4.S.find((c) => c.id === 'S7').ok, null);
-    assert.strictEqual(d4.stage, 'A');
+    assert.strictEqual(d4.stage, null, 'S7 unknown blocks Stage A');
     unload();
   });
 
@@ -174,11 +174,15 @@ const fastPacer = () => ({ beforeCommand: async () => { }, noteConfirm() { }, no
 
   await t('any corp: Plan done stands for S2-S4, Stage B from the research queue, prices count every region + the queues, live Cotton income', () => {
     const { cp } = load();
-    // a corp that finished the early plan its own way: no Kiln, no Rivet group, Factory / Paper Mill never unlocked
-    const st = stageA(); delete st.groups[8]; delete st.groups[2]; st.unlocked_buildings = st.unlocked_buildings.filter((b) => b !== B('Factory') && b !== B('Paper Mill'));
+    // a corp that finished the early plan its own way: no Frame Timber group, few Iron Frames, Factory / Paper Mill never unlocked
+    const st = stageA(); delete st.groups[3]; st.stock[0][I('Iron Frame')] = 4; st.unlocked_buildings = st.unlocked_buildings.filter((b) => b !== B('Factory') && b !== B('Paper Mill'));
     const d = cp._decide(view(cp, st), ctxOf({ planDone: true }));
     assert.deepStrictEqual(d.S.slice(1, 4).map((c) => c.ok), [true, true, true]); assert.strictEqual(d.stage, 'A');
     assert.strictEqual(cp._decide(view(cp, st), ctxOf({ planDone: false })).stage, null, 'without Plan done S3 / S4 still count');
+    // Plan done without a running Rivet group does not stand for S3: Core plan never builds one and the prototype needs Iron Frames
+    const nr = stageA(); delete nr.groups[2];
+    const dn = cp._decide(view(cp, nr), ctxOf({ planDone: true }));
+    assert.strictEqual(dn.S[2].ok, false); assert.strictEqual(dn.stage, null);
     const ok2 = stageA(); ok2.unlocked_buildings = ok2.unlocked_buildings.filter((b) => b !== B('Factory') && b !== B('Paper Mill'));
     assert.strictEqual(cp._decide(view(cp, ok2), ctxOf({ planDone: false })).S[1].ok, true, 'S2 needs no Factory / Paper Mill');
     const q = stageA(); q.research = { building: B('Mine') }; q.research_queue = [{ building: B('Assembly Plant') }];
