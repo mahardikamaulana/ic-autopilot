@@ -142,7 +142,7 @@
     const unit = live ? live.price / live.amount : job.unit;
     const it = itemOf(r?.catalog, item);
     const name = it?.name ?? 'item ' + item;
-    const load = loadOf(it);
+    const load = loadOf(it, r?.st);
     const cpu = unitCost(r?.catalog, item);
 
     const total = h('input', { type: 'number', inputMode: 'numeric', min: '1', max: String(lot), value: String(job?.left ?? lot), 'aria-label': 'Total to sell' });

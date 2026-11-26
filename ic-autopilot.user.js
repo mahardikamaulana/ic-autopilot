@@ -1083,6 +1083,17 @@ const ui = {
     smeltX3: '0,0:123:1 0,1:127:1 0,2:123:1 0,3:123:0 1,0:113:0 1,2:123:3 1,3:126:0 2,3:123:0 3,0:123:0 3,2:123:0 3,3:126:0 4,0:123:0 4,1:113:0 4,3:123:0 5,0:123:0 5,3:123:0 6,0:123:0 6,1:123:0 6,2:113:0 7,0:123:0 7,1:123:0 8,0:123:0 8,1:123:0 8,2:123:0 9,0:114:0 9,1:114:0 9,2:114:0',
   });
 
+  // ---- game numbers other modules share ------------------------------------------------------------------------------
+  // Courier allowance per run in CU: 10,000 + 5,000 per capacity level, at most 50,000 (the client's own formula, st.courier_levels.capacity).
+  const courierCU = (st = walk().st) => Math.min(50000, 10000 + Math.max(0, Number(st?.courier_levels?.capacity) || 0) * 5000);
+  // NPC power price multiplier from the world event in force: the client's event chip reads engine.worldEventAt(tick) and shows
+  // "NPC power x(100 + percent) / 100" when the event is an outage. 1 when there is none, or no engine / tick to ask.
+  function powerPriceMult(engine = walk().engine, tick = nowTick()) {
+    try {
+      const ev = tick > 0 && typeof engine?.worldEventAt === 'function' ? JSON.parse(engine.worldEventAt(tick)) : null;
+      return ev?.outage && Number.isFinite(ev.percent) ? Math.max(0, (100 + ev.percent) / 100) : 1;
+    } catch { return 1; }
+  }
 
   const titleTimer = HAS_DOM ? setInterval(applyTitle, 2000) : 0;
   addEventListener?.('pagehide', flushLedger);
@@ -1091,7 +1102,7 @@ const ui = {
     version: 1,
     walk, sleep, sleepWake, waitConfirm, tune, markSend, lastRtt, nowTick, seeTick, sock, orderBook,
     h, makeDraggable, toast, ledger: ledgerApi, ui,
-    setBadge, notify, askNotify, notifyPerm, stopAll, reserves, floorDesigns,
+    setBadge, notify, askNotify, notifyPerm, stopAll, reserves, floorDesigns, courierCU, powerPriceMult,
     exportConfig, importConfig, exportFile, importFile, missingFields,
     _unload() {
       orderBook.release();
@@ -3255,7 +3266,7 @@ try {
 // What it never sends: QueueResearch. The research queue is shared with the construction slot, and
 // Autopilot treats anything in it as "research busy", so a project is only ever started (StartResearch)
 // when that region's Lab slot is free. dryRun is on by default and is never remembered or imported:
-// nothing is sent until you turn it off and confirm the start.
+// nothing is sent until you turn it off and confirm the start. Opt-in keepLive: a Live run still going at a reload starts Live again.
 // @@MODULE lab
 try {
 (() => {
@@ -3292,9 +3303,10 @@ try {
   const MODE_IDS = ['process', 'modules', 'list'];
   const cfg = {
     mode: 'process',       // 'process' (focus 0) | 'modules' (focus 1) | 'list' (your own list)
-    tierMode: 'best',      // 'best' (highest tier you can pay for) | 1 | 2 | 3 (that tier only: waits, never falls back)
+    tierMode: 'best',      // 'best' (Tier I; a higher tier only out of surplus MD, see richOk) | 1 | 2 | 3 (that tier only: waits, never falls back)
     mdReserve: 5000,       // MD never spent below this
     autoClaim: true,       // claim finished results
+    keepLive: false,       // a Live run that was still running when the page reloaded starts Live again (off: it stays stopped)
     dryRun: true,          // log "would send ..." instead of sending (session-only: never remembered or imported)
     list: [],              // [{ product, focus: 0 | 1 | 2, tier: 'default' | 1 | 2 | 3 }], cycled in order
     intervalMs: 10000,     // look this often
@@ -3313,6 +3325,7 @@ try {
     tierMode: (v) => v === 'best' || v === 1 || v === 2 || v === 3,
     mdReserve: (v) => isNum(v) && v >= 0,
     autoClaim: (v) => typeof v === 'boolean',
+    keepLive: (v) => typeof v === 'boolean',
     list: (v) => Array.isArray(v) && v.length <= LIST_MAX && v.every(validEntry),
     intervalMs: (v) => isNum(v) && v >= 500 && v <= 600000,
     delayMs: (v) => isNum(v) && v >= 0 && v <= 60000,
@@ -3337,7 +3350,8 @@ try {
   let unloaded = false;
   function save() {
     if (unloaded) return;
-    try { store?.setItem(KEY, JSON.stringify({ cfg: persistable(), mem })); } catch {}
+    // live: a Live run is going (cleared when it stops; a reload does not stop it), for cfg.keepLive.
+    try { store?.setItem(KEY, JSON.stringify({ cfg: persistable(), mem, live: running && !cfg.dryRun })); } catch {}
   }
 
   // ---- the Lab, as the game state shows it ---------------------------------------------------
@@ -3408,14 +3422,24 @@ try {
   }
   const successPct = (tier, focus, bonus) => Math.min(95, Math.floor((TIERS[tier].base - 5 * focus) * (100 + bonus) / 100));
 
-  // Items the groups make now (output of each group's current recipe) that the Lab accepts.
+  // Items the unpaused groups make now (output of each group's current recipe) that the Lab accepts, with what that output is
+  // worth per tick at base value (cents): item -> value.
   function produced(st, ix) {
-    const out = new Set();
+    const out = new Map();
     for (const g of Object.values(st.groups ?? {})) {
-      if (g.recipe == null || !(g.count > 0)) continue;
-      for (const o of ix.recipes.get(g.recipe)?.outputs ?? []) if (ix.products.has(o.item)) out.add(o.item);
+      if (g.recipe == null || !(g.count > 0) || g.paused) continue;
+      const rc = ix.recipes.get(g.recipe);
+      for (const o of rc?.outputs ?? []) {
+        if (ix.products.has(o.item)) out.set(o.item, (out.get(o.item) ?? 0) + ix.products.get(o.item).base_value * o.amount * g.count / Math.max(1, rc.ticks || 1));
+      }
     }
     return out;
+  }
+  // Project hours for a product: clamp(4 x its fastest input-using recipe, 1 h, 12 h) (wiki research.md, Duration).
+  function projectHours(ix, id) {
+    let t = Infinity;
+    for (const r of ix.recipes.values()) if (r.inputs?.length && (r.outputs ?? []).some((o) => o.item === id) && r.ticks > 0) t = Math.min(t, r.ticks);
+    return Math.min(12, Math.max(1, Number.isFinite(t) ? 4 * t / 7200 : 1));
   }
   // Which project comes next: { product, focus, tier: 'default' | 1 | 2 | 3, index? } or { wait }.
   function pick(st, ix, c, counts, next) {
@@ -3430,14 +3454,16 @@ try {
       return { wait: 'no list entry is a qualifying product' };
     }
     const focus = c.mode === 'modules' ? 1 : 0;
-    const pool = [...produced(st, ix)];
+    const made = produced(st, ix), pool = [...made.keys()];
     if (!pool.length) {
       // Module fabrication doesn't care which product; Process study needs one the corp actually makes.
       const top = focus === 1 ? [...ix.products.values()].sort((a, b) => b.base_value - a.base_value || a.id - b.id)[0] : null;
       return top ? { product: top.id, focus, tier: 'default' } : { wait: 'no produced product qualifies' };
     }
-    // Fewest projects started so far; the pricier product on a tie.
-    pool.sort((a, b) => (counts[a] ?? 0) - (counts[b] ?? 0) || ix.products.get(b).base_value - ix.products.get(a).base_value || a - b);
+    // The most output value the corp makes per project hour; each project already started on a product divides its score
+    // (1 / (1 + started)), so the pick still rotates instead of studying one product forever.
+    const score = (id) => made.get(id) / projectHours(ix, id) / (1 + (counts[id] ?? 0));
+    pool.sort((a, b) => score(b) - score(a) || a - b);
     return { product: pool[0], focus, tier: 'default' };
   }
   // Why tier t (0-2) can't be paid now ('' = it can): its cost against what is left, with the reserve kept back.
@@ -3448,6 +3474,11 @@ try {
     if (have.md - k.md < reserve) return `MD ${fmt(have.md)} < ${fmt(k.md)} + reserve ${fmt(reserve)}`;
     return '';
   }
+  // 'best' tier: success per MD is 0.09% for Tier I, 0.007% for II, 0.0005% for III (90/1,000, 70/10,000, 50/100,000), so Tier I
+  // gives the most results per MD. A higher tier (rarer results) is taken only when the MD left above the reserve after paying is at
+  // least RICH x its cost, and it can pay its RD / Catalyst (the Catalyst has no other use).
+  const RICH = 10;
+  const richOk = (t, have, region, reserve) => t === 0 || (!shortfall(t, have, region, reserve) && have.md - TIERS[t].md >= reserve + RICH * TIERS[t].md);
 
   // The next step, from state alone: no I/O, no side effects (the test seam, also what the panel shows).
   // Returns { msg, kind, reason, ... } for the first thing to send, or { wait } when there is nothing to do,
@@ -3490,8 +3521,9 @@ try {
       if (p.wait) { row.wait = p.wait; continue; }
       const have = { md: left.md, rd: left.rd, cat: left.cat[r] ?? row.catalyst };
       const setting = p.tier === 'default' ? c.tierMode : p.tier;
-      const ladder = setting === 'best' || !TIERS[setting - 1] ? [2, 1, 0] : [setting - 1];
-      const tier = ladder.find((t) => !shortfall(t, have, r, c.mdReserve));
+      const best = setting === 'best' || !TIERS[setting - 1];
+      const ladder = best ? [2, 1, 0] : [setting - 1];
+      const tier = ladder.find((t) => !shortfall(t, have, r, c.mdReserve) && (!best || richOk(t, have, r, c.mdReserve)));
       if (tier === undefined) { row.wait = shortfall(ladder[ladder.length - 1], have, r, c.mdReserve); continue; }
       const k = TIERS[tier], pct = successPct(tier, p.focus, bonus);
       const label = `${pname(ix, p.product)} · ${focusName(p.focus)} · Tier ${k.name}`;
@@ -3683,7 +3715,7 @@ try {
     cool.clear(); sess.started = sess.claimed = 0;
     save();
     console.log(`[labRunner] start (${cfg.dryRun ? 'DRY RUN: start({ dryRun: false }) to send' : 'LIVE'})`);
-    core.ledger.add(TAG, 'info', `started (${cfg.dryRun ? 'dry run' : 'live'}): ${cfg.mode === 'list' ? 'custom list' : cfg.mode === 'modules' ? 'module fabrication' : 'process study'}, ${cfg.tierMode === 'best' ? 'best affordable tier' : 'Tier ' + TIERS[cfg.tierMode - 1].name}, keeps ${fmt(cfg.mdReserve)} MD`);
+    core.ledger.add(TAG, 'info', `started (${cfg.dryRun ? 'dry run' : 'live'}): ${cfg.mode === 'list' ? 'custom list' : cfg.mode === 'modules' ? 'module fabrication' : 'process study'}, ${cfg.tierMode === 'best' ? 'best value tier' : 'Tier ' + TIERS[cfg.tierMode - 1].name}, keeps ${fmt(cfg.mdReserve)} MD`);
     loop();
     render();
   }
@@ -3788,9 +3820,9 @@ try {
     { id: 'list', label: 'Custom list', desc: 'Your own list, in order, round and round. Entries that are not Lab products are skipped.' },
   ];
   const MODE_OPTS = MODES.map((m) => (m.id === 'modules' ? { ...m, full: 'Module fabrication' } : m));
-  const TIER_OPTS = [{ id: 'best', label: 'Best', full: 'Best affordable' }, { id: 1, label: 'I', full: 'Tier I' }, { id: 2, label: 'II', full: 'Tier II' }, { id: 3, label: 'III', full: 'Tier III' }];
+  const TIER_OPTS = [{ id: 'best', label: 'Best', full: 'Best value' }, { id: 1, label: 'I', full: 'Tier I' }, { id: 2, label: 'II', full: 'Tier II' }, { id: 3, label: 'III', full: 'Tier III' }];
   const TIER_DESC = {
-    best: 'Best affordable: Tier III with 100,000 MD and a Catalyst in that region, else II (10,000 MD + 5 RD), else I (1,000 MD). The reserve stays untouched.',
+    best: 'Best value: Tier I (1,000 MD), which gives the most results per MD. Tier II (10,000 MD + 5 RD) or III (100,000 MD + a Catalyst in that region) only when the MD left above the reserve after paying is at least 10 times its cost. The reserve stays untouched.',
     1: 'Tier I only (1,000 MD). Waits when it can\'t pay; never moves to another tier.',
     2: 'Tier II only (10,000 MD + 5 RD). Waits when it can\'t pay; never moves to another tier.',
     3: 'Tier III only (100,000 MD + a Catalyst in that region). Waits when it can\'t pay; never moves to another tier.',
@@ -3837,7 +3869,7 @@ try {
     const r = read();
     if (!r || cfg.list.length >= LIST_MAX) return;
     const ix = index(r.catalog);
-    const made = [...produced(r.st, ix)].map((id) => ix.products.get(id));
+    const made = [...produced(r.st, ix).keys()].map((id) => ix.products.get(id));
     const best = (made.length ? made : [...ix.products.values()]).sort((a, b) => b.base_value - a.base_value || a.id - b.id)[0];
     if (!best) return;
     refs.focusRow = [cfg.list.length, 'del'];
@@ -3918,6 +3950,7 @@ try {
       parse: (t) => parseField('mdReserve', t), format: (v) => fmt(v), get: () => cfg.mdReserve, set: (v) => setCfg('mdReserve', v), def: DEFAULTS.mdReserve, redraw: render,
     });
     refs.autoClaim = K.toggleField('Claim finished results', 'Claims the oldest waiting result first, one per check.', { get: () => cfg.autoClaim, set: (v) => setCfg('autoClaim', v), def: DEFAULTS.autoClaim });
+    refs.keepLive = K.toggleField('Stay Live after a reload', 'A Live run that is still going when the page reloads starts Live again (the same checks as Start live). Off: it stays stopped.', { get: () => cfg.keepLive, set: (v) => setCfg('keepLive', v), def: DEFAULTS.keepLive });
     refs.list = h('div', { class: 'idc-group' });
     refs.addBtn = h('button', { type: 'button', onclick: addEntry }, 'Add entry');
     refs.listNote = h('div', { class: 'idc-desc' });
@@ -3926,7 +3959,7 @@ try {
     const settings = K.settingsTab({
       lockText: 'Stop the live run to change settings.',
       tail: [K.group('Experimental', refs.dryRunSwitch.el)],
-      groups: [K.group('Research', refs.mode.el, refs.tier.el), refs.listBox, K.group('Spending', refs.reserve.el), K.group('Automation', refs.autoClaim.el)],
+      groups: [K.group('Research', refs.mode.el, refs.tier.el), refs.listBox, K.group('Spending', refs.reserve.el), K.group('Automation', refs.autoClaim.el, refs.keepLive.el)],
       backup: { onExport: () => core.exportFile(), onImport: () => core.importFile(), onReset: () => K.resetSettings('Lab', { snapshot: exportCfg, reset: resetCfg, restore: importCfg }) },
     });
     refs.settings = settings;
@@ -3964,7 +3997,7 @@ try {
 
     // Which settings differ from the defaults: a reset button on each field, a dot on the tab.
     let changed = 0;
-    for (const m of [refs.mode.sync(), refs.tier.sync(), refs.reserve.sync(), refs.autoClaim.sync()]) if (m) changed++;
+    for (const m of [refs.mode.sync(), refs.tier.sync(), refs.reserve.sync(), refs.autoClaim.sync(), refs.keepLive.sync()]) if (m) changed++;
     P.setTabBadge('settings', changed ? changed + ' setting' + (changed > 1 ? 's' : '') + ' changed from the defaults' : '');
 
     // Footer
@@ -4067,6 +4100,7 @@ try {
     }
     if (unloaded) return;
     mountUi();
+    if (cfg.keepLive && saved.live === true && !running) start({ dryRun: false });   // start() still refuses Live when the game data changed
     console.log('[labRunner] ready (dry run by default). Open "Lab" in the sidebar, or labRunner.status() / labRunner.start()');
   })();
 })();
@@ -4087,11 +4121,13 @@ try {
 //
 // Rules a job follows (autoSell._decide is the pure version of them, used by the tests):
 //   - hire must be null, as the game's Sell dialog sends it: the server silently ignores hire:false
-//   - one FillDeal per courier run: min(stock above "keep", one free courier load, what is left to sell, the lot)
+//   - one FillDeal per courier run: min(stock above "keep", one free courier load, what is left to sell, the lot). "keep" is at
+//     least what Autopilot / Core plan reserve of that item (core.reserves); the courier load counts capacity upgrades
+//   - when several jobs can ship, the one whose run is worth most goes first (unit price x units that run would carry)
 //   - nothing is sent while the courier is busy, the stock is short, or the game's own auto-ship runs on that bid
 //   - the job ends when the target is reached, or after 24 h with no bid that qualifies. When its bid is gone (filled,
-//     withdrawn, expired) it moves to the best open bid for the same item in the same region (highest unit price, never
-//     below the item's est. cost per unit, not one another job holds); with none it waits. A bid board that is not
+//     withdrawn, expired) it moves to the best open bid for the same item in the same region (most money per courier run, never
+//     below the item's est. cost per unit or 90% of the bid you picked, not one another job holds); with none it waits. A bid board that is not
 //     loaded (Market page not open) never ends a job, it only waits
 //   - every send must be confirmed by the server (next_shipment_id goes up); 5 unconfirmed sends in a row pause the job
 // Profit: every job shows an estimated profit (what it makes if it runs to its target or until the bid is used up) and the
@@ -4115,7 +4151,6 @@ try {
   const sleep = core.sleep;
 
   // ---- game facts ------------------------------------------------------------------------------
-  const COURIER_CU = 10000;                 // free courier allowance per run (upgrades are ignored: shipping less is safe)
   const REGION_NAMES = ['Heartland', 'Industrial Basin', 'Coastal Cities', 'Frontier'];
   const regionName = (r) => REGION_NAMES[r] ?? 'Region ' + r;
   const MAX_FAILS = 5;
@@ -4129,7 +4164,11 @@ try {
     if (catalog !== catRef) { catRef = catalog; itemMap = new Map((catalog?.items ?? []).map((i) => [i.id, i])); }
     return itemMap.get(id);
   }
-  const loadOf = (it) => Math.floor(COURIER_CU / Math.max(1, it?.cargo_weight || 1));
+  // One free courier run, with the capacity upgrades in st.courier_levels.
+  const loadOf = (it, st) => Math.floor((core.courierCU?.(st) ?? 10000) / Math.max(1, it?.cargo_weight || 1));
+  // What one courier run on a bid is worth (cents), the way jobs and replacement bids are ranked: a cheaper bid with a big lot
+  // can beat a dearer one that takes only a few units.
+  const runValue = (d, job, r) => (d.price / d.amount) * Math.min(loadOf(itemOf(r.catalog, d.item), r.st), d.amount, job.left ?? Infinity);
 
   // Estimated cost of one unit, in cents: the inputs of the recipe that makes it, at catalog base value (the cheapest recipe
   // when several make it). A recipe with several outputs shares its inputs by the outputs' base value. Raw materials have no
@@ -4223,18 +4262,21 @@ try {
       for (const d of r.deals) {
         if (d.side !== 'Sell' || d.item !== job.item || d.region !== job.region || r.taken?.has(d.id) || r.st.standing_fills?.[d.id]) continue;
         if (!(d.amount > 0) || (tick && d.expires_at && d.expires_at <= tick) || d.price / d.amount < floor) continue;
-        if (!best || d.price / d.amount > best.price / best.amount) best = d;
+        const v = runValue(d, job, r), bv = best && runValue(best, job, r);
+        if (!best || v > bv || (v === bv && d.price / d.amount > best.price / best.amount)) best = d;
       }
       return best ? { kind: 'switch', deal: best } : noBid('waiting for a ' + name + ' bid at ≥ ' + usd(floor) + ' in ' + regionName(job.region));
     }
     if (r.st.standing_fills?.[job.deal]) return { kind: 'wait', why: "the game's own auto-ship is running on this bid" };
     const it = itemOf(r.catalog, deal.item);
-    const load = loadOf(it);
+    const load = loadOf(it, r.st);
     const stock = r.st.stock?.[deal.region]?.[deal.item] ?? 0;
-    const spare = Math.floor(stock - job.keep);
+    // r.reserved: core.reserves.merged().items (cycle() reads it): what Autopilot / Core plan keep of each item is never sold.
+    const keep = Math.max(job.keep, Number(r.reserved?.[deal.item]) || 0);
+    const spare = Math.floor(stock - keep);
     const want = Math.min(load, job.left ?? Infinity, deal.amount);
     const n = Math.min(want, spare);
-    if (n < 1) return { kind: 'wait', why: 'waiting for ' + (it?.name ?? 'stock') + (job.keep ? ' above ' + num(job.keep) : '') + ' in stock', tone: 'muted' };
+    if (n < 1) return { kind: 'wait', why: 'waiting for ' + (it?.name ?? 'stock') + (keep ? ' above ' + num(keep) + (keep > job.keep ? ' (reserved)' : '') : '') + ' in stock', tone: 'muted' };
     if (job.fullLoads && n < want) return { kind: 'wait', why: 'waiting for a full load (' + num(n) + ' of ' + num(want) + ')', tone: 'muted' };
     const ready = r.st.courier_ready_at ?? 0;
     if (tick && tick < ready) return { kind: 'wait', why: 'courier ready in ' + Math.max(1, Math.ceil((ready - tick) / 2)) + ' s', tone: 'good' };
@@ -4307,8 +4349,13 @@ try {
     const r = read();
     if (!r) { for (const j of jobs.values()) { j.status = 'Waiting for the game'; j.tone = 'muted'; } return; }
     r.now = Date.now();
-    // Least recently served first, so jobs share the courier.
-    const order = [...jobs.values()].sort((a, z) => a.last - z.last || z.unit - a.unit);
+    r.reserved = core.reserves?.merged?.()?.items ?? {};
+    // The run worth most goes first (unit price x what one run carries); equal runs: least recently served, so they share the courier.
+    const runOf = (j) => {
+      const d = Array.isArray(r.deals) ? r.deals.find((x) => x.id === j.deal) : null;
+      return d?.side === 'Sell' && d.amount > 0 ? runValue(d, j, r) : 0;
+    };
+    const order = [...jobs.values()].map((j) => [j, runOf(j)]).sort((a, z) => z[1] - a[1] || a[0].last - z[0].last).map(([j]) => j);
     let sent = false;
     for (const job of order) {
       if (unloaded || !jobs.has(job.deal)) continue;
@@ -4497,7 +4544,7 @@ try {
     const unit = live ? live.price / live.amount : job.unit;
     const it = itemOf(r?.catalog, item);
     const name = it?.name ?? 'item ' + item;
-    const load = loadOf(it);
+    const load = loadOf(it, r?.st);
     const cpu = unitCost(r?.catalog, item);
 
     const total = h('input', { type: 'number', inputMode: 'numeric', min: '1', max: String(lot), value: String(job?.left ?? lot), 'aria-label': 'Total to sell' });
@@ -4628,11 +4675,13 @@ try {
 //   autoUtil.cfg                                                 // timings; autoUtil.conf: spare per utility, hold minutes
 //
 // What it follows (the game's own page shows the same numbers, except that bought contracts count their capacity less any shortfall; autoUtil._measure is the pure version, used by the tests):
-//   need = load (running groups' building draw + recipe draw) + power sold on contracts (the promised amount) + what stalled groups wait for
-//          - self-generated (generators, at the day/night rate) - storage that can discharge - bought on contracts
+//   need = load (running groups' building draw + recipe draw) + power sold on contracts (the promised amount) + lines out + what stalled
+//          groups wait for - self-generated (generators, at the day/night rate) - storage that can discharge (at most stored / ticks to
+//          the bill it pays for) - bought on contracts - lines in (transmission lines, power)
 //   The subscription is set to ceil(need) plus the spare you set (default 0), at most 200 MW / 500 kL, one region at a time.
 // Money rules, from how the game bills (power $10 per MW, water $4 per kL, every 10 minutes):
-//   - raising charges the extra level for the current period up front; lowering refunds nothing. So a raise is made at once,
+//   - raising charges the extra level for the current period up front; lowering refunds nothing. So a raise is made at once (one that
+//     only stalled groups need waits out the last 60 ticks before a bill, which would charge it again),
 //     but a lower only when the highest need of the last "hold" minutes (default 10) is below the level, and only in the minute
 //     before a bill, so the level never drops and has to be bought again inside one period. It never lowers the first hold minutes.
 //   - cash must cover the raise now AND the next bill, which is for the higher level (every subscription is billed together): a raise
@@ -4657,7 +4706,8 @@ try {
   const h = core.h;
 
   // ---- game facts (from the game's own bundle) -----------------------------------------------------------------
-  // rate: cents per unit per 10-minute bill; tile: the label of the tile the switch sits on.
+  // rate: cents per unit per 10-minute bill (power: times core.powerPriceMult() during an 'NPC power xN' event); tile: the label of
+  // the tile the switch sits on. max: the client's own caps (constants in its bundle, not in the game state).
   const UTILS = {
     power: { unit: 'MW', rate: 1000, max: 200, tile: 'Load', noun: 'grid service' },
     water: { unit: 'kL', rate: 400, max: 500, tile: 'Supply', noun: 'waterworks' },
@@ -4668,7 +4718,7 @@ try {
   const BILL_TICKS = 1200;                                   // a bill every 10 minutes at 2 ticks a second
   const INTANGIBLE = new Set([0, 24, 25, 26, 106, 107, 108, 109, 110, 111]);   // items held in st.items, not in stock
   const MAX_FAILS = 3;
-  const cfg = { cycleMs: 2000, confirmMs: 10000, backoffMs: 5000, lowerWindowTicks: 120 };   // timings; the tests shorten them
+  const cfg = { cycleMs: 2000, confirmMs: 10000, backoffMs: 5000, lowerWindowTicks: 120, raiseHoldTicks: 60 };   // timings; the tests shorten them. raiseHoldTicks: a raise only stalled groups need waits for the bill this close to it
   const conf = { power: { on: false, spare: 0 }, water: { on: false, spare: 0 }, holdMin: 10 };
   const REGION_NAMES = ['Heartland', 'Industrial Basin', 'Coastal Cities', 'Frontier'];
   const regionName = (r) => REGION_NAMES[r] ?? 'Region ' + r;
@@ -4696,11 +4746,15 @@ try {
   // ---- reading the game ----------------------------------------------------------------------------------------------
   let lastContracts = null;    // contracts are a prop of the page router: unreadable while a Corporation profile is open, so keep the last look
   function read(fresh = false) {
-    const { ws, st, catalog, contracts } = core.walk(fresh);
+    const { ws, st, catalog, contracts, engine } = core.walk(fresh);
     if (!st || !catalog) return null;
     core.seeTick(st.ssi?.last_user_mutation_tick);
     if (Array.isArray(contracts)) lastContracts = contracts;
-    return { st, catalog, contracts: lastContracts, ws, wsOpen: ws?.readyState === 1, tick: core.nowTick(), mutTick: st.ssi?.last_user_mutation_tick ?? 0 };
+    const tick = core.nowTick();
+    // Transmission lines: the client asks its engine for the flows (lineFlows, a BigInt tick) only when the state has lines.
+    let flows = [];
+    try { if ((st.lines ?? []).length && tick > 0 && typeof engine?.lineFlows === 'function') flows = JSON.parse(engine.lineFlows(BigInt(tick))) ?? []; } catch { flows = []; }
+    return { st, catalog, contracts: lastContracts, flows, ws, wsOpen: ws?.readyState === 1, tick, mutTick: st.ssi?.last_user_mutation_tick ?? 0, priceMult: core.powerPriceMult?.() ?? 1 };
   }
 
   const ixRef = new WeakMap();
@@ -4714,7 +4768,8 @@ try {
   // ---- what is needed (pure: no I/O) -----------------------------------------------------------------------------------
   // The page's numbers for one utility in one region. Returns what the groups draw, what is generated, stored or bought, what
   // stalled groups wait for, and need: the subscription that covers all of it (can be negative: the Corporation has a surplus).
-  function measure(util, region, st, catalog, tick, contracts) {
+  // flows: the engine's line flows [{ from, to, sent, delivered }] (power only): Lines in add supply, Lines out count as load, as on the page.
+  function measure(util, region, st, catalog, tick, contracts, flows = []) {
     const R = String(region), ix = idx(catalog);
     const have = st.subscriptions?.[R]?.[util] ?? 0;
     const groups = Object.values(st.groups ?? {}).filter((g) => (g.region ?? 0) === region);
@@ -4734,7 +4789,13 @@ try {
     const owned = (id) => (st.building_pool?.[R]?.[id] ?? 0) + groups.filter((g) => g.building === id).reduce((a, g) => a + g.count, 0);
     let dischargeCap = 0;
     for (const b of catalog.buildings ?? []) { const s = b.storage?.[util]; if (s) dischargeCap += (s.discharge_limit ?? 0) * owned(b.id); }
-    const discharge = Math.min(dischargeCap, st.stored?.[R]?.[util] ?? 0);
+    // Stored is in MW-ticks (7,200 = 1 MWh): count only the rate it can keep up until the next bill, so a Battery Bank that would run
+    // dry mid-period does not cut the subscription. Right after a bill that is stored / 1,200, and the hold window keeps that sample.
+    const stored = st.stored?.[R]?.[util] ?? 0, toBill = tick > 0 ? BILL_TICKS - (tick % BILL_TICKS) : 0;
+    const discharge = Math.min(dischargeCap, stored, toBill ? stored / toBill : stored);
+    const lines = util === 'power' && Array.isArray(flows) ? flows : [];
+    const lineIn = lines.filter((f) => f.to === region).reduce((a, f) => a + (Number(f.delivered) || 0), 0);
+    const lineOut = lines.filter((f) => f.from === region && f.delivered > 0).reduce((a, f) => a + (Number(f.sent) || 0), 0);
     const corp = st.ssi?.corp_id;
     const deal = (who, field) => (contracts ?? []).filter((c) => c.utility === util && c.region === region && c.state === 'Active' && c[who] === corp).reduce((a, c) => a + (c[field] ?? 0), 0);
     // A bought contract counts its whole capacity, less the part of what the buyer draws (up to the contract) that the seller is not
@@ -4744,7 +4805,7 @@ try {
     const imported = bought.reduce((a, c) => a + (c.amount ?? 0) - short(c), 0), sold = deal('seller', 'amount');
     // A group that could start but whose draw is more than the free capacity is stalled; it starts once that much more is free.
     // A group with no machines yet (equipped 0) cannot start whatever the power: the game calls it "unequipped", not stalled.
-    const free = Math.max(0, have + gen + discharge + imported - load - sold);
+    const free = Math.max(0, have + gen + discharge + imported + lineIn - load - sold - lineOut);
     let waiting = 0;
     for (const g of groups) {
       if (g.paused || g.equipped === 0 || (g.work ?? []).length) continue;
@@ -4754,7 +4815,7 @@ try {
       if (!rc || !(rc.inputs ?? []).every((i) => stockOf(i.item) >= i.amount)) continue;
       waiting += draw;
     }
-    return { util, region, have, load, sold, gen, discharge, imported, waiting, need: load + sold + waiting - gen - discharge - imported };
+    return { util, region, have, load, sold, gen, discharge, imported, lineIn, lineOut, waiting, need: load + sold + lineOut + waiting - gen - discharge - imported - lineIn };
   }
 
   // The level that covers a measurement: ceil(need) plus the spare (only when something needs it), over the cap flagged.
@@ -4765,16 +4826,21 @@ try {
   }
 
   // What the game bills at the next bill, all subscriptions together (cents).
-  function billsOf(st) {
+  // mult: the NPC power price multiplier (never below 1 here, so a misread can only make it more careful).
+  function billsOf(st, mult = 1) {
     let t = (st.isp ?? 0) * RATES.bandwidth;
-    for (const o of Object.values(st.subscriptions ?? {})) for (const [k, l] of Object.entries(o ?? {})) t += (l ?? 0) * (RATES[k] ?? 0);
+    for (const o of Object.values(st.subscriptions ?? {})) for (const [k, l] of Object.entries(o ?? {})) t += (l ?? 0) * (RATES[k] ?? 0) * (k === 'power' ? Math.max(1, mult) : 1);
     return t;
   }
 
   // What to do about one level. peak: the highest want over the hold window; observedMs: how long it has been watched;
   // ticksToBill: ticks until the next bill (null: unknown); bills: what that bill is now. Returns { kind: 'ok' | 'raise' | 'lower' | 'hold' | 'broke', ... }.
-  function decide({ util, have, want, peak, observedMs, holdMs, money, bills = 0, ticksToBill, canLower = true, lowerWindowTicks = cfg.lowerWindowTicks }) {
-    const rate = UTILS[util].rate;
+  // urgent: the want without what stalled groups wait for (null: all of it is urgent). mult: the NPC power price multiplier.
+  function decide({ util, have, want, peak, observedMs, holdMs, money, bills = 0, ticksToBill, canLower = true, lowerWindowTicks = cfg.lowerWindowTicks, urgent = null, mult = 1, raiseHoldTicks = cfg.raiseHoldTicks }) {
+    const rate = UTILS[util].rate * (util === 'power' ? Math.max(1, mult) : 1);
+    // A raise is charged up front for the period and the bill charges the level again: one only stalled groups need waits out the
+    // last raiseHoldTicks before the bill instead of paying twice for a few seconds.
+    if (want > have && urgent != null && urgent <= have && ticksToBill != null && ticksToBill < raiseHoldTicks) return { kind: 'hold', why: 'raising for stalled groups after the bill' };
     if (want > have) {
       // Each extra unit costs its rate now and again in the next bill: cash left after the bill as it is must pay both.
       const afford = have + Math.floor(Math.max(0, money - bills) / (2 * rate));
@@ -4846,15 +4912,17 @@ try {
     const key = util + ':' + region, u = UTILS[util];
     let c = ctl.get(key);
     if (!c) ctl.set(key, c = { samples: [], first: now, fails: 0, retryAt: 0 });
-    const m = measure(util, region, r.st, r.catalog, r.tick, r.contracts);
+    const m = measure(util, region, r.st, r.catalog, r.tick, r.contracts, r.flows);
     const { want, over } = wantOf(m, conf[util].spare);
+    const urgent = wantOf({ ...m, need: m.need - m.waiting }, conf[util].spare).want;
+    const mult = util === 'power' ? Math.max(1, r.priceMult ?? 1) : 1;
     const holdMs = conf.holdMin * 60000;
     c.samples.push({ t: now, want });
     while (c.samples.length > 1 && c.samples[0].t < now - holdMs) c.samples.shift();
     const peak = Math.max(...c.samples.map((s) => s.want));
-    const money = r.st.items?.[0] ?? 0, bills = billsOf(r.st);
+    const money = r.st.items?.[0] ?? 0, bills = billsOf(r.st, r.priceMult ?? 1);
     const ticksToBill = r.tick > 0 ? BILL_TICKS - (r.tick % BILL_TICKS) : null;
-    const d = decide({ util, have: m.have, want, peak, observedMs: now - c.first, holdMs, money, bills, ticksToBill, canLower: Array.isArray(r.contracts) });
+    const d = decide({ util, have: m.have, want, peak, observedMs: now - c.first, holdMs, money, bills, ticksToBill, canLower: Array.isArray(r.contracts), urgent, mult });
     const where = regionName(region);
     const row = { region, util, have: m.have, need: m.need, want, kind: d.kind };
     if (d.kind === 'raise' || d.kind === 'lower') {
@@ -4881,7 +4949,7 @@ try {
     }
     c.fails = 0; c.retryAt = 0;                                   // nothing to send: earlier failures are not "in a row" any more
     const lowNote = m.need < 0 ? ' (surplus ' + Math.round(-m.need) + ')' : '';
-    if (d.kind === 'broke') return { ...row, text: 'Needs ' + want + ' ' + unit(util) + ' but cash cannot cover the upfront ' + usd((want - m.have) * u.rate) + ' and the next bill', tone: 'warn' };
+    if (d.kind === 'broke') return { ...row, text: 'Needs ' + want + ' ' + unit(util) + ' but cash cannot cover the upfront ' + usd((want - m.have) * u.rate * mult) + ' and the next bill' + (mult > 1 ? ' (NPC power x' + mult + ')' : ''), tone: 'warn' };
     if (over) return { ...row, text: 'Needs ' + Math.ceil(over) + ' ' + unit(util) + ', the cap is ' + u.max, tone: 'warn' };
     if (d.kind === 'hold') return { ...row, text: 'Holding ' + m.have + ' ' + unit(util) + ': ' + d.why, tone: 'muted' };
     return { ...row, text: 'Following the load: ' + m.have + ' ' + unit(util) + ' for ' + Math.max(0, Math.ceil(m.need)) + ' needed' + lowNote, tone: 'muted' };
