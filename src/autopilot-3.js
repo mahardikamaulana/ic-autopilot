@@ -221,8 +221,11 @@
       yield a;
     }
 
+    // After the hand-off Core plan builds, assigns and buys land: Autopilot keeps steps 1-3a, kits, floors and selling only.
+    const owns = coreOwns();
+
     // 3b. Unassigned plan buildings → their group (non-plan buildings are left alone).
-    for (const [bs, total] of Object.entries(s.pool)) {
+    if (!owns) for (const [bs, total] of Object.entries(s.pool)) {
       const b = +bs;
       const n = total - (boosterLeft[b] ?? 0) - farmCamps(s, b);
       if (n <= 0) continue;
@@ -232,7 +235,7 @@
     }
 
     // 4. Plan groups with no task.
-    for (const g of s.groups) {
+    if (!owns) for (const g of s.groups) {
       if (g.recipe != null || g.building === B.KILN) continue; // bare Kiln groups are Core plan's
       const r = poolRecipe(s, g.building);
       if (r == null) continue;
@@ -275,6 +278,7 @@
 
     // 7. Selling.
     yield* sellActions(s);
+    if (owns) return;   // 8-10 (plan buildings, CD booster, camps / farms) are Core plan's now
 
     // 8. Plan buildings.
     const targets = criticalTargets(s);

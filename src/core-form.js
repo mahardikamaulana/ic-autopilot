@@ -23,10 +23,10 @@ const setTone = (el, tone) => { el.className = 'idc-dot ' + tone; };
 // ---- status tab ----
 // Hero: a label, the big figure with a short qualifier, and a progress bar (pct 0-100).
 function hero(label) {
-  const big = h('span', { class: 'idc-big' }), sub = h('span', { class: 'idc-label' }), bar = h('i');
+  const big = h('span', { class: 'idc-big' }), sub = h('span', { class: 'idc-label' }), bar = h('i'), lab = h('div', { class: 'idc-label' }, label);
   return {
-    el: h('div', {}, h('div', { class: 'idc-label' }, label), h('div', { class: 'idc-hero' }, big, sub), h('div', { class: 'idc-bar' }, bar)),
-    set(b, s, pct) { setText(big, b); setText(sub, s); bar.style.width = pct + '%'; },
+    el: h('div', {}, lab, h('div', { class: 'idc-hero' }, big, sub), h('div', { class: 'idc-bar' }, bar)),
+    set(b, s, pct, l = label) { setText(lab, l); setText(big, b); setText(sub, s); bar.style.width = pct + '%'; },
   };
 }
 // Key / value rows: set([[label, value], ...]).

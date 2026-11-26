@@ -175,6 +175,7 @@
   ];
 
   function nextTech(s) {
+    if (coreOwns()) return null;   // unlocks are Core plan's after the hand-off (no StartTech, prototype parts or CD need from here)
     for (const t of techPlan()) {
       if (s.unlocked(t.b)) continue;
       if (s.research?.building === t.b || s.queue.some((q) => q.building === t.b)) return null; // in progress

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IC Autopilot
 // @namespace    idlecorp-toolkit
-// @version      2.8.16
+// @version      2.8.17
 // @author       XPARAD0X
 // @description  Early-game Autopilot, CD Farm (Construction Data by building and demolishing buildings; Auto picks the cheapest source itself), Lab runner (keeps the Manufacturing Labs researching), Auto ship (an "Auto ship" button on every distributor bid) and Auto utilities (an "Auto" switch that keeps the power and water subscriptions at what the groups need) for IdleCorp, each with a panel, menu or switch in the game UI.
 // @homepageURL  https://github.com/mahardikamaulana/ic-autopilot
@@ -847,10 +847,10 @@ const setTone = (el, tone) => { el.className = 'idc-dot ' + tone; };
 // ---- status tab ----
 // Hero: a label, the big figure with a short qualifier, and a progress bar (pct 0-100).
 function hero(label) {
-  const big = h('span', { class: 'idc-big' }), sub = h('span', { class: 'idc-label' }), bar = h('i');
+  const big = h('span', { class: 'idc-big' }), sub = h('span', { class: 'idc-label' }), bar = h('i'), lab = h('div', { class: 'idc-label' }, label);
   return {
-    el: h('div', {}, h('div', { class: 'idc-label' }, label), h('div', { class: 'idc-hero' }, big, sub), h('div', { class: 'idc-bar' }, bar)),
-    set(b, s, pct) { setText(big, b); setText(sub, s); bar.style.width = pct + '%'; },
+    el: h('div', {}, lab, h('div', { class: 'idc-hero' }, big, sub), h('div', { class: 'idc-bar' }, bar)),
+    set(b, s, pct, l = label) { setText(lab, l); setText(big, b); setText(sub, s); bar.style.width = pct + '%'; },
   };
 }
 // Key / value rows: set([[label, value], ...]).
@@ -8495,6 +8495,7 @@ try {
   ];
 
   function nextTech(s) {
+    if (coreOwns()) return null;   // unlocks are Core plan's after the hand-off (no StartTech, prototype parts or CD need from here)
     for (const t of techPlan()) {
       if (s.unlocked(t.b)) continue;
       if (s.research?.building === t.b || s.queue.some((q) => q.building === t.b)) return null; // in progress
@@ -8964,8 +8965,11 @@ try {
       yield a;
     }
 
+    // After the hand-off Core plan builds, assigns and buys land: Autopilot keeps steps 1-3a, kits, floors and selling only.
+    const owns = coreOwns();
+
     // 3b. Unassigned plan buildings → their group (non-plan buildings are left alone).
-    for (const [bs, total] of Object.entries(s.pool)) {
+    if (!owns) for (const [bs, total] of Object.entries(s.pool)) {
       const b = +bs;
       const n = total - (boosterLeft[b] ?? 0) - farmCamps(s, b);
       if (n <= 0) continue;
@@ -8975,7 +8979,7 @@ try {
     }
 
     // 4. Plan groups with no task.
-    for (const g of s.groups) {
+    if (!owns) for (const g of s.groups) {
       if (g.recipe != null || g.building === B.KILN) continue; // bare Kiln groups are Core plan's
       const r = poolRecipe(s, g.building);
       if (r == null) continue;
@@ -9018,6 +9022,7 @@ try {
 
     // 7. Selling.
     yield* sellActions(s);
+    if (owns) return;   // 8-10 (plan buildings, CD booster, camps / farms) are Core plan's now
 
     // 8. Plan buildings.
     const targets = criticalTargets(s);
@@ -9277,6 +9282,14 @@ try {
     if (handedOver || !running || !W.corePlan || phaseOf(s) !== 'done') return;
     handedOver = true;
     if (!(W.corePlan.busy || (W.corePlan.running && cfg.dryRun))) { note('plan done: Core plan takes over' + (cfg.dryRun ? ' (dry run)' : '')); W.corePlan.start({ dryRun: !!cfg.dryRun }); }
+  }
+
+  // Core plan runs Live and has taken over (it drives a stage, or the hand-off is done): it owns land, building and unlocks from here
+  // (scripts/core-game-userscript-plan.md, "Who sends purchases"). Autopilot keeps only its duties: bill resume, power, floors, selling.
+  function coreOwns() {
+    const c = W.corePlan;
+    if (!c?.busy) return false;
+    try { return handedOver || !!c.plan()?.stage || !!c.status().handedOff; } catch { return false; }
   }
 
   // Does the game still look like what this script was written against? Live mode needs it.
@@ -9746,6 +9759,27 @@ try {
     c.handedOff &&= p === 'done' || p >= 4;   // the saved hand-off has no corp id: a new corp in this browser starts at Phase 1 again (4: a bill pause)
     return c.running || c.handedOff || p === 'done' ? c : null;
   }
+  // Core plan has taken over (it runs, or the hand-off is done): the panel is Core plan's, with the early plan as one "done" row.
+  const coreView = (cp) => !!cp && (cp.running || cp.handedOff);
+  const STAGES = [['A', 'start'], ['B', 'Assembly Plant unlock'], ['C', 'Retail Store unlock'], ['D', 'Retail Store built']];
+  const END_NAMES = { E1: 'money engine runs', E2: 'only endgame unlocks left', E3: 'CD on the Farm cycle', E4: 'land done', E5: 'cash in hand' };
+  // Progress of the whole plan, so the bar never drops back at the hand-off: the early plan is the first fifth, then a fifth per stage A-D
+  // (in Stage D, the share of end conditions E1-E5 that hold).
+  function cpProgress(cp) {
+    const i = STAGES.findIndex(([k]) => k === cp.stage);
+    if (cp.stage === 'END') return 100;
+    if (i < 0) return 100 / (STAGES.length + 1);   // starting: the early plan is done
+    const ok = cp.end.filter((e) => / ok:/.test(e)).length;
+    return ((1 + i + (cp.stage === 'D' && cp.end.length ? ok / cp.end.length : 0)) / (STAGES.length + 1)) * 100;
+  }
+  // Core plan's checklist: its stages, then the end conditions E1-E5 (the endgame gate; the log and corePlan.status() say why one is open).
+  function cpChecklist(cp) {
+    const i = cp.stage === 'END' ? STAGES.length : STAGES.findIndex(([k]) => k === cp.stage);
+    return [
+      ...STAGES.map(([k, what], j) => ['Stage ' + k + ' · ' + what, j < i ? '✓' : j === i ? 'now' : '·']),
+      ...cp.end.map((e) => { const m = /^(E\d) (ok|NO):/.exec(e); return m ? [m[1] + ' · ' + (END_NAMES[m[1]] ?? ''), m[2] === 'ok' ? '✓' : '·'] : [e, '']; }),
+    ];
+  }
   const cpMode = (c) => (c.running ? (c.resumeIn ? 'resuming Live in ' + c.resumeIn + ' s' : c.dryRun ? 'dry run' : 'live') : 'stopped');
   function onMain() {
     const s = read(), cp = cpOf(s);
@@ -9762,6 +9796,7 @@ try {
   // 'run' | 'wait' | 'err' | ''
   function tone(cp) {
     if (running && stalled) return 'err';
+    if (coreView(cp)) return cp.running ? (cp.dryRun ? 'wait' : 'run') : cp.stopReason ? 'err' : '';   // a short hold for a Core plan purchase is not a pause
     if (running) return heldReason() || cfg.dryRun ? 'wait' : 'run';
     if (cp?.running) return cp.dryRun || cp.holds.length ? 'wait' : 'run';
     if (cp?.stopReason) return 'err';
@@ -9769,11 +9804,18 @@ try {
     return '';
   }
 
-  function cdFarmNote() {
+  function cdFarmNote(cv) {
+    // Holds by CD Farm and Core plan are their own short steps; only a hold from the console needs the user.
+    const mine = [...holds].filter((w) => w !== 'corePlan' && w !== 'CD Farm');
     const fi = farmInfo();
+    if (cv) {
+      // A non-Auto CD Farm run left interrupted blocks CD Farm Auto, which Core plan drives: that one needs the user.
+      if (fi?.resumable) return { text: 'CD Farm has an interrupted run. Resume or discard it in CD Farm so it can farm CD for Core plan again.', btn: true };
+      return mine.length ? { text: `Autopilot's selling and bill chores are paused from the console (${mine.join(', ')}). Run earlyGame.release() there to go on.`, btn: false } : null;
+    }
     if (fi?.busy) return { text: `CD Farm is running${fi.f.stats?.by ? ` (${fi.f.stats.by})` : ''}. Autopilot waits until it stops.`, btn: true };
     if (fi?.resumable) return { text: 'CD Farm has an interrupted run. Its leftover camps are left alone, and no camps, farms or booster run until you resume or discard it there.', btn: true };
-    if (holds.size) return { text: `Held by ${[...holds].join(', ')}. earlyGame.release() to go on.`, btn: false };
+    if (mine.length) return { text: `Autopilot is paused from the console (${mine.join(', ')}). Run earlyGame.release() there to go on.`, btn: false };
     return null;
   }
 
@@ -9786,37 +9828,47 @@ try {
       refs.hero.set('—', '', 0); refs.rows.set([]); refs.check.set([]);
       refs.state.set(t, 'Waiting for the game to load…');
     } else {
+      const cv = coreView(cp);
       const list = checklist(s);
       const marks = list.filter(([, v]) => /^(✓|·|researching|queued)/.test(v));
-      refs.hero.set(ph === 'done' ? 'Plan done' : `Phase ${ph}`, ph === 'done' ? '' : 'of 5',
-        ph === 'done' ? 100 : marks.length ? (marks.filter(([, v]) => v.startsWith('✓')).length / marks.length) * 100 : 0);   // done is full: optional rows (Gold Mines) never tick
+      if (cv) refs.hero.set(cp.stage === 'END' ? 'Done' : cp.stage ? 'Stage ' + cp.stage : 'Starting', cp.stage === 'END' ? 'end conditions met' : cp.stage ? 'of D' : '', cpProgress(cp), 'Core plan');
+      else refs.hero.set(ph === 'done' ? 'Plan done' : `Phase ${ph}`, ph === 'done' ? '' : 'of 5',
+        ph === 'done' ? 100 : marks.length ? (marks.filter(([, v]) => v.startsWith('✓')).length / marks.length) * 100 : 0, 'Early-game plan');   // done is full: optional rows (Gold Mines) never tick
       refs.rows.set([
-        ...(cp ? [['Core plan', (cp.stage ? 'stage ' + cp.stage + ' · ' : '') + cpMode(cp)]] : []),
-        ['Money', `${usd(s.money)} · floor ${usd(moneyFloor(s))}`],
+        ...(cv ? [['Early-game plan', '✓ done']] : cp ? [['Core plan', (cp.stage ? 'stage ' + cp.stage + ' · ' : '') + cpMode(cp)]] : []),
+        ...(cv && cp.resumeIn ? [['Core plan', cpMode(cp)]] : []),
+        // Autopilot runs on after the hand-off only for its chores, until Auto power takes over the subscription
+        ...(cv && running ? [['Autopilot chores', cfg.dryRun ? 'dry run, sends nothing' : s.autoPower ? 'selling, bill resume' : 'until Auto power is on']] : []),
+        ['Money', cv ? usd(s.money) : `${usd(s.money)} · floor ${usd(moneyFloor(s))}`],
         ['CD', K.fmt(s.cd)],
         ['Acres', `${s.acresUsed} / ${s.acresOwned} · next ${usd(acrePrice(s.landBought))}`],
-        ['Power', `${s.powerHave} MW (need ${s.powerNeed})`],
+        // the subscription only (bought contracts are not in it): after the hand-off Auto utilities and Core plan's checks own power
+        ...(cv ? [] : [['Power', `${s.powerHave} MW (need ${s.powerNeed})`]]),
         ['Courier', s.courierFree ? 'free' : `busy, ${courierEta(s)}`],
-        ['Actions', `${actions} sent this session`],
+        ...(cv ? [] : [['Actions', `${actions} sent this session`]]),
         ...(cashRate() ? [['Cash change', `${signed(cashRate().perHour)}/h (last ${cashRate().mins} min)`]] : []),
         ...(rateScale < 1 ? [['Pace', `${Math.round(rateScale * 100)}% after an action the server did not apply`]] : []),
       ]);
       const skip = new Set(['Phase', 'Money', 'CD', 'Acres', 'Power', 'Courier']);
-      refs.check.set(list.filter(([k]) => !skip.has(k)).map(([k, v]) => [k, String(v)]));
+      refs.check.set(cv ? cpChecklist(cp) : list.filter(([k]) => !skip.has(k)).map(([k, v]) => [k, String(v)]));
       const held = running && heldReason();
       let next;
       try { const d = decide(s); next = d.wait ? 'Waiting: ' + d.wait : 'Next: ' + d.reason; } catch (e) { next = 'error: ' + e.message; }
       // Core plan's line once it runs (or Autopilot has stopped at Plan done): what it does next or waits for
       const cpLine = cp && (cp.running || !running) ? (cp.running ? (cp.dryRun ? 'Dry run. ' : '') + 'Core plan ' + (cp.next ? 'next: ' + cp.next : cp.waits[0] ? 'waiting: ' + cp.waits[0] : 'is reading the game…')
         : 'Core plan stopped' + (cp.stopReason ? ': ' + cp.stopReason : '') + '.') : '';
-      refs.state.set(t, held ? `Paused: ${held}`
+      refs.state.set(t, cv ? cpLine || 'Core plan stopped.'
+        : held ? `Paused: ${held}`
         : cpLine ? cpLine
         : running ? (cfg.dryRun ? 'Dry run. ' : '') + next
         : (stopReason ? `Stopped: ${stopReason}. ` : 'Stopped. ') + next);
     }
-    const n = cdFarmNote();
+    const cv = coreView(cp);
+    const n = cdFarmNote(cv);
     refs.cdNote.set(n?.text ?? '', !!n?.btn && !!W.cdFarm?.panel);
-    refs.log.replaceChildren(...log.map((l) => mk('div', {}, l)));
+    // Recent lines: Core plan's once it has taken over, Autopilot's before
+    const recent = cv ? core.ledger.list().filter((e) => e.mod === 'CP').slice(-6).reverse().map((e) => new Date(e.t).toLocaleTimeString() + ' ' + e.text) : log;
+    refs.log.replaceChildren(...recent.map((l) => mk('div', {}, l)));
     refs.live.set(liveCountdownUntil ? `Resuming Live after the reload in ${Math.max(0, Math.ceil((liveCountdownUntil - Date.now()) / 1000))} s. Cancel to resume as a dry run instead.`
       : cp?.resumeIn ? `Core plan resumes Live after the reload in ${cp.resumeIn} s. Cancel to keep it a dry run.` : '');
     refs.stall.set(stalled ? `Looks stalled: ${stalled}. Autopilot keeps running; check the log below.` : '');
@@ -9857,7 +9909,7 @@ try {
     const t = tone(cp);
     const ph = s ? (cp?.handedOff ? 'done' : phaseOf(s)) : null;   // after the hand-off the early plan stays done, even if Iron Frames dip
     const dry = running || !cp?.running ? viewDry() : cp.dryRun, stage = cp?.running && cp.stage;
-    chrome?.setPill(heldReason() ? 'Held' : dry ? 'Dry run' : ph === 'done' ? (stage ? 'Core ' + stage : 'Done') : `P${ph ?? '?'}`, t, !(running || cp?.running));
+    chrome?.setPill(!coreView(cp) && heldReason() ? 'Held' : dry ? 'Dry run' : ph === 'done' ? (stage ? 'Core ' + stage : 'Done') : `P${ph ?? '?'}`, t, !(running || cp?.running));
     chrome?.setChip(ph == null ? 'Autopilot' : ph === 'done' ? (stage ? 'Core plan ' + stage : 'Plan done') : `Phase ${ph}`, t,
       `Autopilot · ${running ? (heldReason() ? 'paused' : cfg.dryRun ? 'dry run' : 'live') : 'stopped'}` + (cp ? ' · Core plan · ' + cpMode(cp) : ''));
     const open = !!P?.el.isConnected;

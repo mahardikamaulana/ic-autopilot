@@ -118,6 +118,14 @@
     if (!(W.corePlan.busy || (W.corePlan.running && cfg.dryRun))) { note('plan done: Core plan takes over' + (cfg.dryRun ? ' (dry run)' : '')); W.corePlan.start({ dryRun: !!cfg.dryRun }); }
   }
 
+  // Core plan runs Live and has taken over (it drives a stage, or the hand-off is done): it owns land, building and unlocks from here
+  // (scripts/core-game-userscript-plan.md, "Who sends purchases"). Autopilot keeps only its duties: bill resume, power, floors, selling.
+  function coreOwns() {
+    const c = W.corePlan;
+    if (!c?.busy) return false;
+    try { return handedOver || !!c.plan()?.stage || !!c.status().handedOff; } catch { return false; }
+  }
+
   // Does the game still look like what this script was written against? Live mode needs it.
   function checkGame(s) {
     const bad = [];

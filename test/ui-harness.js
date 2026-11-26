@@ -3,6 +3,7 @@
 //   bun test/ui-harness.js shots <outDir> [width] [height]     # screenshots of all three panels (Autopilot, CD Farm, Lab), every tab
 //   bun test/ui-harness.js check [shard]                        # DOM + keyboard + mount/unmount assertions
 //   bun test/ui-harness.js handoff-shots <outDir> [prefix] [w] [h] # Autopilot panel at Phase 5, Plan done and after the hand-off to Core plan
+//   bun test/ui-harness.js handoff-live <outDir> [prefix] [w] [h]  # Stage C, both Live on the fake server, a Core plan purchase hold
 const fs = require('fs');
 const path = require('path');
 const { chromium } = (() => {
@@ -883,7 +884,7 @@ async function useStageB(page, done, saved = {}) {
 }
 const apText = (page) => page.evaluate(() => {
   const p = document.querySelector('.egp-panel'), q = (x) => p?.querySelector(x)?.textContent ?? '';
-  return { hero: q('.idc-hero'), bar: p?.querySelector('.idc-bar i')?.style.width, state: q('.idc-state'), rows: q('.idc-rows'), main: q('button.primary'), chip: document.querySelector('.egp-chip')?.textContent ?? '' };
+  return { label: p?.querySelector('.idc-hero')?.previousElementSibling?.textContent ?? '', hero: q('.idc-hero'), check: q('.idc-sec .idc-rows'), note: [...(p?.querySelectorAll('.idc-note:not([hidden])') ?? [])].map((e) => e.textContent).join(' | '), bar: p?.querySelector('.idc-bar i')?.style.width, state: q('.idc-state'), rows: q('.idc-rows'), main: q('button.primary'), chip: document.querySelector('.egp-chip')?.textContent ?? '' };
 });
 
 async function sectionHandoff() {
@@ -901,13 +902,20 @@ async function sectionHandoff() {
       await until(page, () => window.corePlan.running && /Core plan/.test(document.querySelector('.egp-panel .idc-state')?.textContent ?? ''), null, 15000);
       t = await apText(page);
       ok(await page.evaluate(() => window.corePlan.running && window.corePlan.cfg.dryRun), 'hand-off: Plan done starts Core plan in Autopilot\'s mode (dry run)');
-      ok(/Plan done/.test(t.hero) && t.bar === '100%', 'hand-off: hero shows Plan done with a full bar', JSON.stringify(t));
-      ok(/Core plan/.test(t.state) && /Core planstage [A-D]/.test(t.rows), 'hand-off: state line and rows show Core plan and its stage', JSON.stringify(t));
+      ok(t.label === 'Core plan' && /^Stage [A-D]/.test(t.hero) && t.bar !== '100%', 'hand-off: the hero is Core plan\'s (stage and its own progress)', JSON.stringify(t));
+      ok(/Core plan/.test(t.state) && /Early-game plan✓ done/.test(t.rows) && !/Actions/.test(t.rows) && !/floor/.test(t.rows), 'hand-off: state line is Core plan\'s, the early plan is one done row', JSON.stringify(t));
+      ok(/^Stage A · start/.test(t.check) && /E1 · money engine runs/.test(t.check) && !/Lumber Camps|unlock Sawmill/.test(t.check), 'hand-off: checklist shows Core plan\'s stages and end conditions', JSON.stringify(t));
+      // A Core plan purchase holds Autopilot for a moment: no banner, no Held pill
+      await page.evaluate(() => window.earlyGame.hold('corePlan'));
+      await page.waitForTimeout(1200);
+      t = await apText(page);
+      ok(!/Held|release/.test(t.note + t.state) && !/Held/.test(await page.$eval('.egp-tab', (e) => e.textContent)), 'hand-off: a Core plan purchase hold shows no banner or Held pill', JSON.stringify(t));
+      await page.evaluate(() => window.earlyGame.release('corePlan'));
       // Core plan stops Autopilot (the hand-off): the panel still runs, and its Stop stops Core plan.
       await page.evaluate(() => { localStorage.setItem('corePlan.v1.mem.handoff', JSON.stringify({ stopped: Date.now() })); window.earlyGame.stop(); });
       await until(page, () => document.querySelector('.egp-panel button.primary')?.textContent === 'Stop' && !window.earlyGame.running);
       t = await apText(page);
-      ok(t.main === 'Stop' && /Plan done/.test(t.hero) && /^Core plan/.test(t.chip) && /Core plan/.test(t.state), 'hand-off: Autopilot stopped by the hand-off, panel shows Core plan running', JSON.stringify(t));
+      ok(t.main === 'Stop' && t.label === 'Core plan' && /^Core plan/.test(t.chip) && /Core plan/.test(t.state), 'hand-off: Autopilot stopped by the hand-off, panel shows Core plan running', JSON.stringify(t));
       await page.click('.egp-panel button.primary');
       ok(!(await page.evaluate(() => window.corePlan.running)), 'hand-off: Stop stops Core plan');
       // Handed off and stopped: Start starts Core plan, not Autopilot.
@@ -928,7 +936,7 @@ async function sectionHandoff() {
       await until(page, () => window.corePlan.running, null, 15000);
       const t = await apText(page);
       ok(await page.evaluate(() => window.earlyGame.running && window.corePlan.running && window.corePlan.cfg.dryRun), 'hand-off after a reload: Autopilot resumes and Core plan starts (dry run)');
-      ok(/Plan done/.test(t.hero) && /Core plan/.test(t.rows), 'hand-off after a reload: panel shows Plan done and Core plan', JSON.stringify(t));
+      ok(t.label === 'Core plan' && /Early-game plan✓ done/.test(t.rows), 'hand-off after a reload: panel is Core plan\'s, early plan done', JSON.stringify(t));
       await page.evaluate(() => { window.earlyGame.stop(); window.corePlan.stop(); });
       ok(errors.length === 0, 'no console / page errors (handoff reload)', JSON.stringify(errors));
     } finally { await browser.close(); }
@@ -942,7 +950,7 @@ async function sectionHandoff() {
       await load(page);
       await until(page, () => /Core plan resumes Live/.test(document.querySelector('.egp-panel .idc-note:not([hidden])')?.textContent ?? ''), null, 8000);
       const t = await apText(page);
-      ok(/Plan done/.test(t.hero) && t.main === 'Stop' && /resuming Live in \d+ s/.test(t.rows), 'hand-off reload: Core plan resume countdown shows in the panel', JSON.stringify(t));
+      ok(t.label === 'Core plan' && t.main === 'Stop' && /resuming Live in \d+ s/.test(t.rows), 'hand-off reload: Core plan resume countdown shows in the panel', JSON.stringify(t));
       await page.click('.egp-panel .idc-note:not([hidden]) button');
       await page.waitForTimeout(1300);
       ok(await page.evaluate(() => window.corePlan.running && window.corePlan.cfg.dryRun && !window.corePlan.status().resumeIn
@@ -964,6 +972,28 @@ async function sectionHandoff() {
       ok(await page.evaluate(() => window.corePlan.status().resumeIn === 0 && window.earlyGame.cfg.dryRun), 'hand-off reload: one Cancel cancels both Live countdowns');
       await page.evaluate(() => { window.earlyGame.stop(); window.corePlan.stop(); });
       ok(errors.length === 0, 'no console / page errors (handoff two countdowns)', JSON.stringify(errors));
+    } finally { await browser.close(); }
+  }
+  {
+    // Live, on the fake server: once Core plan runs Live and drives a stage it owns building, land and unlocks. Autopilot's next action on
+    // the same state is a build before, and never a build, assign, recipe, unlock, land or booster step after (2.8.16 built Lumber Camps
+    // and a Gold Mine after the hand-off).
+    const { browser, page, errors } = await open(1280, 800);
+    try {
+      await useStageB(page, true, { 'earlyGame.ui': { open: true } });
+      await page.evaluate(() => { const st = window.__st; st.land_bought[0] = (st.land_bought[0] ?? 0) + 18; });   // free acres to build on
+      await load(page);
+      await autoSetup(page);
+      const OWNED = /^(assign|create|build|land|recipe|tech):|^land$|^booster:(?!cleanup)/;
+      const next = () => page.evaluate(() => { const a = window.earlyGame.decide(window.earlyGame.read()); return a.key ?? 'wait: ' + a.wait; });
+      const before = await next();
+      ok(OWNED.test(before), 'hand-off live: before Core plan runs, Autopilot would build on the free acres', before);
+      await page.evaluate(() => { window.corePlan.cfg.handoffStopAutopilot = false; window.corePlan.start({ dryRun: false }); });
+      await until(page, () => window.corePlan.busy && window.corePlan.plan()?.stage, null, 15000);
+      const after = await next();
+      ok(await page.evaluate(() => !!window.corePlan.busy) && !OWNED.test(after), 'hand-off live: with Core plan Live, Autopilot builds, assigns, unlocks and buys land no more', after);
+      await page.evaluate(() => window.corePlan.stop());
+      ok(errors.length === 0, 'no console / page errors (handoff live)', JSON.stringify(errors));
     } finally { await browser.close(); }
   }
   {
@@ -1054,6 +1084,33 @@ const mode = process.argv[2];
 (async () => {
   if (mode === 'check') return checks(process.argv[3]);   // bun test/ui-harness.js check [shard]
   if (mode === 'auto') return checks('auto');                // the three Auto shards
+
+  if (mode === 'handoff-live') {   // bun test/ui-harness.js handoff-live <outDir> [prefix] [w] [h]: the 2.8.16 report state, Live on the fake server
+    // Stage C (Assembly Plant unlocked), Plan done, 18 free acres, Autopilot Live with Auto power off (so it runs on for its chores),
+    // Core plan Live, checklist open; then a Core plan purchase hold as the user caught it.
+    const out = process.argv[3], pre = process.argv[4] || 'handoff-live', w = +process.argv[5] || 1650, hgt = +process.argv[6] || 962;
+    fs.mkdirSync(out, { recursive: true });
+    const { browser, page, errors } = await open(w, hgt, false, true);
+    await useStageB(page, true, { 'earlyGame.ui': { open: true, checkOpen: true } });
+    await page.evaluate(() => {
+      const st = window.__st, cat = window.__fiber.memoizedProps.catalog;
+      const ap = cat.buildings.find((b) => b.name === 'Assembly Plant').id;
+      if (!st.unlocked_buildings.includes(ap)) st.unlocked_buildings.push(ap);
+      st.land_bought[0] = (st.land_bought[0] ?? 0) + 18;
+    });
+    await load(page);
+    await autoSetup(page);
+    await page.evaluate(() => { window.corePlan.cfg.handoffStopAutopilot = false; window.earlyGame.start({ dryRun: false }); });
+    await page.waitForTimeout(12000);
+    await page.evaluate(() => window.earlyGame.hold('corePlan'));
+    await page.waitForTimeout(1200);
+    await page.screenshot({ path: path.join(out, pre + '.png') });
+    console.log('sent:', JSON.stringify(await page.evaluate(() => window.__fake.sent.map((m) => m.type + (m.building != null ? ':' + m.building : '')))));
+    console.log('AP log:', JSON.stringify(await page.evaluate(() => window.idleCore.ledger.list().filter((e) => e.mod === 'AP').map((e) => e.text))));
+    console.log('errors:', JSON.stringify(errors));
+    await page.evaluate(() => { window.earlyGame.release('corePlan'); window.earlyGame.stop(); window.corePlan.stop(); });
+    await browser.close();
+  }
 
   if (mode === 'handoff-shots') {   // bun test/ui-harness.js handoff-shots <outDir> [prefix] [width] [height]: Phase 5, Plan done, after the hand-off
     const out = process.argv[3], pre = process.argv[4] || 'handoff', w = +process.argv[5] || 1650, hgt = +process.argv[6] || 962;
