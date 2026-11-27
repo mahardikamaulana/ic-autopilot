@@ -82,6 +82,9 @@ try {
     const sock = { ws: null, textMsgs: 0, diffs: 0, muts: 0, mutTick: 0, tick: 0, tickAt: 0, sendAt: 0, ackAt: 0, resyncing: false };
     const hrNow = () => globalThis.performance?.now?.() ?? Date.now();
     const wakers = new Set();
+    // Modules that read board frames (Module watch) get each parsed text frame here: idleCore.onFrame(fn) returns its unsubscribe.
+    const frameSubs = new Set();
+    const onFrame = (fn) => { frameSubs.add(fn); return () => frameSubs.delete(fn); };
     function seeTick(t) { if (typeof t === 'number' && t > sock.tick) { sock.tick = t; sock.tickAt = Date.now(); } }
     function onMessage(e) {
       runDue();
@@ -96,6 +99,7 @@ try {
         const u = m.diff?.ssi?.last_user_mutation_tick;
         if (typeof u === 'number' && u > sock.mutTick) { sock.mutTick = u; sock.muts++; if (sock.sendAt && !sock.ackAt) sock.ackAt = hrNow(); for (const w of [...wakers]) w(); }
         if (m.kind === 'Orders') Object.assign(sock.book, { at: Date.now(), pending: Math.max(0, sock.book.pending - 1), truncated: !!m.truncated });
+        for (const f of frameSubs) { try { f(m); } catch (err) { console.error('[idleCore]', err); } }
       } catch { }
     }
     // ---- player order book ---------------------------------------------------------------
@@ -114,15 +118,34 @@ try {
     function hookSend(d) {
       if (typeof d === 'string' && d.includes('"Resync"')) sock.resyncing = true;
       if (typeof d === 'string' && d.includes('"SetBoardFilter"')) {
-        try { const m = JSON.parse(d); if (m.board === 'Orders') Object.assign(sock.book, { filter: m.filter ?? null, filterAt: Date.now(), ours: sendingOurs, pending: sock.book.pending + 1 }); } catch { }
+        try {
+          const m = JSON.parse(d);
+          if (m.board) sock.boards[m.board] = { filter: m.filter ?? null, ours: sendingOurs, at: Date.now() };
+          if (m.board === 'Orders') Object.assign(sock.book, { filter: m.filter ?? null, filterAt: Date.now(), ours: sendingOurs, pending: sock.book.pending + 1 });
+        } catch { }
       }
       return baseSend.call(this, d);
+    }
+    // sock.boards: the last filter sent on this socket per board (by the game or by us); a new socket starts from the game's own store.
+    const boardsOf = (g) => {
+      const out = {};
+      for (const [b, f] of g?.boardFilters ?? []) out[b] = { filter: f ?? null, ours: false, at: 1 };
+      return out;
+    };
+    sock.boards = boardsOf();
+    // Sends a board filter of ours (hookSend records it as ours); false when the socket is not open.
+    function sendBoardFilter(board, filter) {
+      const ws = sock.ws;
+      if (!ws || ws.readyState !== 1 || unloaded) return false;
+      sendingOurs = true;
+      try { ws.send(JSON.stringify({ type: 'SetBoardFilter', board, filter })); } finally { sendingOurs = false; }
+      return true;
     }
     function attach(ws, g) {
       if (ws === sock.ws) return;
       sock.ws?.removeEventListener('message', onMessage);
       if (sock.ws?.send === hookSend) sock.ws.send = baseSend;
-      sock.ws = ws; sock.book = newBook(g);
+      sock.ws = ws; sock.book = newBook(g); sock.boards = boardsOf(g);
       sock.resyncing = false;
       ws?.addEventListener('message', onMessage);
       if (ws && typeof ws.send === 'function') { baseSend = ws.send; ws.send = hookSend; }
@@ -146,9 +169,7 @@ try {
         const ws = sock.ws;
         if (!ws || ws.readyState !== 1 || unloaded) return;
         if (!sock.book.filter && !onGoodsTab()) {
-          sendingOurs = true;
-          try { ws.send(JSON.stringify({ type: 'SetBoardFilter', board: 'Orders', filter: { items: [], sides: [], regions: [region], utilities: [], quirks: [], nums: [] } })); }
-          finally { sendingOurs = false; }
+          sendBoardFilter('Orders', { items: [], sides: [], regions: [region], utilities: [], quirks: [], nums: [] });
         }
         clearTimeout(bookTimer); bookTimer = setTimeout(orderBook.release, BOOK_IDLE_MS);
       },
@@ -323,7 +344,7 @@ try {
     // Each module offers exportCfg() / importCfg(obj); Infinity travels as the string "Infinity".
     const rep = (_k, v) => (v === Infinity ? 'Infinity' : v);
     const rev = (_k, v) => (v === 'Infinity' ? Infinity : v);
-    const MODS = ['earlyGame', 'cdFarm', 'labRunner', 'autoUtil', 'corePlan', 'keepOnline'];
+    const MODS = ['earlyGame', 'cdFarm', 'labRunner', 'autoUtil', 'corePlan', 'keepOnline', 'moduleWatch'];
     function exportConfig() {
       const out = { app: 'idlecorp-toolkit', format: 1, exportedAt: new Date().toISOString() };
       for (const m of MODS) out[m] = W[m]?.exportCfg?.() ?? null;

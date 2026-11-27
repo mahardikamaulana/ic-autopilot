@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         IC Autopilot
 // @namespace    idlecorp-toolkit
-// @version      2.8.22
+// @version      2.8.23
 // @author       XPARAD0X
-// @description  Early-game Autopilot, CD Farm (Construction Data by building and demolishing buildings; Auto picks the cheapest source itself), Lab runner (keeps the Manufacturing Labs researching), Auto ship (an "Auto ship" button on every distributor bid), Auto utilities (an "Auto" switch that keeps the power and water subscriptions at what the groups need), Core plan and Keep online (keeps the socket alive while the tab is hidden) for IdleCorp, each with a panel, menu or switch in the game UI. Everything runs live by default.
+// @description  Early-game Autopilot, CD Farm (Construction Data by building and demolishing buildings; Auto picks the cheapest source itself), Lab runner (keeps the Manufacturing Labs researching), Auto ship (an "Auto ship" button on every distributor bid), Auto utilities (an "Auto" switch that keeps the power and water subscriptions at what the groups need), Core plan, Keep online (keeps the socket alive while the tab is hidden) and Module watch (alerts when a listed module matches a saved filter; never buys) for IdleCorp, each with a panel, menu or switch in the game UI. Everything runs live by default.
 // @homepageURL  https://github.com/mahardikamaulana/ic-autopilot
 // @supportURL   https://github.com/mahardikamaulana/ic-autopilot/issues
 // @updateURL    https://raw.githubusercontent.com/mahardikamaulana/ic-autopilot/main/ic-autopilot.user.js
@@ -33,5 +33,6 @@
 //                                   (no slot limit), plus an "Auto ship" jobs table on the Market page
 //   5. Auto utilities (window.autoUtil) an "Auto" switch on the Load tile (power) and the Supply tile (water) of the
 //                                   Utilities pages: the grid service / waterworks subscription follows the load
+//   6. Module watch (window.moduleWatch) a "Watch" button on the Module Exchange page: alerts, never buys, when a listed module matches a saved filter
 // File order is core, CD Farm, Lab, Auto ship, Auto utilities, Autopilot: Autopilot stays last (the simulator evals it to the end of the file).
 // This replaces the separate cd-farm.user.js and early-game.user.js: uninstall those two first, or both copies run side by side.

@@ -70,12 +70,13 @@ addEventListener?.('pagehide', flushLedger);
 
 W.idleCore = {
   version: 1,
-  walk, sleep, every, sleepWake, waitConfirm, tune, markSend, lastRtt, nowTick, seeTick, sock, orderBook, link, realHidden,
+  walk, sleep, every, sleepWake, waitConfirm, tune, markSend, lastRtt, nowTick, seeTick, sock, orderBook, sendBoardFilter, onFrame, link, realHidden,
   h, makeDraggable, toast, ledger: ledgerApi, ui,
   setBadge, notify, askNotify, notifyPerm, stopAll, reserves, floorDesigns, courierCU, powerPriceMult, bought,
   exportConfig, importConfig, exportFile, importFile, missingFields,
   _unload() {
     orderBook.release();
+    frameSubs.clear();
     unloaded = true;
     sock.ws?.removeEventListener('message', onMessage);
     if (sock.ws?.send === hookSend) sock.ws.send = baseSend;

@@ -25,6 +25,10 @@ On the Utilities pages the **Load** tile (power) and the **Supply** tile (water)
 
 From the console: `autoUtil.set('power', true)`, `autoUtil.status()`, `autoUtil.conf.power.spare = 2` (extra MW above the need), `autoUtil.conf.holdMin = 15`.
 
+## Module watch
+
+On the Module Exchange page a **Watch** button opens a list of filters in the game's own words (`overclock`, `refiner`, `mythic`, `twinned >= 10`, `price <= 500`). A listing that matches a filter alerts you once: a toast while the tab is visible, a desktop notification while it is hidden, and a tab-title badge until you open the Module Exchange. It never buys. With the page closed, it asks the server for the watched listings itself, one filter at a time. Watches are saved in this browser: `moduleWatch.add('overclock mythic price <= 500')`, `moduleWatch.status()`.
+
 ## Develop
 
 Needs [bun](https://bun.sh).
