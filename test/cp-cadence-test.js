@@ -342,8 +342,9 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
     assert.strictEqual(hc(st, deals).find((x) => x.id === 'cash').ok, false);
   });
   await t('cadence: the power check counts power bought on contracts (the subscription only covers the rest of the load)', () => {
-    const st = plain(), v0 = view(cpS, st), corp = st.ssi.corp_id;
-    const load = v0.groups.reduce((a, g) => a + (!g.paused && g.count > 0 ? (v0.bld(g.building).draws?.power ?? 0) * g.count : 0), 0), sub = 1;
+    const st = plain(), corp = st.ssi.corp_id;
+    // the shared power model (plan A4): running groups (a paused one with a wave in progress too) and recipe draws
+    const load = globalThis.idleCore.powerMeasure('power', 0, st, CAT, 0, []).load, sub = 1;
     assert.ok(load > sub, 'the fixture draws power');
     st.subscriptions = { 0: { power: sub } };
     const contract = (o) => ({ id: 11, seller: corp + 1, buyer: corp, utility: 'power', amount: load - sub, region: 0, state: 'Active', drawn: load - sub, delivered: load - sub, offer: 1, ...o });
@@ -351,12 +352,26 @@ const plain = () => { const st = F.liveB(); st.standing_fills = {}; return st; }
     assert.strictEqual(pc(null).ok, false, 'board never seen: the subscription alone is short');
     const p = pc([contract()]);
     assert.strictEqual(p.ok, true, p.why);
-    assert.strictEqual(p.why, 'Auto power on, ' + sub + ' MW subscribed + ' + (load - sub) + ' MW bought for ' + load + ' MW load');
+    assert.strictEqual(p.why, 'Auto power on, ' + sub + ' MW subscribed + ' + (load - sub) + ' MW bought for ' + load + ' MW load: ' + sub + ' MW needed');
     assert.strictEqual(pc([contract({ buyer: corp + 2 })]).ok, false, 'another Corporation bought it');
     assert.strictEqual(pc([contract({ utility: 'water' })]).ok, false, 'bought water is not power');
     assert.strictEqual(pc([contract({ region: 1 })]).ok, false, 'bought in another region');
     assert.strictEqual(pc([contract({ state: 'Breached' })]).ok, false, 'an ended contract');
     assert.strictEqual(pc([contract({ delivered: 0 })]).ok, false, 'nothing delivered: the grid covers that gap, so it is not supply');
+  });
+  await t('cadence (plan A4): the hourly power check uses the shared model: a Retail Store with no work rows counts, a contract ending within 30 min counts as gone', () => {
+    const st = plain(), corp = st.ssi.corp_id;
+    st.groups[16] = { building: B('Retail Store'), region: 0, count: 1, recipe: null, equipped: 0, work: [] };
+    const m0 = globalThis.idleCore.powerMeasure('power', 0, st, CAT, 1000, []);
+    assert.strictEqual(m0.base, 2, 'the store draws its 2 MW baseload');
+    st.subscriptions = { 0: { power: 5 } };
+    const contract = (o) => ({ id: 11, seller: corp + 1, buyer: corp, utility: 'power', amount: Math.ceil(m0.need) - 5, region: 0, state: 'Active', drawn: 0, delivered: 0, offer: 1, started_at: 0, duration: 1e9, ...o });
+    const pc = (contracts) => XS.hourlyChecks(view(cpS, st), F.ctxOf({ tick: 1000, contracts, mods: { autoUtil: { conf: { power: { on: true } } } } }), { stage: 'D' }).find((x) => x.id === 'power');
+    assert.strictEqual(pc([contract()]).ok, true, pc([contract()]).why);
+    assert.strictEqual(pc([]).ok, false, 'without the contract 5 MW is short of the load with the store');
+    const ending = pc([contract({ duration: 1000 + 30 * 120 - 1 })]);
+    assert.strictEqual(ending.ok, false, ending.why);
+    assert.match(ending.why, /contracts end within 30 min/);
   });
   await t('cadence runner: a dry run alerts too (the alert is not a game command)', async () => {
     const st = plain();

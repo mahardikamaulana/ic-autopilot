@@ -7,15 +7,24 @@
 //   - Kiln stock gate: unpause / switch the Kiln until Glass and Concrete reach their gates, pause again after;
 //   - Wooden Frame gate: pause at most cfg.keepFrameTimber Frame Timber Workshops at the WF keep line (Rivet use for cfg.ftKeepHours),
 //     resume below half (plan D-3, A2);
-//   - Stage B-D: spare Frame Timber Workshops switch to furniture (the best $ per Workshop-hour on the board), keeping 1 on Frame Timber;
+//   - Furniture Workshop targets come from the retail allocator (window.idleCore.retailAlloc, plan B1): $/h-best Workshops per good under
+//     Planks (Sawmill output + its measured error + a stock budget above plankReserve, plan B2), running Workshops (owned + buildable) and
+//     smoothed demand and prices, once a Retail Store group exists; before that, or without the retail director's facts (no board), the
+//     appetite / 40-30-30 split (furnitureSplit) stays as the fallback. Plan moves that idle or park Workshops wait cfg.planHoldMin;
+//   - a move into a running group (switch, pool tidy, buy) waits until the power it adds is free, asking Auto utilities for it (plan R-5);
+//   - Stage B-D: spare Frame Timber Workshops switch to the plan's largest gap (plan B3; fallback: the best $ per Workshop-hour), keeping 1 on Frame Timber;
+//   - furniture above the plan's total (the stock budget ended, a demand cap) steps back to the pool, one per step, newest first, and stays
+//     parked there until the plan has a gap (plan B2);
 //   - Stage C-D: Farms go in 4 waves 3 h apart (UnassignBuildings + DemolishBuilding), only when the last wave's acres are built and running
 //     and no group eats Cotton;
 //   - build-out toward core-math landRule: a consumer only when its supplier covers it, each buy gated by acre, kit, wood (R8), bill floor
 //     and the money floor; Stage C-D buys the acre too while the land rule is open, Stage B while (acre + $1,200) / $1,444 <= 20 h (plan D-1).
-//   - Stage B-D: furniture Workshops follow the board: a recipe 1+ Workshops over / under the split for cfg.rebalanceHours moves one (plan D3);
+//   - Stage B-D: furniture Workshops follow the plan: a recipe 1+ Workshops over / under it for cfg.rebalanceHours moves one (plan D3; the
+//     allocator keeps the current mix unless the plan gains more than cfg.moveGainPct);
 //   - Stage D after a checkpoint pass (never on the fail path): cfg.benchWorkshops Bench Workshop(s), the 4th shelf, on the Rivet x3 floor, once
 //     Concrete covers the Kiln gate + 48 h of Bench use; while a Bench group exists the Kiln gate's Concrete target rises by that use (plan D4).
-// Pure helpers for tests: corePlan._buildout.furnitureSplit / nextBuildStep / waveState / waveStep; wfKeep is the keep line Core plan's reserve uses.
+// Pure helpers for tests: corePlan._buildout.furnitureSplit / alloc / nextBuildStep / waveState / waveStep; wfKeep is the keep line Core plan's reserve uses;
+// alloc(v, ctx) is the plan the retail director shelves and sizes stores from.
 // nextBuildStep's saving (a bill / money floor wait) makes the Stage B land director wait too; pendingInvest feeds Core plan's E5.
 // @@MODULE cp-buildout
 try {
@@ -49,6 +58,14 @@ try {
     ftKeepMax: 19,               // ... capped here, so stock settles under 20 and E3 can hold (a Rivet Workshop takes 6 per wave start)
     rebalanceHours: 6,           // a furniture recipe's gap to the board's split must hold this long before a Workshop moves (plan D3)
     benchWorkshops: 1,           // Bench Workshops in Stage D after a checkpoint pass (wiki 4.7 step 2)
+    moveGainPct: 3,              // the retail allocator moves furniture Workshops only for a gain above this (plan B1; rebalance also holds rebalanceHours)
+    stockBurnHours: 24,          // Planks above plankReserve are planned to run down over this many hours with extra Workshops (plan R-4)
+    stepBackHours: 4,            // ... stopped when the projected stock would reach plankReserve within this many hours (plan B2)
+    stockBand: 10,               // ... and started again only once the stock is this % above plankReserve (hysteresis)
+    plankReserve: 1000,          // Planks always kept, on top of other modules' reserves, the next Workshop builds and Frame Timber's keep-line need
+    planHoldMin: 30,             // a step back, a park or a pool placement the plan asks for must hold this long first (no churn on a wobbling budget)
+    boardSmoothHours: 2,         // the allocator plans from board prices and appetite smoothed over about this many hours (EMA)
+    plankEmaHours: 2,            // the Planks model's error is measured from the stock, smoothed over about this many hours (EMA)
   };
 
   // ---- small pure helpers ------------------------------------------------------------------------------------------------------
@@ -108,6 +125,120 @@ try {
     return val;
   }
 
+  // ---- the retail allocator (plan B1, B2) -------------------------------------------------------------------------------------------
+  // Planks kept in stock (plan B2): cfg.plankReserve, other modules' finite Planks reserves, the next cfg.kitWaveBuilds Workshop builds
+  // (build items + kit), and the Planks Frame Timber needs to bring Wooden Frames up to their keep line.
+  function plankReserve(v, ctx, e) {
+    const pl = e.planksId, other = ctx.reserveItems?.[pl];
+    const builds = amt(e.kitOf(e.id.ws, null), pl) * (cfg.kitWaveBuilds ?? 3);
+    const wfShort = Math.max(0, (wfKeep(v, ctx, e) ?? 0) - v.has('Wooden Frame')) * amt(e.R.ft.inputs, pl);
+    return cfg.plankReserve + (Number.isFinite(other) ? other : 0) + builds + wfShort;
+  }
+  // Workshops cash and acres buy now: each at its price + bill floor, with the acres it lacks (Stage C-D up to the land rule's last acre;
+  // Stage B on free acres only, as nextBuildStep). Kits are nextBuildStep's check.
+  function buildableWs(v, ctx, e, rule) {
+    const bd = v.bld(e.id.ws), addBill = cp._billNeed(v, bd.draws?.power ?? 0) - cp._billNeed(v, 0);
+    const cap = conversionStage(v) && rule ? Math.min(rule.lastAcre, ACRE_CAP) : v.acresOwned;
+    let cash = v.money - (ctx.floorCents ?? 0) - cp._billNeed(v, 0), free = Math.max(0, v.freeAcres - cfg.bufferAcres), bought = 0, n = 0;
+    for (; n < 100; n++) {
+      const lack = Math.max(0, bd.acres - free);
+      if (v.acresOwned + bought + lack > cap) break;
+      let c = W.idleCore.planner.price(bd.cost, v.ownedAll('Workshop'), n) + addBill;
+      for (let i = 0; i < lack; i++) c += cp._acrePriceCents(v.landBought + bought + i);
+      if (cash < c) break;
+      cash -= c; free += lack - bd.acres; bought += lack;
+    }
+    return n;
+  }
+  // Board price and appetite per good smoothed (EMA over about cfg.boardSmoothHours; mem board, sampled every 10 min, reset after a 6 h gap),
+  // so a board that moves fast does not lock the Workshops into one phase of it (plan risk "flip-flops").
+  function smoothBoard(m, mm, goods, now) {
+    const o = mm.board && now >= mm.board.t && now - mm.board.t < 6 * HOUR ? mm.board : null;
+    const dtH = o ? (now - o.t) / HOUR : 0, a = o ? dtH / (dtH + cfg.boardSmoothHours) : 1;
+    const p = {}, ap = {};
+    for (const g of goods) {
+      const op = o?.p?.[g.id], oa = o?.a?.[g.id];
+      p[g.id] = op > 0 ? op + a * (g.boardPrice - op) : g.boardPrice;
+      ap[g.id] = oa >= 0 ? oa + a * (g.appetite - oa) : g.appetite;
+    }
+    if (m && (!o || now - o.t >= 600000)) m.set({ board: { t: now, p, a: ap } });
+    return { p, a: ap };
+  }
+  // Error of the Planks model (plan B2): EMA (cfg.plankEmaHours) of the stock's measured slope less the modelled one (Sawmills - running
+  // Workshops at their nominal rates) over intervals of 10 min to 1 h (mem plk; a longer gap starts over). An interval in which the model
+  // changed (a move: new groups start with a burst of wave inputs) is dropped. Starts at 0, used after 3 intervals, else 0.
+  function plankCorr(m, mm, stock, model, now) {
+    const p = mm.plk, dtH = p ? (now - p.t) / HOUR : -1;
+    if (!m) return 0;
+    if (!p || dtH < 0 || dtH > 1) { m.set({ plk: { t: now, s: stock, m: model, r: p?.r ?? 0, n: 0 } }); return 0; }
+    if (Math.abs(model - p.m) > 1e-6) { m.set({ plk: { ...p, t: now, s: stock, m: model } }); return p.n >= 3 ? p.r : 0; }
+    if (dtH < 1 / 6) return p.n >= 3 ? p.r : 0;
+    const x = (stock - p.s) / dtH - p.m, r = p.r + dtH / (dtH + cfg.plankEmaHours) * (x - p.r);
+    m.set({ plk: { t: now, s: stock, m: model, r, n: p.n + 1 } });
+    return p.n + 1 >= 3 ? r : 0;
+  }
+  // A condition a plan move needs to have held for cfg.planHoldMin (mem hold[key] = since it was first seen); false and cleared when it does not hold.
+  function holdFor(ctx, key, on) {
+    const m = ctx.mem?.('buildout');
+    if (!m) return on;
+    const h = { ...(m.get().hold ?? {}) }, now = ctx.now ?? Date.now();
+    if (!on) { if (h[key] != null) { delete h[key]; m.set({ hold: h }); } return false; }
+    if (h[key] == null) { h[key] = now; m.set({ hold: h }); }
+    return now - h[key] >= cfg.planHoldMin * 60000;
+  }
+  // The plan from window.idleCore.retailAlloc, once per view (ctx._boAlloc), with byKey (Workshops per FURN key), extra (Planks/h the stock
+  // budget adds), burn and reserve. Only once a Retail Store group exists: before it sells, Wooden Frames and the pre-store plan have value
+  // the allocator cannot see. Inputs: the retail director's facts on a smoothed board (price x quality, appetite x 30 x share, stock), runs
+  // per wave x waves/h at the furniture floor, Planks the Sawmills make less what other running Workshops eat (a gate-held one eats nothing)
+  // plus the model's measured error, running furniture Workshops (a paused group is the user's: not counted) + spare Frame Timber + pooled
+  // (owned) + buildable, stores. A good without its floor is out while floors are not applied here. A measured retail fail caps each shelved
+  // good at its kept Workshops (as failKeep).
+  // B2: the Planks stock budget, (stock when the burn started - reserve) / cfg.stockBurnHours (mem burnFrom), is off once the stock is at the
+  // reserve + cfg.stepBackHours of the projected drain, and on again only cfg.stockBand % above that line (mem burn). While on, the current assignment is kept up to one Workshop's Planks over its budget.
+  // null without the retail facts or a store: callers keep the appetite / 40-30-30 split (furnitureSplit) as their fallback.
+  function allocOf(v, ctx, e = engine(v, ctx), rule = null) {
+    if (ctx._boAlloc?.v === v) return ctx._boAlloc.al;
+    const f = ctx.retail, ra = W.idleCore.retailAlloc;
+    let al = null;
+    if (!e.missing && ra && f?.goods && f.share != null && f.storeGroup) {
+      const m = ctx.mem?.('buildout'), mm = m?.get?.() ?? {}, now = ctx.now ?? Date.now();
+      const keyOf = Object.fromEntries(FURN.map(([k, n]) => [n, k]));
+      const by = ctx.retailFail ? f.capDecision?.capBy ?? null : null;
+      const sm = smoothBoard(m, mm, f.goods, now);
+      const goods = f.goods.map((g) => {
+        const k = keyOf[g.name], r = k ? e.R[k] : null;
+        const uph = r ? (r.outputs[0]?.amount ?? 1) * runsH(r, Math.max(e.rateNow(r), FLOOR.Workshop)) : 0;
+        const d = f.demandH({ ...g, appetite: sm.a[g.id] });
+        const dem = by && g.name in by ? Math.min(d, Math.ceil(by[g.name] - 1e-9) * uph) : d;
+        return { id: g.id, name: g.name, unitCents: g.unit * sm.p[g.id] / g.boardPrice, planksPerUnit: g.ppu, unitsPerWorkshopHour: uph, demandPerHour: dem,
+          current: k ? e.furnRun[k] : 0, floorOk: !!r && (cfg.applyFurnitureFloor || !floorMissing(e, r)), region: REGION, stock: g.stock };
+      });
+      const fts = movableFt(ctx, e), ftRate = e.wsPlanksH(e.R.ft), keep = cfg.keepFrameTimber;
+      const ftPaused = e.sum(fts.filter((g) => g.paused)), ftRun = e.sum(fts.filter((g) => !g.paused));
+      const spare = Math.max(0, ftPaused + ftRun - keep), spareRun = Math.max(0, ftRun - Math.max(0, keep - ftPaused));
+      const furnUse = FURN.reduce((a, [k]) => a + e.furnRun[k] * e.runPlanksH(e.R[k]), 0);
+      const stock = v.has('Planks'), net = e.planksSupply - e.planksLive + plankCorr(m, mm, stock, e.planksSupply - e.planksLive, now);
+      const supply = Math.max(0, net + furnUse + spareRun * ftRate);
+      const reserve = plankReserve(v, ctx, e), line = reserve + Math.max(0, -net) * cfg.stepBackHours;
+      // on again cfg.stockBand % above the line: after a step back the drain (so the line) is lower, and the burn restarts at the lower
+      // rate the smaller stock gives, so the stock steps down to the reserve instead of stopping 4 h of the old drain above it
+      const burn = mm.burn ? stock > line : stock >= line * (1 + cfg.stockBand / 100);
+      // the burn rate is set by the stock when it started (raised if the stock grows past it), so it runs down at a steady rate and reaches the line
+      const from = burn ? Math.max(stock, mm.burn ? mm.burnFrom ?? 0 : 0) : null;
+      if (m && (burn !== !!mm.burn || from !== (mm.burnFrom ?? null))) m.set({ burn, burnFrom: from });
+      const maxUse = Math.max(...FURN.map(([k]) => e.wsPlanksH(e.R[k])));
+      al = ra({ goods, supply: { Planks: supply }, stock: { Planks: burn ? from : 0 }, reserve: { Planks: reserve },
+        workshops: { owned: FURN.reduce((a, [k]) => a + e.furnRun[k], 0) + spare + e.ownPool(e.id.ws), buildable: buildableWs(v, ctx, e, rule) },
+        stores: { [REGION]: v.owned('Retail Store') }, cfg: { stockBurnHours: cfg.stockBurnHours, moveGainPct: cfg.moveGainPct, maxShelves: 4, curSlack: burn ? { Planks: maxUse } : {} } });
+      Object.assign(al, { byKey: Object.fromEntries(FURN.map(([k, n]) => [k, al.alloc[v.idI(n)] ?? 0])), extra: (al.budget.Planks ?? 0) - supply, burn, reserve, net });
+    }
+    ctx._boAlloc = { v, al };
+    return al;
+  }
+  // Planks/h a move may add: what the Sawmills make plus the stock budget and the model's measured error, less what the Workshops eat now.
+  // With the allocator a gate-held group eats nothing (al.net is from running groups); the switch then counts a held source as eating nothing.
+  const planksRoom = (v, ctx, e) => { const al = allocOf(v, ctx, e); return al ? al.net + al.extra : e.planksSupply - e.planksDemand; };
+
   // ---- reading the engine from a view ---------------------------------------------------------------------------------------------
   function engine(v, ctx) {
     const N = v.N, C = v.C, st = v.st;
@@ -128,6 +259,7 @@ try {
     const furnKeys = FURN.map(([k]) => k);
     const wsGroups = groupsOf(id.ws);
     const furnNow = Object.fromEntries(furnKeys.map((k) => [k, sum(wsGroups.filter((g) => g.recipe === R[k].id))]));
+    const furnRun = Object.fromEntries(furnKeys.map((k) => [k, sum(wsGroups.filter((g) => g.recipe === R[k].id && !g.paused))]));   // a paused furniture group is the user's
     const ftNow = sum(wsGroups.filter((g) => g.recipe === R.ft.id));
     const planksPerSaw = (R.planks.outputs[0]?.amount ?? 1) * runsH(R.planks, rateNow(R.planks));
     const woodPerSaw = amt(R.planks.inputs, woodId) * runsH(R.planks, ratePlan(R.planks, 'Sawmill'));
@@ -139,6 +271,7 @@ try {
     // Each group at the floor it really runs (Make Bench x3, not furniture's x5); one with no floor yet at the floor it will get.
     const runPlanksH = (r) => (layout(r) ? amt(r.inputs, planksId) * runsH(r, rateNow(r)) : wsPlanksH(r));
     const planksDemand = wsGroups.filter((g) => live(g) || (ftHeld.has(g.id) && g.count > 0)).reduce((a, g) => a + g.count * (C.recipes[g.recipe] ? runPlanksH(C.recipes[g.recipe]) : 0), 0);
+    const planksLive = wsGroups.filter(live).reduce((a, g) => a + g.count * (C.recipes[g.recipe] ? runPlanksH(C.recipes[g.recipe]) : 0), 0);   // eaten now (no gate-held group)
     const woodSupply = sum(groupsOf(id.camp, R.wood).filter(live)) * woodPerCamp;
     const woodDemand = sum(groupsOf(id.saw, R.planks).filter(live)) * woodPerSaw;
     const kitOf = (b, r) => [...(v.bld(b).build_items ?? []), ...((r && layout(r)?.bom) ?? v.bld(b).default_kit ?? [])];
@@ -148,8 +281,8 @@ try {
     const benchRuns = R.bench ? runsH(R.bench, Math.max(rateNow(R.bench), BENCH_FLOOR)) : 0;
     const benchConcreteH = (n) => n * benchRuns * (R.bench ? amt(R.bench.inputs, v.idI('Concrete')) : 0);
     const benchPlanksH = R.bench ? benchRuns * amt(R.bench.inputs, planksId) : 0;
-    return { id, R, ownPool, benchNow, benchConcreteH, benchPlanksH, layout, rateNow, groupsOf, sum, furnNow, ftNow, wsGroups, planksPerSaw, woodPerSaw, woodPerCamp, wsPlanksH,
-      planksSupply, planksDemand, woodSupply, woodDemand, kitOf, woodId, planksId,
+    return { id, R, ownPool, runPlanksH, benchNow, benchConcreteH, benchPlanksH, layout, rateNow, groupsOf, sum, furnNow, furnRun, ftNow, wsGroups, planksPerSaw, woodPerSaw, woodPerCamp, wsPlanksH,
+      planksSupply, planksDemand, planksLive, woodSupply, woodDemand, kitOf, woodId, planksId,
       camps: v.owned('Lumber Camp'), saws: v.owned('Sawmill'), workshops: v.owned('Workshop'), farms: v.owned('Farm') };
   }
   const short = (v, list, n = 1) => {   // what is missing from stock for n x list
@@ -175,13 +308,15 @@ try {
     if (e.planksSupply < e.planksDemand + e.benchPlanksH) return 'planks ' + Math.round(e.planksSupply) + '/h cannot feed ' + Math.round(e.planksDemand + e.benchPlanksH) + '/h';
     return null;
   }
-  // Targets: Camps / Sawmills from the land rule, Workshops from the furniture split of the rule's planks, capped by ctx.retailCap.
+  // Targets: Camps / Sawmills from the land rule, Workshops from the retail allocator (plan B1; on a measured fail the Workshops it cannot use
+  // go to Frame Timber), else from the furniture split of the rule's planks, capped by ctx.retailCap.
   function targets(v, ctx, rule, e) {
-    const split = furnitureSplit(ctx.retailBoard, rule.planksH, v.C);
-    const furn = { bookshelf: split.bookshelf, table: split.table, chair: split.chair };
-    let ft = cfg.keepFrameTimber;
-    const kept = failKeep(ctx, furn);
-    if (kept !== furn || (typeof ctx.retailCap === 'number' && split.total > ctx.retailCap)) {
+    const al = allocOf(v, ctx, e, rule);
+    const split = al ? null : furnitureSplit(ctx.retailBoard, rule.planksH, v.C);
+    const furn = al ? { ...al.byKey } : { bookshelf: split.bookshelf, table: split.table, chair: split.chair };
+    let ft = cfg.keepFrameTimber + (al && ctx.retailFail ? al.spareWorkshops : 0);
+    const kept = al ? furn : failKeep(ctx, furn);
+    if (!al && (kept !== furn || (typeof ctx.retailCap === 'number' && split.total > ctx.retailCap))) {
       // Over the retail cap: the per-good keep on a measured fail, else the board's mix inside the cap; the planks left over go to Frame Timber.
       const capped = kept !== furn ? kept : split.alloc(Math.max(0, Math.floor(ctx.retailCap)));
       const extra = Object.keys(furn).reduce((a, k) => a + (furn[k] - capped[k]) * split.planksPerWs[k], 0);
@@ -197,12 +332,13 @@ try {
       camps += Math.ceil(q * m.woodPerPlank / m.campWoodH) - Math.ceil(p * m.woodPerPlank / m.campWoodH);
       sawmills += Math.ceil(q / m.smPlanksH) - Math.ceil(p / m.smPlanksH);
     }
-    return { split, furn, ft, rivet, bench, camps, sawmills, workshops: furn.bookshelf + furn.table + furn.chair + ft + rivet + bench };
+    return { split, al, source: al ? 'allocator, ' + al.binding : split.source, furn, ft, rivet, bench, camps, sawmills, workshops: furn.bookshelf + furn.table + furn.chair + ft + rivet + bench };
   }
   // The furniture recipe the next Workshop should run (largest gap to target), or Frame Timber when furniture is at its cap.
   function nextWorkshopRecipe(e, tg) {
     let best = null;
-    for (const [k] of FURN) { const gap = tg.furn[k] - e.furnNow[k]; if (gap > 0 && (!best || gap > best.gap)) best = { k, gap }; }
+    const cur = tg.al ? e.furnRun : e.furnNow;
+    for (const [k] of FURN) { const gap = tg.furn[k] - cur[k]; if (gap > 0 && (!best || gap > best.gap)) best = { k, gap }; }
     if (best) return { key: best.k, r: e.R[best.k] };
     if (e.ftNow < tg.ft) return { key: 'ft', r: e.R.ft };
     return null;

@@ -60,6 +60,18 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
 }
 
 (async () => {
+  await t('Autopilot power need (plan A4): core.powerMeasure: with work rows an idle group adds nothing and a Retail Store its baseload; without rows every unpaused draw', () => {
+    const { ap } = loadBoth();
+    const k = ap._core, C = k.normalize(board.catalog);
+    const id = (n) => board.catalog.buildings.find((b) => b.name === n).id, chair = board.catalog.recipes.find((r) => r.name === 'Make Chair').id;
+    const st = baseState();
+    st.groups = { 1: { building: id('Workshop'), region: 0, count: 4, recipe: chair }, 2: { building: id('Workshop'), region: 0, count: 3, recipe: chair, paused: true } };
+    assert.strictEqual(k.snapshot(st, C, [], [], 0).powerNeed, 4, 'no work rows (pure snapshot, offline sim): the unpaused draw');
+    st.groups[1].work = [{ recipe: chair, runs: 20, remaining: 10 }];
+    st.groups[3] = { building: id('Workshop'), region: 0, count: 2, recipe: chair, equipped: 2, work: [] };   // idle, no Planks: not waiting
+    st.groups[4] = { building: id('Retail Store'), region: 0, count: 1, recipe: null, equipped: 0, work: [] };
+    assert.strictEqual(k.snapshot(st, C, [], [], 0).powerNeed, 4 + 2, 'running 4 + store baseload 2');
+  });
   await t('game-data check passes on the saved live catalog and fails on a broken one', () => {
     const { ap } = loadBoth();
     const k = ap._core, C = k.normalize(board.catalog);

@@ -1,6 +1,6 @@
 // Shared fixtures for the Core plan tests (core-plan-sim.js and the director tests test/cp-*-test.js).
 //   const F = require('./cp-fixtures');  const { core, cp, w } = F.boot(st, { modules: ['cp-buildout'] });
-// boot() evals core, pacer, planner, core-math, core-plan (+ the named director modules) from the BUILT script, with a fake
+// boot() evals core, pacer, planner, retail-alloc, core-math, core-plan (+ the named director modules) from the BUILT script, with a fake
 // game server in place: the fiber tree the core reads, a WebSocket that applies the actions below to st and answers with a Diff.
 const fs = require('fs');
 const path = require('path');
@@ -18,7 +18,7 @@ const slice = (src, name) => {
   if (a < 0 || b < 0) throw new Error('module ' + name + ' is not in the built script (bun build.js?)');
   return src.slice(a, b);
 };
-const BASE = ['core', 'pacer', 'planner', 'core-math', 'core-plan'];
+const BASE = ['core', 'pacer', 'planner', 'retail-alloc', 'core-math', 'core-plan'];
 
 let failed = 0;
 const quietLog = console.log, quietWarn = console.warn, quietErr = console.error;

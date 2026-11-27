@@ -3,7 +3,7 @@
   const conversionStage = (v) => v.unlocked('Assembly Plant');   // Stage C or D
   const dir = {
     name: 'buildout', order: 40, defaults: DEFAULTS,
-    furnitureSplit, nextBuildStep, targets: (v, ctx, rule) => targets(v, ctx, rule, engine(v, ctx)), benchHeld: (v, ctx, rule) => { const e = engine(v, ctx); return benchHeld(v, e, targets(v, ctx, rule, e)); }, rebalanceStep: (v, ctx) => rebalanceStep(v, ctx, engine(v, ctx)), waveState: (v, ctx) => waveState(v, ctx, engine(v, ctx)), allocate,
+    furnitureSplit, nextBuildStep, alloc: (v, ctx) => allocOf(v, ctx), stepBackStep: (v, ctx) => stepBackStep(v, ctx, engine(v, ctx)), targets: (v, ctx, rule) => targets(v, ctx, rule, engine(v, ctx)), benchHeld: (v, ctx, rule) => { const e = engine(v, ctx); return benchHeld(v, e, targets(v, ctx, rule, e)); }, rebalanceStep: (v, ctx) => rebalanceStep(v, ctx, engine(v, ctx)), waveState: (v, ctx) => waveState(v, ctx, engine(v, ctx)), allocate,
     waveStep: (v, ctx, rule, stage) => waveStep(v, ctx, engine(v, ctx), null, rule, stage), wfKeep: (v, ctx) => wfKeep(v, ctx ?? {}),
     waveGate: (v, ctx, rule, stage, n) => waveGate(v, ctx, engine(v, ctx), rule, stage, n),
     buyAction: (v, ctx, s) => buyAction(v, engine(v, ctx), s),
@@ -24,6 +24,9 @@
       // Storage check: write and read back through a fresh handle. Waves (which demolish Farms) need memory that survives; fail closed.
       m.set({ chk: ctx.now });
       ctx.boMemOk = ctx.mem('buildout').get().chk === ctx.now;
+      // Groups it made that are gone drop out of groupsMine.
+      const gm = m.get().groupsMine ?? [], gm2 = gm.filter((id) => v.groups.some((g) => g.id === id));
+      if (gm2.length !== gm.length) m.set({ groupsMine: gm2 });
       // Units placed by hand leave the pool: what tidy may take back is never more than the pool holds.
       const pm = m.get().poolMine ?? {}, pm2 = Object.fromEntries(Object.entries(pm).map(([b, n]) => [b, Math.min(n, v.pool[b] ?? 0)]));
       if (Object.entries(pm).some(([b, n]) => pm2[b] !== n)) m.set({ poolMine: pm2 });
@@ -37,12 +40,9 @@
       const ftR = v.idR('Assemble Wooden Frame'), ftMine = m.get().ftMine ?? [], ftKeep = [], ftUser = [];
       for (const id of ftMine) { const g = v.groups.find((x) => x.id === id); if (g && g.count > 0 && g.paused) ftKeep.push(id); else if (g && g.recipe === ftR) ftUser.push(id); }
       if (ftKeep.length !== ftMine.length) m.set({ ftMine: ftKeep, ...(ftUser.length ? { ftUser: [...new Set([...(m.get().ftUser ?? []), ...ftUser])] } : {}) });
+      // (the rebalance hysteresis is noted in decide: the allocator needs the retail facts, which come after this context)
       const e = engine(v, ctx);
       if (e.missing) return;
-      // Rebalance hysteresis (plan D3): per recipe, the direction of its gap to the board's split and when that was first seen.
-      const gaps = furnGaps(v, ctx, e), old = m.get().rebal ?? {}, rebal = {};   // no board read: the times are kept as they are
-      if (gaps) for (const [k, g] of Object.entries(gaps)) if (g) { const dir = g > 0 ? 'under' : 'over'; rebal[k] = old[k]?.dir === dir ? old[k] : { dir, at: ctx.now }; }
-      if (gaps && JSON.stringify(rebal) !== JSON.stringify(old)) m.set({ rebal });
       // Wave bookkeeping from state (right under chaos, dry run and reloads): base at the first Stage C look, a wave counts once the
       // cotton Farms are at or below its target, and its time is when that is first seen.
       if (!conversionStage(v)) return;
@@ -60,9 +60,12 @@
       if (e.missing) return { wait: 'off: catalog lacks ' + e.missing.join(', ') };
       const rule = out.rule;
       const tg = rule ? targets(v, ctx, rule, e) : null;
+      noteRebal(v, ctx, e);
+      const al = allocOf(v, ctx, e);
       const readout = {
         camps: e.camps + '/' + (tg?.camps ?? '?'), sawmills: e.saws + '/' + (tg?.sawmills ?? '?'), workshops: e.workshops + '/' + (tg?.workshops ?? '?'),
-        furniture: tg ? FURN.map(([k, n]) => n + ' ' + e.furnNow[k] + '/' + tg.furn[k]).join(', ') + ', Frame Timber ' + e.ftNow + '/' + tg.ft + ' (' + tg.split.source + ')' : null,
+        furniture: tg ? FURN.map(([k, n]) => n + ' ' + e.furnNow[k] + '/' + tg.furn[k]).join(', ') + ', Frame Timber ' + e.ftNow + '/' + tg.ft + ' (' + tg.source + ')' : null,
+        plan: al ? usd(al.dollarsPerHour * 100) + '/h planned (' + al.detail + ')' + (al.burn ? ', burning Planks stock above ' + Math.round(al.reserve) + ' at +' + Math.round(al.extra) + '/h' : '') : null,
         planks: Math.round(e.planksSupply) + '/h made, ' + Math.round(e.planksDemand) + '/h used',
       };
       const never = ctx.ap?.neverSell;
@@ -81,6 +84,10 @@
       const fl = floorStep(v, ctx, e, tg);
       if (fl?.action) return done(fl.action);
       if (fl?.wait) waits.push(fl.wait);
+      // furniture over the plan steps back first: it eats Planks now (spare Frame Timber the switch parks may be paused already)
+      const sb = stepBackStep(v, ctx, e);
+      if (sb?.action) return done(sb.action);
+      if (sb?.wait) waits.push(sb.wait);
       const sw = switchStep(v, ctx, e, tg);
       noteBlocked(v, ctx, e, sw);
       if (sw?.action) return done(sw.action);

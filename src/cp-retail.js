@@ -7,7 +7,9 @@
 //   - Builds 1 store (BuyBuilding, then CreateGroup amount 1 "Retail"; an empty Retail group is reused), then SetAssortment with up
 //     to 4 of the board's goods the Corporation can make (made, assigned or held, best appetite x price first; Bookshelf, Table, Chair,
 //     Bench when the board names none), only when the shelf set differs.
-//     A shelved good leaves only after cfg.retailShelfDropMin minutes absent, so pauses do not churn the shelf.
+//     A shelved good leaves only after cfg.retailShelfDropMin minutes absent, so pauses do not churn the shelf. With the build-out
+//     director's retail allocator (plan B1) the shelves are its planned goods plus the goods still made or kept, planned first, by unit
+//     price (board price x base x the stock's quality factor); then more stores up to its storesNeeded (BuyBuilding + AssignBuildings, plan B5).
 //   - Money gate: floor + store price + bill floor (new MW x $20 + 2 h of bills, plan 8.1); Iron Frames keep cfg.ifReserve back.
 //   - Checkpoint sampler (context): every cfg.retailSampleMin minutes after the shelves are set it records the shelf rows, the rating
 //     and the stock, then judges the four rows of wiki 4.7 (appetite fails only on a fall) plus unsold stock. Sets ctx.retailOk (true / false
@@ -30,8 +32,9 @@ try {
   const RECIPE = { Bookshelf: 'Make Bookshelf', Table: 'Make Table', Chair: 'Make Chair', Bench: 'Make Bench' };
   const STORE = 'Retail Store', GROUP_NAME = 'Retail', WORKSHOP = 'Workshop', FT = 'Assemble Wooden Frame', FT_GROUP = 'Frame Timber';
   const RATES = { power: 1000, water: 400, bandwidth: 1500 };   // cents per unit per 10-min bill (same as autoUtil billsOf)
-  // shortcut: the corp state carries no stock quality, so the price uses quality 0; read it once the protocol shows one.
   const Q0 = 0.95;                     // quality factor at quality 0 (wiki retail.md, Price; engine BhehihUq)
+  // Quality factor of the Heartland stock: 0.95 + 0.19 q / (q + 10), q = quality_points / units / 100 (wiki formulas.md); Q0 with none.
+  const qf = (st, id) => { const u = st.stock?.[REGION]?.[id] ?? 0, q = u > 0 ? (st.quality_points?.[REGION]?.[id] ?? 0) / u / 100 : 0; return Q0 + 0.19 * q / (q + 10); };
   const cfg = () => W.corePlan.cfg;
   const usd = (c) => '$' + (c / 100).toLocaleString('en-US', { maximumFractionDigits: 0 });
   const pct = (x) => (x * 100).toFixed(0) + '%';
@@ -141,7 +144,7 @@ try {
     const plId = v.idI('Planks');
     f.goods = Object.keys(ids).map((n) => {
       const id = ids[n], rid = v.idR(recipeOf[n]), row = rows[id], base = v.C.items[id]?.base_value ?? 0, o = output(v, rid), rc = v.C.recipes[rid];
-      return { name: n, id, rid, appetite: row.appetite, held: row.held, boardPrice: row.price, base, unit: base * row.price / 10000 * Q0,
+      return { name: n, id, rid, appetite: row.appetite, held: row.held, boardPrice: row.price, base, unit: Math.floor(base * row.price / 10000 * qf(v.st, id)),
         stock: v.has(n), outTick: o.perTick, blockH: perBlockH(o), made: o.perTick > 0,
         // a paused or retuning group still counts: it comes back, and the shelf should not churn meanwhile
         assigned: v.groups.some((g) => g.recipe === rid && g.count > 0),
@@ -185,6 +188,7 @@ try {
       return now - absent[g.id] < c.retailShelfDropMin * 60000;
     });
     if (changed) m.set({ absentSince: absent });
+    f.keep = keep;
     f.chosen = pickOrder(keep);
     needOf(f, c);
   }
@@ -441,6 +445,10 @@ try {
         : p ? (p.measured ? 're-checkpoint at the capped output: sampling (the earlier FAIL and its cap hold meanwhile)' : 're-checkpoint: sampling (the earlier FAIL had no unsold stock, so no cap; retailOk stays false meanwhile)') : f.storeGroup ? 'sampling' : 'store not built',
       prevDecision: p ? 'FAIL ' + p.kind + (p.measured ? ': cap ' + p.cap + ' furniture blocks' : ': no unsold stock, no cap') + ' (' + p.why + ')' : null,
       e1: !!s.mem?.e1,
+      // the retail allocator (plan B1, D3): $/h if the needed stores exist, what binds it, and the Workshops per good
+      plan: f.alloc ? usd(f.alloc.dollarsPerHour * 100) + '/h planned, with ' + (f.alloc.storesNeeded?.[REGION] ?? 1) + ' store(s)' : null,
+      binding: f.alloc ? f.alloc.binding + ': ' + f.alloc.detail : null,
+      alloc: f.alloc ? f.goods.filter((g) => f.alloc.alloc[g.id] > 0).map((g) => g.name + ' ' + f.alloc.alloc[g.id] + ' Workshop(s)').join(', ') || 'none' : null,
     };
   }
   const workshopGroups = (v, wsB) => v.groups.filter((g) => g.building === wsB);
@@ -484,8 +492,37 @@ try {
     }
     return null;
   }
+  // Shelves from the retail allocator (plan B1): its goods (planned Workshops, or stock) and the goods still made or kept on the shelf, up to 4,
+  // planned goods first, then by unit price. Order only matters when store capacity binds; the shelf set is what is sent.
+  function allocPick(f, al) {
+    const planned = (g) => (al.alloc[g.id] ?? 0) > 0 || al.shelves.includes(g.id);
+    const byUnit = (a, b) => b.unit - a.unit;
+    return [...new Set([...f.goods.filter(planned), ...(f.keep ?? f.goods.filter(f.eligible))])].sort((a, b) => planned(b) - planned(a) || byUnit(a, b)).slice(0, 4).sort(byUnit);
+  }
+  // One more store (wiki 4.7, plan B5): its build items (Iron Frames for the prototypes kept back until Stage D; this build's own are not),
+  // its acres, and cash for the money floor + its price + the bill floor (plan 8.1). { wait } or { cost }.
+  function storeGate(v, ctx, f, out) {
+    const bd = v.bld(f.storeB);
+    const cost = P ? P.price(bd.cost, v.ownedAll(STORE), 0) : bd.cost;
+    const ifId = v.idI('Iron Frame'), late = out?.stage === 'D' || out?.stage === 'END';
+    const keepOf = (i) => (i === ifId && !late ? Math.min(cfg().ifReserve ?? 0, W.corePlan._ifNeed(v, STORE)) : 0);
+    // ...and what other modules keep back (finite reserves: Iron Frame, Concrete, Glass for their own builds)
+    const res = (i) => { const r = ctx.reserveItems?.[i]; return Number.isFinite(r) ? r : 0; };
+    const lack = (bd.build_items ?? []).filter((i) => (v.st.stock?.[REGION]?.[i.item] ?? 0) - i.amount < keepOf(i.item) + res(i.item));
+    if (lack.length) return { wait: 'store needs ' + lack.map((i) => i.amount + ' ' + (v.C.items[i.item]?.name ?? i.item) + (keepOf(i.item) ? ' (+' + keepOf(i.item) + ' kept for prototypes)' : '') + (res(i.item) ? ' (+' + res(i.item) + ' other modules keep)' : '')).join(', ') };
+    if (v.freeAcres < bd.acres) return { wait: 'store needs ' + bd.acres + ' free acres (' + v.freeAcres + ' free)' };
+    // bill floor (plan 8.1): the store's always-on draw goes on every bill from now on
+    const mw = bd.draws?.power ?? 0, billFloor = mw * 2000 * (W.idleCore?.powerPriceMult?.() ?? 1) + 12 * billsOf(v.st);
+    const need = (ctx.floorCents ?? 0) + cost + billFloor;
+    if (v.money < need) return { wait: 'store ' + usd(cost) + ' + bill floor ' + usd(billFloor) + ' (' + mw + ' MW x $20 + 2 h of bills): need ' + usd(need - v.money) + ' more above the floor' };
+    return { cost };
+  }
   function decide(v, ctx, out) {
     const f = ctx.retail;
+    if (f?.goods && !f.badBoard && f.share != null) {
+      try { f.alloc = W.corePlan._buildout?.alloc?.(v, ctx) ?? null; } catch (e) { console.error('[corePlan] retail alloc', e); f.alloc = null; }
+      if (f.alloc) { f.chosen = allocPick(f, f.alloc); needOf(f, cfg()); }
+    }
     const readout = readoutOf(f);
     if (!f || f.err) return { wait: f?.err ?? 'no facts (context did not run)', readout };
     if (f.badBoard) return { wait: 'RETAIL BOARD SHAPE CHANGED: ' + f.badBoard + '; not building or shelving until it is checked', readout };
@@ -502,22 +539,12 @@ try {
         steps: [{ msg: { type: 'AssignBuildings', group: eg.id, amount: 1 }, until: (x) => (x.groups.find((g) => g.id === eg.id)?.count ?? 0) >= 1 }] }, readout };
     }
     if (!f.storeGroup) {
-      const bd = v.bld(storeB);
       const steps = [];
       if (!p0) {
         const short = f.need.filter((x) => x.g.stock < x.need);
         if (short.length) return { wait: 'pre-store gate: ' + short.map((x) => x.g.name + ' ' + Math.floor(x.g.stock) + ' / ' + x.need).join(', ') + ' (' + cfg().stockHoursPerShelf + ' h of sales at min(demand, output))', readout };
-        const cost = P ? P.price(bd.cost, v.ownedAll(STORE), 0) : bd.cost;
-        // Iron Frames: until Stage D the prototypes and first builds still to pay are kept back (corePlan ifNeed, capped by cfg.ifReserve); this build's own frames are not
-        const ifId = v.idI('Iron Frame'), late = out?.stage === 'D' || out?.stage === 'END';
-        const keepOf = (i) => (i === ifId && !late ? Math.min(cfg().ifReserve ?? 0, W.corePlan._ifNeed(v, STORE)) : 0);
-        const lack = (bd.build_items ?? []).filter((i) => (v.st.stock?.[REGION]?.[i.item] ?? 0) - i.amount < keepOf(i.item));
-        if (lack.length) return { wait: 'store needs ' + lack.map((i) => i.amount + ' ' + (v.C.items[i.item]?.name ?? i.item) + (keepOf(i.item) ? ' (+' + keepOf(i.item) + ' kept for prototypes)' : '')).join(', '), readout };
-        if (v.freeAcres < bd.acres) return { wait: 'store needs ' + bd.acres + ' free acres (' + v.freeAcres + ' free)', readout };
-        // bill floor (plan 8.1): the store's always-on draw goes on every bill from now on
-        const mw = bd.draws?.power ?? 0, billFloor = mw * 2000 * (W.idleCore?.powerPriceMult?.() ?? 1) + 12 * billsOf(v.st);
-        const need = (ctx.floorCents ?? 0) + cost + billFloor;
-        if (v.money < need) return { wait: 'store ' + usd(cost) + ' + bill floor ' + usd(billFloor) + ' (' + mw + ' MW x $20 + 2 h of bills): need ' + usd(need - v.money) + ' more above the floor', readout };
+        const sg = storeGate(v, ctx, f, out);
+        if (sg.wait) return { wait: sg.wait, readout };
         steps.push({ msg: { type: 'BuyBuilding', building: storeB, amount: 1, region: REGION }, until: (x) => (x.pool[storeB] ?? 0) >= 1 || x.groups.some((g) => g.building === storeB && g.count > 0) });
       }
       steps.push({ msg: { type: 'CreateGroup', building: storeB, amount: 1, name: GROUP_NAME, region: REGION }, until: (x) => x.groups.some((g) => g.building === storeB && g.count > 0) });
@@ -532,6 +559,22 @@ try {
     if (d) {
       const fa = failAction(v, f, d);
       if (fa) return { ...fa, readout };
+    }
+    // B5: stores up to what the allocator's shelves sell (50 units a tick each), Heartland only; a pooled store joins the group first (one
+    // the user pooled stays while the plan needs no more). A store draws its baseload the moment it joins, and stores are served last: the
+    // power must be free first (asked of Auto utilities), or one more store would darken all of them.
+    const nStores = f.alloc?.storesNeeded?.[REGION] ?? 0, c0 = g.count;
+    const into = { msg: { type: 'AssignBuildings', group: g.id, amount: 1 }, until: (x) => (x.groups.find((y) => y.id === g.id)?.count ?? 0) >= c0 + 1 };
+    if (nStores > c0) {
+      const line = 'store ' + (c0 + 1) + ' of ' + nStores + ' (the planned shelves sell more than ' + c0 + ' store(s) carry)';
+      const au = ctx.mods?.autoUtil, mw = v.bld(storeB).draws?.power ?? 0;
+      const free = au?._measure ? Math.max(0, au._measure('power', REGION, v.st, v.catalog, ctx.tick ?? 0, ctx.contracts ?? []).free ?? 0) : Infinity;
+      if (free + 1e-9 < mw) { if (ctx.live) au.ask?.('power', REGION, mw, ctx.tick ?? 0); return { wait: line + ': waits for ' + mw + ' MW free power (asked Auto utilities)', readout }; }
+      if (p0 > 0) return { action: { id: 'retail:store:pool:' + g.id + ':' + c0, text: 'put the pooled Retail Store into group ' + g.id + ': ' + line, hold: true, steps: [into] }, readout };
+      const sg = storeGate(v, ctx, f, out);
+      if (sg.wait) return { wait: line + ': ' + sg.wait, readout };
+      return { action: { id: 'retail:store:more:' + c0, text: 'build ' + line, hold: true,
+        steps: [{ msg: { type: 'BuyBuilding', building: storeB, amount: 1, region: REGION }, until: (x) => (x.pool[storeB] ?? 0) >= 1 || (x.groups.find((y) => y.id === g.id)?.count ?? 0) > c0 }, into] }, readout };
     }
     return { wait: readout.decision, readout };
   }

@@ -19,20 +19,26 @@
     return { id: 'bo:pause:' + g.id + ':' + paused, text: why + ': ' + (paused ? 'pause' : 'resume') + ' group ' + g.id + ' (' + (v.C.recipes[g.recipe]?.name ?? 'no recipe') + ')',
       steps: [{ msg: { type: 'SetPaused', group: g.id, paused }, until: (x) => !!groupById(x, g.id)?.paused === paused }] };
   }
-  // Group a building of type b on recipe r goes into: the biggest one on that recipe.
+  // Group a building of type b on recipe r goes into: the biggest one on that recipe (a paused furniture group is the user's: never).
   // A group made by CreateGroup has no recipe until SetRecipe lands; it counts by its name, so a second Workshop joins it instead of a new group.
-  const homeGroup = (e, b, r) => e.groupsOf(b, r).sort((a, c) => c.count - a.count)[0]
+  const homeGroup = (e, b, r) => e.groupsOf(b, r).filter((g) => !g.paused || !FURN.some(([k]) => e.R[k].id === r.id)).sort((a, c) => c.count - a.count)[0]
     ?? e.groupsOf(b).filter((g) => g.recipe == null && g.name === r.name).sort((a, c) => c.count - a.count)[0] ?? null;
   // Where a Workshop from the pool goes: a wanted Bench that is ready (as the buy path, Bench first), else the biggest furniture gap that has its floor and that the spare planks feed, else Frame Timber.
+  // With the allocator (running furniture only): a gap that has held cfg.planHoldMin; Frame Timber only while it is below its target; else
+  // null, the Workshop stays parked in the pool (plan B2 step back).
   // Same checks as the switch, so a Workshop the switch freed is never sent back to Frame Timber while the switch still wants it.
   function poolWorkshopRecipe(v, ctx, e, tg, n) {
     if (tg && tg.bench > e.benchNow && !benchHeld(v, e, tg)) return e.R.bench;
     const furnTotal = FURN.reduce((a, [k]) => a + e.furnNow[k], 0);
-    const want = failKeep(ctx, tg ? tg.furn : furnitureSplit(ctx.retailBoard, 0, v.C).alloc(furnTotal + n));
-    const headroom = e.planksSupply - e.planksDemand;
-    const gaps = FURN.map(([k]) => ({ k, gap: want[k] - e.furnNow[k] })).filter((x) => x.gap > 0).sort((a, b) => b.gap - a.gap);
+    const al = allocOf(v, ctx, e);
+    const want = al ? al.byKey : failKeep(ctx, tg ? tg.furn : furnitureSplit(ctx.retailBoard, 0, v.C).alloc(furnTotal + n));
+    const headroom = planksRoom(v, ctx, e);
+    const cur = al ? e.furnRun : e.furnNow;
+    const gaps = FURN.map(([k]) => ({ k, gap: want[k] - cur[k] })).filter((x) => x.gap > 0).sort((a, b) => b.gap - a.gap);
     const ok = gaps.find((x) => !floorMissing(e, e.R[x.k]) && headroom + 1e-9 >= e.wsPlanksH(e.R[x.k]));
-    return ok ? e.R[ok.k] : e.R.ft;
+    if (al && ok) return holdFor(ctx, 'pool', true) ? e.R[ok.k] : null;
+    if (al) holdFor(ctx, 'pool', false);
+    return ok ? e.R[ok.k] : !al || e.ftNow < (tg?.ft ?? cfg.keepFrameTimber) ? e.R.ft : null;
   }
 
   // Ownership memory, like kilnMine: units this director left in the pool (mem poolMine { building: n }: + on a confirmed BuyBuilding or
@@ -78,8 +84,10 @@
       const n = poolTake(v, ctx, e, bn);
       if (!n) continue;
       let r = bn === 'Lumber Camp' ? e.R.wood : bn === 'Sawmill' ? e.R.planks : null;
-      if (bn === 'Workshop') r = poolWorkshopRecipe(v, ctx, e, tg, n);
+      if (bn === 'Workshop') { r = poolWorkshopRecipe(v, ctx, e, tg, n); if (!r) continue; }   // parked: the plan has no gap for it
       const g = homeGroup(e, b, r);
+      // into a running group the draw starts at once: only with the power free (asked of Auto utilities first), as the switch
+      if (bn === 'Workshop' && g?.work?.length && powerFor(v, ctx, v.bld(b).draws?.power ?? 0) < (v.bld(b).draws?.power ?? 0)) continue;
       const k = bn === 'Workshop' ? 1 : n;                            // Workshops one at a time: each goes where the split is shortest
       return track(v, ctx, b, g ? assignAction(v, b, g, k, 'pool') : createAction(v, b, k, r.name, 'pool'));
     }
@@ -227,13 +235,15 @@
     return { wait: [...new Set(waits)].join('; ') };   // the shared retry wait is the same for every floor
   }
 
-  // MW a move may add now: the free power after every load (store included, contracts counted) plus what Auto utilities can raise now
-  // (0 while it is off, broke or backing off). Infinity without Auto utilities loaded (no power model to ask).
-  function powerRoom(v, ctx) {
+  // MW free now for a move that adds `mw` of draw at once (store included, contracts counted). Short of it, Core plan asks Auto utilities for
+  // the draw (live only, autoUtil.ask) and the move waits until the raise has landed: the store is served last, so a move ahead of the raise
+  // darkens it (plan R-5). Infinity without Auto utilities loaded (no power model to ask).
+  function powerFor(v, ctx, mw) {
     const au = ctx.mods?.autoUtil;
     if (!au?._measure) return Infinity;
-    const m = au._measure('power', REGION, v.st, v.catalog, ctx.tick ?? 0, ctx.contracts ?? []);
-    return Math.max(0, m.free ?? 0) + (au.raiseRoom?.('power', REGION, v.st, ctx.now) ?? 0);
+    const free = Math.max(0, au._measure('power', REGION, v.st, v.catalog, ctx.tick ?? 0, ctx.contracts ?? []).free ?? 0);
+    if (free + 1e-9 < mw && ctx.live) au.ask?.('power', REGION, mw, ctx.tick ?? 0);
+    return free;
   }
   // Frame Timber groups this director may move, biggest first: not one the user paused, nor one the user resumed after the WF gate paused it.
   function movableFt(ctx, e) {
@@ -255,19 +265,34 @@
     const fts = movableFt(ctx, e);
     const spare = e.sum(fts) - keep;
     if (spare <= 0) return null;
-    const split = tg?.split ?? furnitureSplit(ctx.retailBoard, 0, v.C);
-    const furnTotal = FURN.reduce((a, [k]) => a + e.furnNow[k], 0);
+    const al = allocOf(v, ctx, e), split = al ? null : tg?.split ?? furnitureSplit(ctx.retailBoard, 0, v.C);
+    const cur = al ? e.furnRun : e.furnNow, furnTotal = FURN.reduce((a, [k]) => a + cur[k], 0);
     const cap = typeof ctx.retailCap === 'number' ? Math.max(0, Math.floor(ctx.retailCap)) : Infinity;
     const n = Math.min(furnTotal + spare, cap);
     if (n <= furnTotal) return { wait: 'switch: furniture at the retail cap (' + cap + '), spare Frame Timber stays' };
-    // Target: the board split; while Wooden Frames are at the keep line (the WF gate would idle them, plan A2) the good with the best $ per
-    // Workshop-hour that has a floor (the first that fits below). A measured fail: never above the per-good keep the fail path cuts to.
-    const val = valueMode(v, ctx, e) ? furnValue(v, ctx, e) : null;
-    const want = failKeep(ctx, val ? Object.fromEntries(FURN.map(([k]) => [k, Infinity])) : split.alloc(n));
-    const gaps = FURN.map(([k]) => ({ k, gap: Math.min(want[k] - e.furnNow[k], n - furnTotal) })).filter((x) => x.gap > 0).sort((a, b) => (val ? val[b.k] - val[a.k] : 0) || b.gap - a.gap);
-    if (!gaps.length) return null;
-    // Planks cap: a switch may not push plank use past what the Sawmills make (a Bookshelf eats more than Frame Timber).
-    const headroom = e.planksSupply - e.planksDemand, ftUse = e.wsPlanksH(e.R.ft);
+    // Target (plan B3): the allocator's largest gap. Without it: the board split; while Wooden Frames are at the keep line (the WF gate
+    // would idle them, plan A2) the good with the best $ per Workshop-hour that has a floor (the first that fits below). A measured fail:
+    // never above the per-good keep the fail path cuts to.
+    const val = !al && valueMode(v, ctx, e) ? furnValue(v, ctx, e) : null;
+    const want = al ? al.byKey : failKeep(ctx, val ? Object.fromEntries(FURN.map(([k]) => [k, Infinity])) : split.alloc(n));
+    // with the allocator only its net gain of furniture Workshops (a good under the plan while another is over waits for the rebalance)
+    const net = al ? FURN.reduce((a, [k]) => a + want[k] - cur[k], 0) : Infinity;
+    // Spare Frame Timber the plan has no use for (Planks bind: it plans fewer furniture Workshops) goes to the pool once that has held
+    // cfg.planHoldMin, parked: no draw, no Planks, which the plan counted as free; the pool tidy places them once the plan has a gap. Never
+    // while a furniture recipe lacks its floor (the plan cannot see that good yet), nor on a measured retail fail (its fail path keeps the
+    // surplus on Frame Timber).
+    const noFloorAll = FURN.filter(([k]) => floorMissing(e, e.R[k])).map(([k]) => e.R[k].name);
+    const surplus = al && !ctx.retailFail && !noFloorAll.length ? spare - Math.max(0, net) : 0, pk = fts[0], park = Math.min(surplus, pk.count - (fts.length === 1 ? keep : 0));
+    if (al && holdFor(ctx, 'park', park > 0)) {
+      const c0 = pk.count;
+      return { action: track(v, ctx, e.id.ws, { id: 'bo:park:' + pk.id + ':' + c0, text: 'switch: park ' + park + ' spare Frame Timber Workshop(s) of group ' + pk.id + ' in the pool (the plan has no Planks for them: ' + al.detail + ')',
+        steps: [{ msg: { type: 'UnassignBuildings', group: pk.id, amount: park }, until: (x) => (groupById(x, pk.id)?.count ?? 0) <= c0 - park }] }) };
+    }
+    const gaps = FURN.map(([k]) => ({ k, gap: Math.min(want[k] - cur[k], n - furnTotal, net) })).filter((x) => x.gap > 0).sort((a, b) => (val ? val[b.k] - val[a.k] : 0) || b.gap - a.gap);
+    if (!gaps.length) return al && noFloorAll.length && !cfg.applyFurnitureFloor ? { wait: 'switch: manual: apply the v1 floor for ' + noFloorAll.join(', ') + ' (furniture Workshops wait for it)' } : null;
+    // Planks cap: a switch may not push plank use past what the Sawmills make plus the stock budget (a Bookshelf eats more than Frame Timber).
+    const headroom = planksRoom(v, ctx, e), ftUse = al && fts[0].paused ? 0 : e.wsPlanksH(e.R.ft);
+    const why = al ? 'allocator: ' + al.binding : val ? 'best $ per Workshop-hour' : split.source;
     const fits = (k) => { const d = e.wsPlanksH(e.R[k]) - ftUse; return d <= 0 ? Infinity : Math.floor((headroom + 1e-9) / d); };
     // Skip recipes without a saved floor: the switch moves what it can now and asks for the floor of the rest.
     const noFloor = gaps.filter((x) => floorMissing(e, e.R[x.k]));
@@ -281,7 +306,7 @@
     if (whole) {
       const lack = kit(whole.count);
       if (lack.length) return { wait: 'switch: kit short for ' + whole.count + ' x ' + r.name + ': ' + lack.join(', ') };
-      return { action: recipeAction(v, whole, r, 'switch spare Frame Timber to furniture (' + (val ? 'best $ per Workshop-hour' : split.source) + ')') };
+      return { action: filled(ctx, whole.id, recipeAction(v, whole, r, 'switch spare Frame Timber to furniture (' + why + ')')) };
     }
     const g = fts[0], home = homeGroup(e, e.id.ws, r);
     let take = Math.min(room, g.count - (fts.length === 1 ? keep : 0));
@@ -291,9 +316,9 @@
     // Auto utilities can raise now) carries. A whole group's recipe change or a new group starts only once the engine has the power.
     const perB = v.bld(e.id.ws).draws?.power ?? 0, adds = perB > 0 && home?.work?.length > 0 && !(g.work?.length > 0);
     if (adds) {
-      const pw = powerRoom(v, ctx);
+      const pw = powerFor(v, ctx, take * perB);
       take = Math.min(take, Math.floor(pw / perB + 1e-9));
-      if (take <= 0) return { wait: 'switch: waits for power (' + Math.max(0, Math.floor(pw)) + ' MW free for ' + perB + ' MW a Workshop)' };
+      if (take <= 0) return { wait: 'switch: waits for power (' + Math.max(0, Math.floor(pw)) + ' MW free for ' + perB + ' MW a Workshop; asked Auto utilities)' };
     }
     const lack = kit(take);
     if (lack.length) return { wait: 'switch: kit short for ' + take + ' x ' + r.name + ': ' + lack.join(', ') };
@@ -303,13 +328,15 @@
     const place = home
       ? { msg: { type: 'AssignBuildings', group: home.id, amount: take }, until: ((h0) => (x) => (groupById(x, home.id)?.count ?? 0) >= h0 + take)(home.count) }
       : { msg: { type: 'CreateGroup', building: e.id.ws, amount: take, name: r.name, region: REGION }, until: (x) => x.groups.some((y) => !ids.has(y.id) && y.building === e.id.ws && y.count >= take) };
-    return { action: track(v, ctx, e.id.ws, { id: 'bo:split:' + g.id, text: 'switch spare Frame Timber to furniture (' + (val ? 'best $ per Workshop-hour' : split.source) + '): move ' + take + ' Workshop(s) from group ' + g.id + ' to ' + r.name + (home ? ' (group ' + home.id + ')' : ' (new group)'),
-      steps: [{ msg: { type: 'UnassignBuildings', group: g.id, amount: take }, until: (x) => (groupById(x, g.id)?.count ?? 0) <= c0 - take }, place] }) };
+    return { action: filled(ctx, home?.id, track(v, ctx, e.id.ws, { id: 'bo:split:' + g.id, text: 'switch spare Frame Timber to furniture (' + why + '): move ' + take + ' Workshop(s) from group ' + g.id + ' to ' + r.name + (home ? ' (group ' + home.id + ')' : ' (new group)'),
+      steps: [{ msg: { type: 'UnassignBuildings', group: g.id, amount: take }, until: (x) => (groupById(x, g.id)?.count ?? 0) <= c0 - take }, place] })) };
   }
 
   // 3b. Furniture rebalance (wiki 4.7 step 3, plan D3): today's furniture Workshops against the board's split of the same total.
   // Gap per recipe (+ under, - over); none without a board (the 40/30/30 default is no reason to move a Workshop).
   function furnGaps(v, ctx, e) {
+    const al = allocOf(v, ctx, e);
+    if (al) return Object.fromEntries(FURN.map(([k]) => [k, al.byKey[k] - e.furnRun[k]]));
     const split = furnitureSplit(ctx.retailBoard, 0, v.C);
     if (split.source !== 'board') return null;
     const want = split.alloc(FURN.reduce((a, [k]) => a + e.furnNow[k], 0));
@@ -321,7 +348,8 @@
   // its kit and the plank headroom for the swap. Never on the retail fail path: its per-good caps rule then.
   function rebalanceStep(v, ctx, e) {
     // not on the fail path (its per-good caps rule), nor while the switch targets the best $ per Workshop-hour (it would undo it)
-    const gaps = ctx.retailFail || valueMode(v, ctx, e) ? null : furnGaps(v, ctx, e);
+    // with the allocator the plan already holds the best $ per Workshop-hour (and its 3% move gain): it does not stand down in value mode
+    const al = allocOf(v, ctx, e), gaps = ctx.retailFail || (!al && valueMode(v, ctx, e)) ? null : furnGaps(v, ctx, e);
     if (!gaps) return null;
     const keys = FURN.map(([k]) => k).filter((k) => gaps[k]);
     if (!keys.some((k) => gaps[k] > 0) || !keys.some((k) => gaps[k] < 0)) return null;
@@ -331,7 +359,7 @@
     const under = keys.filter((k) => gaps[k] > 0 && ready(k)).sort((a, b) => gaps[b] - gaps[a]);
     const over = keys.filter((k) => gaps[k] < 0 && ready(k)).sort((a, b) => gaps[a] - gaps[b]);
     if (!under.length || !over.length) return { wait: 'rebalance: ' + line + ' (moves once held ' + cfg.rebalanceHours + ' h)' };
-    const headroom = e.planksSupply - e.planksDemand, why = [];
+    const headroom = planksRoom(v, ctx, e), why = [];
     for (const to of under) {
       const r = e.R[to];
       if (floorMissing(e, r)) { why.push(r.name + ' has no floor'); continue; }
@@ -339,17 +367,52 @@
       if (lack.length) { why.push(r.name + ' kit short: ' + lack.join(', ')); continue; }
       for (const from of over) {
         if (e.wsPlanksH(r) - e.wsPlanksH(e.R[from]) > headroom + 1e-9) { why.push('planks cannot feed ' + e.R[from].name + ' -> ' + r.name); continue; }
-        const g = e.groupsOf(e.id.ws, e.R[from]).filter((x) => x.count > 0).sort((a, b) => modCount(a) - modCount(b) || b.count - a.count)[0];
+        const g = e.groupsOf(e.id.ws, e.R[from]).filter((x) => x.count > 0 && !x.paused).sort((a, b) => modCount(a) - modCount(b) || b.count - a.count)[0];
         if (!g) continue;
         const c0 = g.count, home = homeGroup(e, e.id.ws, r), ids = new Set(v.groups.map((x) => x.id));
         const place = home
           ? { msg: { type: 'AssignBuildings', group: home.id, amount: 1 }, until: ((h0) => (x) => (groupById(x, home.id)?.count ?? 0) >= h0 + 1)(home.count) }
           : { msg: { type: 'CreateGroup', building: e.id.ws, amount: 1, name: r.name, region: REGION }, until: (x) => x.groups.some((y) => !ids.has(y.id) && y.building === e.id.ws) };
-        return { action: track(v, ctx, e.id.ws, { id: 'bo:rebal:' + g.id, text: 'rebalance furniture to the board (' + line + '): move 1 Workshop from group ' + g.id + ' (' + e.R[from].name + ') to ' + r.name + (home ? ' (group ' + home.id + ')' : ' (new group)'),
+        return { action: track(v, ctx, e.id.ws, { id: 'bo:rebal:' + g.id, text: 'rebalance furniture to the ' + (al ? 'allocator plan' : 'board') + ' (' + line + '): move 1 Workshop from group ' + g.id + ' (' + e.R[from].name + ') to ' + r.name + (home ? ' (group ' + home.id + ')' : ' (new group)'),
           steps: [{ msg: { type: 'UnassignBuildings', group: g.id, amount: 1 }, until: (x) => (groupById(x, g.id)?.count ?? 0) <= c0 - 1 }, place] }) };
       }
     }
     return { wait: 'rebalance: ' + line + ' waits: ' + why.join('; ') };
+  }
+  // Rebalance hysteresis (plan D3): per recipe, the direction of its gap to the plan and when that was first seen (mem rebal).
+  function noteRebal(v, ctx, e) {
+    const m = ctx.mem?.('buildout'), gaps = m ? furnGaps(v, ctx, e) : null;   // no plan or board: the times are kept as they are
+    if (!gaps) return;
+    const old = m.get().rebal ?? {}, rebal = {};
+    for (const [k, g] of Object.entries(gaps)) if (g) { const dir = g > 0 ? 'under' : 'over'; rebal[k] = old[k]?.dir === dir ? old[k] : { dir, at: ctx.now }; }
+    if (JSON.stringify(rebal) !== JSON.stringify(old)) m.set({ rebal });
+  }
+  // mem filled: furniture groups a switch filled, most recent last (the step back takes from the newest first, plan B2).
+  function filled(ctx, gid, a) {
+    if (gid == null || !ctx.mem) return a;
+    const st = a.steps[a.steps.length - 1], u = st.until;
+    st.until = (x) => { const ok = u(x); if (ok) { const m = ctx.mem('buildout'); m.set({ filled: [...(m.get().filled ?? []).filter((id) => id !== gid), gid].slice(-20) }); } return ok; };
+    return a;
+  }
+  // 3c. Step back (plan B2): furniture Workshops above the plan's total (the Planks stock budget ended, a demand cap) go to the pool one
+  // per step, off a good over its plan (a good under it is the rebalance's, after its hold), from the group a switch filled most recently
+  // first, once the excess has held cfg.planHoldMin; never from a paused group. They stay parked there (no draw, no Planks) until the plan has a gap: in the paused Frame Timber group
+  // the WF gate's half-line resume would wake them all.
+  function stepBackStep(v, ctx, e) {
+    const al = allocOf(v, ctx, e);
+    if (!al || ctx.retailFail) return null;   // a measured retail fail: its fail path cuts the excess to Frame Timber in one action
+    const gap = (k) => al.byKey[k] - e.furnRun[k];
+    const excess = -FURN.reduce((a, [k]) => a + gap(k), 0);
+    if (!holdFor(ctx, 'stepback', excess > 0)) return excess > 0 ? { wait: 'step back: ' + excess + ' furniture Workshop(s) over the plan, moves once that holds ' + cfg.planHoldMin + ' min' } : null;
+    const over = new Set(FURN.filter(([k]) => gap(k) < 0).map(([k]) => e.R[k].id));
+    const src = v.groups.filter((g) => g.building === e.id.ws && g.count > 0 && !g.paused && over.has(g.recipe));
+    const recent = [...(ctx.mem?.('buildout')?.get?.()?.filled ?? [])].reverse();
+    const g = recent.map((id) => src.find((x) => x.id === id)).find(Boolean) ?? [...src].sort((a, b) => modCount(a) - modCount(b) || a.count - b.count)[0];
+    const line = 'step back: ' + excess + ' furniture Workshop(s) over the plan (' + al.detail + ')';
+    if (!g) return { wait: line + ', all in paused groups (left alone)' };
+    const c0 = g.count;
+    return { action: track(v, ctx, e.id.ws, { id: 'bo:stepback:' + g.id + ':' + c0, text: line + ': 1 Workshop from group ' + g.id + ' (' + v.C.recipes[g.recipe].name + ') to the pool, parked until the plan has a gap',
+      steps: [{ msg: { type: 'UnassignBuildings', group: g.id, amount: 1 }, until: (x) => (groupById(x, g.id)?.count ?? 0) <= c0 - 1 }] }) };
   }
 
   // 4. Farm conversion waves. Wave memory lives in ctx.mem('buildout'): base (Farms at the first Stage C look), wave, at (ms).
@@ -364,7 +427,7 @@
     const ftHeld = new Set(ctx.mem?.('buildout')?.get?.()?.ftMine ?? []);   // paused by the WF gate on purpose
     for (const bn of ENGINE) {
       const b = v.idB(bn);
-      if (poolTake(v, ctx, e, bn) > 0) return v.bld(b).name + ' in the pool';
+      if (poolTake(v, ctx, e, bn) > 0 && !(bn === 'Workshop' && allocOf(v, ctx, e))) return v.bld(b).name + ' in the pool';   // Workshops the plan parked do not hold a wave
       const g = v.groups.find((x) => x.building === b && x.count > 0 && !ftHeld.has(x.id) && (x.paused || (x.equipped ?? x.count) < x.count));
       if (g) return 'group ' + g.id + ' (' + (g.name ?? v.bld(b).name) + ') ' + (g.paused ? 'paused' : 'equipped ' + g.equipped + '/' + g.count);
     }
@@ -449,6 +512,7 @@
       else pick = { bn: 'Workshop', r: e.R.bench, label };
     }
     if (!pick && nx && e.sum(movableFt(ctx, e)) > tg.ft) held.push('Workshop: switch the spare Frame Timber Workshops first');
+    else if (!pick && nx && poolTake(v, ctx, e, 'Workshop') > 0) held.push('Workshop: the ' + poolTake(v, ctx, e, 'Workshop') + ' in the pool go first');
     else if (!pick && nx) {
       const extra = e.wsPlanksH(nx.r);
       const covered = e.planksSupply >= e.planksDemand + extra;
@@ -498,6 +562,8 @@
     if (ctx._boNoCash) return { pick, b, acres, cost, landCents, price, why };   // the wave gate checks cash itself, for several buildings
     if (v.money - cost < bill) return { saving: pick.label, wait: why + ': bill floor: cash ' + usd(v.money) + ' - ' + usd(cost) + ' < ' + usd(bill) + ' (' + mw + ' new MW x $20 + 2 h of bills)' };
     if (v.money - cost < floor + bill) return { saving: pick.label, wait: why + ': money floor: needs ' + usd(floor + bill + cost - v.money) + ' more above the floor ' + usd(floor) };
+    // a Workshop into a running group draws at once: only with the power free (asked of Auto utilities first), as the switch
+    if (pick.bn === 'Workshop' && homeGroup(e, b, pick.r)?.work?.length && mw > 0 && powerFor(v, ctx, mw) < mw) return { wait: why + ': waits for ' + mw + ' MW free power (asked Auto utilities)' };
     return { pick, b, acres, cost, landCents, price, why };
   }
   function buyAction(v, e, s) {

@@ -141,7 +141,7 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
     assert.ok(o2.waits.some((x) => /store needs 3 free acres \(0 free\)/.test(x)), o2.waits.join(' | '));
   });
 
-  await t('shelf pick: made or held goods only, best appetite x price first, at most 4', () => {
+  await t('fallback (no build-out director): shelf pick: made or held goods only, best appetite x price first, at most 4', () => {
     const { cp: c2 } = F.load(['cp-retail']);
     const st = liveC();
     const ctx = F.ctxOf({ retailBoard: board() });
@@ -249,10 +249,12 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
       if (m >= shelfAt && !st.groups[90].assortment.length) st.groups[90].assortment = shelfIds();
       if (m > shelfAt) {
         const ticks = 10 * 60 * 2;
-        let delta = 0;
+        // measured rules (plan E2): per-shelf rating, 50 units a tick per store in shelf order, missed demand is lost
+        let delta = 0, capLeft = 50 * ticks * st.groups[90].count;
         for (const n of ['Bookshelf', 'Table', 'Chair']) {
           const id = I(n), made = rate(n) * ticks, want = b.shelves[0][id].appetite / 240 * ticks;
-          const sold = Math.min(st.stock[0][id] + made, want);
+          const sold = Math.min(st.stock[0][id] + made, want, capLeft);
+          capLeft -= sold;
           st.stock[0][id] += made - sold;
           b.shelves[0][id].held += Math.round(sold);
           delta += sold < want ? -2 * ticks : sold > 0 ? ticks : 0;
@@ -524,6 +526,7 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
     }
   });
 
+  // With the retail allocator (plan B1) the measured caps are its demand caps: buildout's step back makes the cut, one Workshop per step.
   await t('fail path vs buildout: the cut goes to Frame Timber, the pool tidy keeps to the per-good keep, it converges and the re-run starts', () => {
     const { cp: c } = F.load(['cp-buildout', 'cp-retail']);
     const st = failSt();
@@ -540,7 +543,7 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
       const a = out.actions.find((x) => x.director === 'buildout' || x.director === 'retail');
       if (!a) break;
       ids.push(a.id);
-      if (a.id.startsWith('retail:ft:cut:')) cut = a;
+      if (a.id.startsWith('retail:ft:cut:') || a.id.startsWith('bo:stepback:')) cut ??= a;
       for (const s of a.steps) { w.ws.send(JSON.stringify(s.msg)); assert.ok(s.until(c._view(st, cat, [])), a.id + ' confirmed'); }
     }
     assert.ok(ids.length < 12, 'converges: ' + ids.join(', '));
@@ -577,10 +580,9 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
     for (const g of Object.values(st.groups)) if (g.recipe === Rc('Assemble Wooden Frame')) g.recipe = Rc('Make Bookshelf');   // every Frame Timber Workshop on Bookshelf
     const mem = memWith(FAIL3), { ids, acts } = converge(c, st, mem);
     assert.ok(ids.length < 12, 'converges: ' + ids.join(', '));
-    const cut = acts.find((a) => a.id.startsWith('retail:ft:cut:'));
+    const cut = acts.find((a) => a.id.startsWith('retail:ft:cut:') || a.id.startsWith('bo:stepback:'));
     assert.deepStrictEqual(cut.steps.map((s) => s.msg.type), ['UnassignBuildings', 'CreateGroup'], ids.join(', '));
-    const ft = Object.values(st.groups).find((g) => g.name === 'Frame Timber');
-    assert.strictEqual(ft.recipe, Rc('Assemble Wooden Frame'));
+    assert.ok(Object.values(st.groups).some((g) => g.recipe === Rc('Assemble Wooden Frame') && g.count > 0), 'the group the cut made runs Frame Timber');
     assert.deepStrictEqual(['Make Bookshelf', 'Make Table', 'Make Chair'].map((r) => furnOn(st, r)), [1, 1, 1]);
     assert.strictEqual(st.building_pool[0][B('Workshop')] ?? 0, 0);
     const r = mem('retail').get();
@@ -773,6 +775,102 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
     assert.deepStrictEqual(Object.keys(c._retail.goodsOf(v, null)), ['Bookshelf', 'Table', 'Chair', 'Bench']);
     const f = c._retail.facts(v, { retailBoard: board() });
     assert.ok(f.demandPlanksH > 0, 'demand planks for the land rule');
+  });
+
+  // ---- the retail allocator (plan B1, B5) -------------------------------------------------------------------------------------------
+  // A stand-in allocator plan: alloc per item id, shelves, stores needed (cp._buildout.alloc is what the build-out director exposes).
+  const stubAlloc = (c, plan) => { c._buildout = { alloc: () => ({ alloc: {}, shelves: [], storesNeeded: { 0: 1 }, dollarsPerHour: 123456, binding: 'workshops', detail: 'Workshops 9 (owned 9 + buildable 0)', ...plan }) }; };
+  const storeSt = () => { const st = liveC(); st.groups[90] = { building: B('Retail Store'), region: 0, count: 1, recipe: null, name: 'Retail', modules: {}, assortment: shelfIds() }; return st; };
+
+  await t('B1 shelves: the allocator planned goods plus the goods still made, at most 4, by unit price; the plan readout shows $/h, binding and Workshops', () => {
+    const { cp: c } = F.load(['cp-retail']);
+    const st = storeSt();
+    st.groups[11].count = 0; st.groups[11].work = []; st.stock[0][I('Chair')] = 0;   // nothing makes or holds Chair any more
+    st.groups[90].assortment = [I('Bookshelf'), I('Table')];   // not shelved: no drop delay keeps it
+    stubAlloc(c, { alloc: { [I('Bookshelf')]: 9, [I('Bench')]: 2 }, shelves: [I('Bookshelf'), I('Bench')] });
+    const out = c._decide(c._view(st, cat, []), F.ctxOf({ retailBoard: board(), mem: memFn() }));
+    const a = out.actions.find((x) => x.director === 'retail');
+    const byBase = (ns) => ns.map(I).sort((x, y) => cat.items.find((i) => i.id === y).base_value - cat.items.find((i) => i.id === x).base_value);
+    assert.deepStrictEqual(a.steps[0].msg.items, byBase(['Bookshelf', 'Table', 'Bench']), 'Bookshelf, Table (made), Bench (planned), by unit price: Chair is neither planned nor made: ' + a.steps[0].msg.items);
+    const r = out.readouts.retail;
+    assert.strictEqual(r.plan, '$123,456/h planned, with 1 store(s)');
+    assert.strictEqual(r.binding, 'workshops: Workshops 9 (owned 9 + buildable 0)');
+    assert.strictEqual(r.alloc, 'Bookshelf 9 Workshop(s), Bench 2 Workshop(s)');
+    // more than 4 candidates: the planned goods win the shelves
+    st.groups[11].count = 1; st.groups[11].work = [{ recipe: Rc('Make Chair'), runs: 5, buildings: 1, remaining: 100 }];
+    stubAlloc(c, { alloc: { [I('Desk')]: 1, [I('Bench')]: 1, [I('Bed')]: 1 }, shelves: [] });
+    const items = c._decide(c._view(st, cat, []), F.ctxOf({ retailBoard: board(), mem: memFn() })).actions.find((x) => x.director === 'retail').steps[0].msg.items;
+    assert.strictEqual(items.length, 4);
+    for (const n of ['Desk', 'Bench', 'Bed']) assert.ok(items.includes(I(n)), n + ' planned: ' + items);
+  });
+
+  await t('B5: stores up to the allocator storesNeeded, one per step (BuyBuilding + AssignBuildings into the Retail group), behind the store gates; a pooled store joins first', async () => {
+    const { cp: c } = F.load(['cp-retail']);
+    const st = storeSt();
+    st.stock[0][I('Concrete')] = 100; st.stock[0][I('Glass')] = 100; st.land_bought[0] += 9;
+    stubAlloc(c, { alloc: { [I('Bookshelf')]: 3, [I('Table')]: 2, [I('Chair')]: 1 }, shelves: shelfIds(), storesNeeded: { 0: 3 } });
+    const dec = () => c._decide(c._view(st, cat, []), F.ctxOf({ retailBoard: board(), mem: memFn() }));
+    const w = F.world(st, [], { catalog: cat, retail: board() });
+    const ids = [];
+    for (let k = 0; k < 5; k++) {
+      const a = dec().actions.find((x) => x.director === 'retail');
+      if (!a) break;
+      ids.push(a.id);
+      assert.deepStrictEqual(a.steps.map((x) => x.msg.type), ['BuyBuilding', 'AssignBuildings'], a.id);
+      for (const x of a.steps) { w.ws.send(JSON.stringify(x.msg)); assert.ok(x.until(c._view(st, cat, [])), a.id + ' confirmed'); }
+    }
+    assert.deepStrictEqual(ids, ['retail:store:more:1', 'retail:store:more:2']);
+    assert.strictEqual(st.groups[90].count, 3);
+    // gates: Glass short -> a wait naming it; a store in the pool goes into the group first
+    stubAlloc(c, { alloc: { [I('Bookshelf')]: 3 }, shelves: shelfIds(), storesNeeded: { 0: 4 } });
+    st.stock[0][I('Glass')] = 0;
+    assert.match(dec().waits.join(' | '), /retail: store 4 of 4 .*store needs 20 Glass/);
+    st.building_pool[0][B('Retail Store')] = 1;
+    assert.strictEqual(dec().actions.find((x) => x.director === 'retail').id, 'retail:store:pool:90:3');
+    stubAlloc(c, { alloc: { [I('Bookshelf')]: 3 }, shelves: shelfIds(), storesNeeded: { 0: 3 } });
+    assert.ok(!dec().actions.some((x) => x.director === 'retail'), 'a store the user pooled stays while the plan needs no more than the group has (3)');
+    stubAlloc(c, { alloc: { [I('Bookshelf')]: 3 }, shelves: shelfIds(), storesNeeded: { 0: 1 } });
+    delete st.building_pool[0][B('Retail Store')];
+    assert.ok(!dec().actions.some((x) => x.director === 'retail'), 'furniture: 1 store is enough');
+    // power: a store draws its baseload the moment it joins and is served last: it waits for free power and asks Auto utilities for it
+    st.stock[0][I('Glass')] = 100;
+    stubAlloc(c, { alloc: { [I('Bookshelf')]: 3 }, shelves: shelfIds(), storesNeeded: { 0: 4 } });
+    const asks = [], au = (free) => ({ _measure: () => ({ free }), ask: (u, r, mw) => asks.push(mw) });
+    const pd = c._decide(c._view(st, cat, []), F.ctxOf({ retailBoard: board(), mem: memFn(), tick: 5, mods: { autoUtil: au(1) } }));
+    assert.ok(!pd.actions.some((x) => x.director === 'retail'));
+    assert.match(pd.waits.join(' | '), /store 4 of 4 .*waits for 2 MW free power \(asked Auto utilities\)/);
+    assert.deepStrictEqual(asks, [2]);
+    assert.strictEqual(c._decide(c._view(st, cat, []), F.ctxOf({ retailBoard: board(), mem: memFn(), mods: { autoUtil: au(2) } })).actions.find((x) => x.director === 'retail')?.id, 'retail:store:more:3');
+    // what other modules keep back is not spent on a store
+    stubAlloc(c, { alloc: { [I('Bookshelf')]: 3 }, shelves: shelfIds(), storesNeeded: { 0: 4 } });
+    st.stock[0][I('Glass')] = 100;
+    assert.match(c._decide(c._view(st, cat, []), F.ctxOf({ retailBoard: board(), mem: memFn(), reserveItems: { [I('Glass')]: 90 } })).waits.join(' | '), /store needs 20 Glass \(\+90 other modules keep\)/);
+  });
+
+  await t('B1 shelves with the build-out director (no stand-in): the planned goods plus what is still made, by unit price', () => {
+    const { cp: c } = F.load(['cp-buildout', 'cp-retail']);
+    const st = storeSt();
+    st.groups[90].assortment = [I('Table')];
+    const out = c._decide(c._view(st, cat, []), F.ctxOf({ retailBoard: board(), mem: memFn() }));
+    const al = c._buildout.alloc(c._view(st, cat, []), F.ctxOf({ retailBoard: board(), retail: undefined }));
+    const a = out.actions.find((x) => x.director === 'retail');
+    assert.ok(a && a.steps[0].msg.type === 'SetAssortment', out.waits.join(' | '));
+    const items = a.steps[0].msg.items, unit = (id) => cat.items.find((i) => i.id === id).base_value;
+    assert.deepStrictEqual([...items].sort(), shelfIds().sort(), 'Bookshelf, Table and Chair are made: all on the shelf');
+    assert.deepStrictEqual(items, [...items].sort((x, y) => unit(y) - unit(x)), 'by unit price');
+    assert.ok(out.readouts.retail.plan && out.readouts.retail.binding && out.readouts.retail.alloc, JSON.stringify(out.readouts.retail));
+    assert.strictEqual(al, null, 'without the retail facts no plan (the fallback)');
+  });
+
+  await t('B1 unit price: board price x base x the quality factor of the stock (0.95 + 0.19 q / (q + 10), q = quality_points / units / 100)', () => {
+    const { cp: c } = F.load(['cp-retail']);
+    const st = storeSt(), ch = I('Chair');
+    st.stock[0][ch] = 1000; st.quality_points = { 0: { [ch]: 1000 * 1000 } };   // q = 10: factor 0.95 + 0.095
+    const unit = (s) => c._retail.facts(c._view(s, cat, []), F.ctxOf({ retailBoard: board() })).goods.find((g) => g.id === ch).unit;
+    const base = cat.items.find((i) => i.id === ch).base_value;
+    assert.strictEqual(unit(st), Math.floor(base * 1.6 * 1.045));
+    delete st.quality_points;
+    assert.strictEqual(unit(st), Math.floor(base * 1.6 * 0.95));
   });
 
   done();

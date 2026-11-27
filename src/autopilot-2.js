@@ -52,7 +52,8 @@
     acresUsed += q.acres;
     const landBought = st.land_bought?.[REGION] ?? 0;
     const drawOf = (b) => bld(b).draws?.power ?? 0;
-    const powerNeed = groups.filter((g) => !g.paused).reduce((a, g) => a + drawOf(g.building) * g.count, 0);
+    // MW needed before what is bought on contracts (read() subtracts powerBought): the shared power model (core.powerMeasure, plan A4).
+    const powerNeed = Math.max(0, Math.ceil(core.powerMeasure('power', REGION, st, catalog, tickNow ?? 0, []).need - 1e-9));
     const powerHave = st.subscriptions?.[REGION]?.power ?? 0;
     const powerBought = 0;   // power bought on contracts: read() sets it from the contract board (not in a pure snapshot)
     const inbound = {};

@@ -25,10 +25,12 @@
       const f = activeFills(v, ctx).sort((a, z) => z.left - a.left)[0];
       c.push(chk('autoship', !!f && f.left >= cfg.slotRearmMinutes * 120, !f ? 'no auto-ship running' : itemName(v, f.bid.item) + ' auto-ship, ' + Math.floor(f.left / 120) + ' min left'));
     }
-    // Power bought on contracts (ctx.contracts, the board) covers part of the load: the subscription only has to cover the rest.
-    const au = ctx.mods?.autoUtil, sub = v.st.subscriptions?.[REGION]?.power ?? 0, load = au?._measure ? au._measure('power', REGION, v.st, v.catalog, 0, []).load : powerLoad(v);
-    const bought = boughtPower(v, ctx);
-    if (load > 0) c.push(chk('power', !!au?.conf?.power?.on && sub + bought >= load, (au?.conf?.power?.on ? 'Auto power on' : 'Auto power off') + ', ' + sub + ' MW subscribed' + (bought > 0 ? ' + ' + bought + ' MW bought' : '') + ' for ' + load + ' MW load'));
+    // MW needed from the shared power model (core.powerMeasure, plan A4): load incl. store baseload and stalled groups, less generation and
+    // power bought on contracts (ctx.contracts). A bought contract within 30 min of its end counts as gone, so the check fails before it ends.
+    const au = ctx.mods?.autoUtil, sub = v.st.subscriptions?.[REGION]?.power ?? 0;
+    const pm = core.powerMeasure('power', REGION, v.st, v.catalog, ctx.tick ?? 0, ctx.contracts ?? [], [], null, au?.conf?.contractLeadMin ?? 30);
+    const need = Math.max(0, Math.ceil(pm.need - 1e-9));
+    if (pm.load > 0) c.push(chk('power', !!au?.conf?.power?.on && sub >= need, (au?.conf?.power?.on ? 'Auto power on' : 'Auto power off') + ', ' + sub + ' MW subscribed' + (pm.imported > 0 ? ' + ' + pm.imported + ' MW bought' : '') + ' for ' + pm.load + ' MW load' + (pm.waiting > 0 ? ' + ' + pm.waiting + ' MW waiting' : '') + ': ' + need + ' MW needed' + (pm.ending > 0 ? ' (' + pm.ending + ' MW of contracts end within 30 min)' : '')));
     const floor = sub * 12000 * (core?.powerPriceMult?.() ?? 1);   // a world event's NPC power price multiplier
     c.push(chk('cash', v.money >= floor, 'money ' + usd(v.money) + (v.money >= floor ? ' >= ' : ' < ') + 'bill floor ' + usd(floor) + ' (2 h of bills)'));
     if (out.stage === 'D' || out.stage === 'END') {

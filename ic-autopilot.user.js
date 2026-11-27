@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IC Autopilot
 // @namespace    idlecorp-toolkit
-// @version      2.8.25
+// @version      2.8.26
 // @author       XPARAD0X
 // @description  Early-game Autopilot, CD Farm (Construction Data by building and demolishing buildings; Auto picks the cheapest source itself), Lab runner (keeps the Manufacturing Labs researching), Auto ship (an "Auto ship" button on every distributor bid), Auto utilities (an "Auto" switch that keeps the power and water subscriptions at what the groups need), Core plan, Keep online (keeps the socket alive while the tab is hidden) and Module watch (alerts when a listed module matches a saved filter; never buys) for IdleCorp, each with a panel, menu or switch in the game UI. Everything runs live by default.
 // @homepageURL  https://github.com/mahardikamaulana/ic-autopilot
@@ -1181,6 +1181,79 @@ function bought(util, region, st, contracts, endBy = 0) {
   }
   return n;
 }
+// "MW needed", the one power model every module uses (plan A4: Auto utilities, Core plan's hourly check, Autopilot). Pure. For one utility
+// in one region: what the groups draw, what is generated, stored or bought, what stalled groups wait for, and need: the subscription that
+// covers all of it (negative: a surplus). flows: the engine's line flows [{ from, to, sent, delivered }] (power only). ev: a power event
+// plan ({ mode: 'pre' | 'dear' | 'cheap', end }) or null; it counts only where storage is. leadMin: a bought contract this close to its
+// end counts as gone (`ending` is that share). catalog: the client catalog (arrays) or an id-keyed one.
+// A state with no work rows on any group (a pure snapshot, the offline sim) counts every unpaused group's draw, as before the engine rows.
+const POWER_DAY = 28800, POWER_DAYLIGHT = 21600, POWER_NIGHT_PCT = 25, POWER_BILL_TICKS = 1200;   // diurnal generators make 25% at night; a bill every 10 min
+const INTANGIBLE_ITEMS = new Set([0, 24, 25, 26, 106, 107, 108, 109, 110, 111]);                    // items held in st.items, not in stock
+const powerIdx = new WeakMap();   // catalog -> { b, r } by id, built once per catalog object
+function powerMeasure(util, region, st, catalog, tick, contracts, flows = [], ev = null, leadMin = 30) {
+  const R = String(region);
+  let ix = powerIdx.get(catalog);
+  if (!ix) powerIdx.set(catalog, ix = { b: new Map(Object.values(catalog.buildings ?? {}).map((b) => [b.id, b])), r: new Map(Object.values(catalog.recipes ?? {}).map((r) => [r.id, r])) });
+  const bOf = ix.b, rOf = ix.r;
+  const have = st.subscriptions?.[R]?.[util] ?? 0;
+  const groups = Object.values(st.groups ?? {}).filter((g) => (g.region ?? 0) === region);
+  const noRows = !groups.some((g) => g.work != null);
+  const stockOf = (item) => (INTANGIBLE_ITEMS.has(item) ? (st.items?.[item] ?? 0) : (st.stock?.[R]?.[item] ?? 0));
+  const diurnal = (p) => (((tick % POWER_DAY) + POWER_DAY) % POWER_DAY < POWER_DAYLIGHT ? p : Math.floor(p * POWER_NIGHT_PCT / 100));
+  let load = 0, gen = 0, base = 0;
+  for (const g of groups) {
+    const work = g.work ?? [], bd = bOf.get(g.building), draw = (bd?.draws?.[util] ?? 0) * g.count;
+    // A baseload building (Retail Store: no work rows, no machines) draws whenever its group is unpaused; short of it, no store in
+    // the region sells (plan A3).
+    if (bd?.baseload && !g.paused) { load += draw; base += draw; }
+    else if (work.length || (noRows && !g.paused)) load += draw;
+    for (const w of work) {
+      const rc = rOf.get(w.recipe);
+      if (!rc) continue;
+      load += (rc.draws?.[util] ?? 0) * w.runs;
+      const p = (rc.generates?.[util] ?? 0) * w.runs;
+      gen += rc.diurnal ? diurnal(p) : p;
+    }
+  }
+  const owned = (id) => (st.building_pool?.[R]?.[id] ?? 0) + groups.filter((g) => g.building === id).reduce((a, g) => a + g.count, 0);
+  let dischargeCap = 0, chargeCap = 0, storeMax = 0;
+  for (const b of bOf.values()) {
+    const s = b.storage?.[util], n = s ? owned(b.id) : 0;
+    if (n) { dischargeCap += (s.discharge_limit ?? 0) * n; chargeCap += (s.charge_limit ?? 0) * n; storeMax += (s.max ?? 0) * n; }
+  }
+  // Stored is in MW-ticks (7,200 = 1 MWh): count only the rate it can keep up until the next bill, so a Battery Bank that would run
+  // dry mid-period does not cut the subscription. Right after a bill that is stored / 1,200, and the hold window keeps that sample.
+  const stored = st.stored?.[R]?.[util] ?? 0, toBill = tick > 0 ? POWER_BILL_TICKS - (tick % POWER_BILL_TICKS) : 0;
+  // Power events: before a dear one and during a cheap one nothing stored is counted on (a cheap one also adds the charge rate until
+  // full); during a dear one what is stored is spread to the event's end.
+  const mode = util === 'power' && dischargeCap + chargeCap > 0 ? ev?.mode ?? null : null;
+  const toUse = mode === 'dear' && ev.end > tick ? ev.end - tick : toBill;
+  const discharge = mode === 'pre' || mode === 'cheap' ? 0 : Math.min(dischargeCap, stored, toUse ? stored / toUse : stored);
+  const charge = mode === 'cheap' ? Math.min(chargeCap, Math.max(0, storeMax - stored)) : 0;
+  const lines = util === 'power' && Array.isArray(flows) ? flows : [];
+  const lineIn = lines.filter((f) => f.to === region).reduce((a, f) => a + (Number(f.delivered) || 0), 0);
+  const lineOut = lines.filter((f) => f.from === region && f.delivered > 0).reduce((a, f) => a + (Number(f.sent) || 0), 0);
+  const corp = st.ssi?.corp_id;
+  // What is bought counts its capacity less any shortfall (bought); what is promised to others is owed, whatever has got through.
+  const importedNow = bought(util, region, st, contracts);
+  const imported = tick > 0 ? bought(util, region, st, contracts, tick + leadMin * 120) : importedNow;
+  const sold = (contracts ?? []).filter((c) => c.utility === util && c.region === region && c.state === 'Active' && c.seller === corp).reduce((a, c) => a + (c.amount ?? 0), 0);
+  // A group that could start but whose draw is more than the free capacity is stalled; the engine starts it once free >= its draw.
+  // A group with no machines yet (equipped 0) cannot start whatever the power: the game calls it "unequipped", not stalled.
+  // Baseload groups are in the load already: the store gets power last, so it sells only while what is left covers it.
+  const free = Math.max(0, have + gen + discharge + imported + lineIn - load - sold - lineOut);
+  let waiting = 0;
+  for (const g of groups) {
+    if (noRows || g.paused || g.equipped === 0 || (g.work ?? []).length || bOf.get(g.building)?.baseload) continue;
+    const draw = (bOf.get(g.building)?.draws?.[util] ?? 0) * g.count;
+    if (!(draw > 0) || draw <= free) continue;
+    const rc = (g.recipe != null && (st.recipes?.[String(g.recipe)] ?? rOf.get(g.recipe))) || null;
+    if (!rc || !(rc.inputs ?? []).every((i) => stockOf(i.item) >= i.amount)) continue;
+    waiting += draw;
+  }
+  const need = load + sold + lineOut + waiting + charge - gen - discharge - imported - lineIn;
+  return { util, region, have, load, base, free, sold, gen, discharge, charge, mode, imported, ending: importedNow - imported, lineIn, lineOut, waiting, need };
+}
 
 const titleTimer = HAS_DOM ? setInterval(applyTitle, 2000) : 0;
 addEventListener?.('pagehide', flushLedger);
@@ -1189,7 +1262,7 @@ W.idleCore = {
   version: 1,
   walk, sleep, every, sleepWake, waitConfirm, tune, markSend, lastRtt, nowTick, seeTick, sock, orderBook, sendBoardFilter, onFrame, link, realHidden,
   h, makeDraggable, toast, ledger: ledgerApi, ui,
-  setBadge, notify, askNotify, notifyPerm, stopAll, reserves, floorDesigns, courierCU, powerPriceMult, powerEvent, bought,
+  setBadge, notify, askNotify, notifyPerm, stopAll, reserves, floorDesigns, courierCU, powerPriceMult, powerEvent, bought, powerMeasure,
   exportConfig, importConfig, exportFile, importFile, missingFields,
   _unload() {
     orderBook.release();
@@ -1776,6 +1849,179 @@ try {
 })();
 } catch (e) { console.error('[IdleCorp] planner failed to load:', e); }
 // @@END planner
+// ============================================================================
+// RETAIL ALLOCATOR (window.idleCore.retailAlloc)
+// ============================================================================
+// Pure: Workshops per retail good that maximise $/h (scripts/retail-optimizer-plan.md R-3, R-4, B1). No DOM, sockets or timers.
+// LP: max sum unitCents * uph_g * x_g  s.t.  sum x_g <= owned + buildable;  per input i: sum x_g * uph_g * in_g,i <= supply_i + max(0, stock_i - reserve_i) / stockBurnHours;
+// x_g * uph_g <= demand_g (cfg.curSlack: per input, how far over its budget the current assignment may run and still be kept);  x_g >= 0;  only floorOk goods;  at most maxShelves goods. Solved exactly with a small simplex, then rounded to whole Workshops.
+// Store capacity is not an LP limit: storesNeeded says how many stores the plan needs, and binding 'stores' flags a region short of them.
+// Money: unitCents in cents, dollarsPerHour in dollars (assumes storesNeeded stores exist).
+// @@MODULE retail-alloc
+try {
+(() => {
+  const W = typeof window !== 'undefined' ? window : globalThis;
+  const core = W.idleCore;
+  if (!core) throw new Error('the shared core did not load');
+
+  // max c.x s.t. A x <= b, x >= 0, b >= 0 (slack basis is feasible). Bland's rule, so no cycling.
+  function simplex(c, A, b) {
+    const m = A.length, n = c.length, N = n + m;
+    const T = A.map((row, i) => [...row, ...Array.from({ length: m }, (_, k) => +(k === i)), b[i]]);
+    const z = [...c.map((v) => -v), ...new Array(m + 1).fill(0)];
+    const basis = Array.from({ length: m }, (_, i) => n + i);
+    for (let it = 0; it < 1000; it++) {
+      const e = z.findIndex((v, j) => j < N && v < -1e-12);
+      if (e < 0) break;
+      let r = -1, best = Infinity;
+      for (let i = 0; i < m; i++) {
+        if (T[i][e] <= 1e-12) continue;
+        const q = T[i][N] / T[i][e];
+        if (q < best - 1e-12 || (q <= best + 1e-12 && basis[i] < basis[r])) { best = q; r = i; }
+      }
+      if (r < 0) break;   // unbounded: cannot happen, the Workshops row bounds every x
+      const p = T[r][e];
+      for (let j = 0; j <= N; j++) T[r][j] /= p;
+      for (const row of [...T.filter((_, i) => i !== r), z]) {
+        const f = row[e];
+        if (f) for (let j = 0; j <= N; j++) row[j] -= f * T[r][j];
+      }
+      basis[r] = e;
+    }
+    const x = new Array(n).fill(0);
+    basis.forEach((v, i) => { if (v < n) x[v] = Math.max(0, T[i][N]); });
+    return x;
+  }
+
+  function retailAlloc(input) {
+    const cfg = { stockBurnHours: 24, moveGainPct: 3, maxShelves: 4, ...(input.cfg ?? {}) };
+    const supply = input.supply ?? {}, stock = input.stock ?? {}, reserve = input.reserve ?? {}, stores = input.stores ?? {};
+    const storeCap = input.storeCapPerHour ?? 50 * 7200;
+    const owned = input.workshops?.owned ?? 0, buildable = input.workshops?.buildable ?? 0, Wmax = owned + buildable;
+    // shortcut: goods without a region share the first store region, fine while the corp sells in one region; give goods a region for more.
+    const defRegion = Object.keys(stores)[0] ?? 'default';
+    const goods = input.goods.map((g) => {
+      const uph = g.unitsPerWorkshopHour > 0 ? g.unitsPerWorkshopHour : 0, dem = g.demandPerHour > 0 ? g.demandPerHour : 0;   // NaN / missing -> 0
+      return {
+        ...g, region: g.region ?? defRegion, uph, dem, cents: g.unitCents > 0 ? g.unitCents : 0,
+        inputs: g.inputs ?? (g.planksPerUnit ? { Planks: g.planksPerUnit } : {}),
+        c: (g.unitCents > 0 ? g.unitCents : 0) * uph,     // cents per Workshop-hour
+        cap: uph && dem ? Math.min(dem / uph, Wmax) : 0,  // Workshops that fill demand (Infinity demand -> Wmax)
+      };
+    });
+    const items = [...new Set(goods.flatMap((g) => Object.keys(g.inputs)))];
+    const budget = Object.fromEntries(items.map((i) => [i, (supply[i] ?? 0) + Math.max(0, (stock[i] ?? 0) - (reserve[i] ?? 0)) / cfg.stockBurnHours]));
+    const use = (g, i) => (g.inputs[i] ?? 0) * g.uph;   // input i per Workshop-hour
+    const eligible = goods.filter((g) => g.floorOk && g.c > 0);
+
+    // Constraint rows over the goods in `gs`: kind, label, coefficient per good, limit.
+    const rowsFor = (gs) => [
+      { kind: 'workshops', a: gs.map(() => 1), b: Wmax },
+      ...items.map((i) => ({ kind: i === 'Planks' ? 'planks' : 'inputs', item: i, a: gs.map((g) => use(g, i)), b: budget[i] })),
+      ...gs.map((g, k) => ({ kind: 'demand', good: g, a: gs.map((_, j) => +(j === k)), b: g.cap })),
+    ];
+    const maxC = Math.max(1, ...eligible.map((g) => g.c));
+    function solve(gs) {
+      if (!gs.length) return { gs, x: [], obj: 0 };
+      const rows = rowsFor(gs);
+      // Rows scaled to max coefficient 1; objective scaled to 1, minus a tiny cost per Workshop so ties per plank pick fewer Workshops.
+      const sc = rows.map((r) => Math.max(...r.a.map(Math.abs)) || 1);
+      const x = simplex(gs.map((g) => g.c / maxC - 1e-7), rows.map((r, k) => r.a.map((v) => v / sc[k])), rows.map((r, k) => Math.max(0, r.b) / sc[k]));
+      return { gs, x, obj: gs.reduce((s, g, k) => s + g.c * x[k], 0) };
+    }
+    let lp = solve(eligible);
+    if (lp.x.filter((v) => v > 1e-9).length > cfg.maxShelves) {
+      // More goods than shelves: best subset of maxShelves goods (C(10,4) = 210 tiny solves).
+      const pick = (from, k, start = 0, acc = []) => {
+        if (acc.length === k) { const s = solve(acc); if (s.obj > lp.obj || lp.x.filter((v) => v > 1e-9).length > k) lp = s; return; }
+        for (let i = start; i < from.length; i++) pick(from, k, i + 1, [...acc, from[i]]);
+      };
+      pick(eligible, cfg.maxShelves);
+    }
+
+    // Integer plan: floor (with an epsilon against float noise), then one Workshop at a time to the best $/Workshop good that still fits.
+    const tol = (b) => 1e-9 * Math.max(1, Math.abs(b));
+    // slack: input item -> units/h the current assignment may run over its budget and still be kept (hysteresis against a wobbling budget)
+    const fits = (x, slack = {}) => rowsFor(goods).every((r) => r.a.reduce((s, a, k) => s + a * x[k], 0) <= r.b + tol(r.b) + ((r.item && slack[r.item]) || 0));
+    const plan = goods.map((g) => { const k = lp.gs.indexOf(g); return k < 0 ? 0 : Math.floor(lp.x[k] + 1e-9); });
+    for (;;) {
+      const used = plan.filter((v) => v > 0).length;
+      let best = -1;
+      goods.forEach((g, k) => {
+        if (!eligible.includes(g) || (plan[k] === 0 && used >= cfg.maxShelves) || (best >= 0 && g.c <= goods[best].c)) return;
+        plan[k]++;
+        if (fits(plan)) best = k;
+        plan[k]--;
+      });
+      if (best < 0) break;
+      plan[best]++;
+    }
+
+    // Hysteresis: keep the current assignment when it is feasible and the plan gains no more than moveGainPct.
+    const value = (x) => goods.reduce((s, g, k) => s + g.cents * Math.min(x[k] * g.uph, g.dem), 0);
+    const cur = goods.map((g) => g.current ?? 0);
+    const curOk = fits(cur, cfg.curSlack) && goods.every((g, k) => !cur[k] || eligible.includes(g)) && cur.filter((v) => v > 0).length <= cfg.maxShelves;
+    const keep = curOk && value(plan) <= value(cur) * (1 + cfg.moveGainPct / 100);
+    const x = keep ? cur : plan;
+    const alloc = Object.fromEntries(goods.map((g, k) => [g.id, x[k]]));
+
+    // Moves from current to alloc; 'pool' = unassigned or newly bought Workshops.
+    const moves = [];
+    if (!keep) {
+      const out = [], inn = [];
+      goods.forEach((g, k) => { const d = x[k] - cur[k]; if (d < 0) out.push([g.id, -d]); else if (d > 0) inn.push([g.id, d]); });
+      for (const t of inn) {
+        while (t[1] > 0 && out.length) {
+          const n = Math.min(t[1], out[0][1]);
+          moves.push({ from: out[0][0], to: t[0], n });
+          t[1] -= n; out[0][1] -= n;
+          if (!out[0][1]) out.shift();
+        }
+        if (t[1] > 0) moves.push({ from: 'pool', to: t[0], n: t[1] });
+      }
+      for (const [id, n] of out) moves.push({ from: id, to: 'pool', n });
+    }
+
+    // Shelves: allocated goods first, then goods with stock of their own, best unit price first.
+    const byPrice = (a, b) => b.cents - a.cents;
+    const shelfGoods = [...goods.filter((g, k) => x[k] > 0).sort(byPrice), ...goods.filter((g, k) => !x[k] && g.stock > 0).sort(byPrice)]
+      .slice(0, cfg.maxShelves).sort(byPrice);
+    const storesNeeded = {};
+    for (const g of shelfGoods) {
+      const k = goods.indexOf(g);
+      storesNeeded[g.region] = (storesNeeded[g.region] ?? 0) + Math.min(x[k] * g.uph, g.dem);
+    }
+    for (const r in storesNeeded) storesNeeded[r] = Math.max(1, Math.ceil(storesNeeded[r] / storeCap - 1e-9));
+
+    // Binding: constraints tight at the LP optimum, plus store regions short of storesNeeded.
+    const tight = [];
+    for (const r in storesNeeded) if (storesNeeded[r] > (stores[r] ?? 0)) tight.push({ kind: 'stores', text: 'stores: need ' + storesNeeded[r] + ' in ' + r + ', have ' + (stores[r] ?? 0) });
+    const lpX = goods.map((g) => { const k = lp.gs.indexOf(g); return k < 0 ? 0 : lp.x[k]; });
+    for (const r of rowsFor(goods)) {
+      const lhs = r.a.reduce((s, a, k) => s + a * lpX[k], 0);
+      if (r.kind === 'demand' ? !lp.gs.includes(r.good) : !eligible.length) continue;
+      if (r.kind === 'demand' && r.good.dem / r.good.uph >= Wmax) continue;   // its cap is the Workshops row, not demand
+      if (lhs < r.b - 1e-7 * Math.max(1, r.b)) continue;
+      if (r.kind === 'workshops') tight.push(buildable > 0 ? { kind: 'workshops', text: 'Workshops ' + Wmax + ' (owned ' + owned + ' + buildable ' + buildable + ')' } : { kind: 'money', text: 'Workshops ' + owned + ', buildable=0 (no cash or acres for another)' });
+      else if (r.kind === 'demand') tight.push({ kind: 'demand', text: r.good.name + ' demand ' + Math.round(r.good.dem) + '/h' });
+      else tight.push({ kind: r.kind, text: r.item + ' ' + Math.round(r.b) + '/h fully used' });
+    }
+    const order = ['stores', 'money', 'workshops', 'planks', 'inputs', 'demand'];
+    tight.sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind));
+    const spareWorkshops = Math.max(0, owned - x.reduce((s, v) => s + v, 0));
+
+    return {
+      alloc, shelves: shelfGoods.map((g) => g.id), storesNeeded,
+      binding: tight[0]?.kind ?? 'none', bindings: [...new Set(tight.map((t) => t.kind))],
+      detail: tight.length ? tight.map((t) => t.text).join('; ') + (spareWorkshops ? '; ' + spareWorkshops + ' Workshops spare' : '') : eligible.length ? 'nothing binds' : 'no good has a floor',
+      dollarsPerHour: value(x) / 100, lpDollarsPerHour: lp.obj / 100, moves, spareWorkshops, budget,
+    };
+  }
+
+  core.retailAlloc = retailAlloc;
+})();
+} catch (e) { console.error('[IdleCorp] retail-alloc failed to load:', e); }
+// @@END retail-alloc
 // ============================================================================
 // CORE MATH (window.idleCore.coreMath)
 // ============================================================================
@@ -4884,7 +5130,7 @@ try {
 //   autoUtil.status() / autoUtil.stop()                          // what it does now / both switches off
 //   autoUtil.cfg                                                 // timings; autoUtil.conf: spare per utility, hold minutes
 //
-// What it follows (the game's own page shows the same numbers, except that bought contracts count their capacity less any shortfall; autoUtil._measure is the pure version, used by the tests):
+// What it follows (the game's own page shows the same numbers, except that bought contracts count their capacity less any shortfall; autoUtil._measure is the pure version, core.powerMeasure the one model Core plan and Autopilot share too):
 //   need = load (running groups' building draw + recipe draw, plus every unpaused baseload building such as a Retail Store) + power sold
 //          on contracts (the promised amount) + lines out + what stalled groups wait for - self-generated (generators, at the day/night
 //          rate) - storage that can discharge (at most stored / ticks to the bill it pays for) - bought on contracts (one ending within
@@ -4934,10 +5180,8 @@ try {
     };
     const NAMES = Object.keys(UTILS);
     const RATES = { power: 1000, water: 400, bandwidth: 1500 };   // cents per unit per bill: what the game bills together (ISP: st.isp, 15 per Mbps)
-    const DAY = 28800, DAYLIGHT = 21600, NIGHT_PCT = 25;       // ticks; diurnal generators make 25% of their output at night
     const BILL_TICKS = 1200;                                   // a bill every 10 minutes at 2 ticks a second
     const PRE_EVENT_TICKS = 14400;                             // keep the batteries this long before a dear power event (a full Battery Bank charges in 10,800)
-    const INTANGIBLE = new Set([0, 24, 25, 26, 106, 107, 108, 109, 110, 111]);   // items held in st.items, not in stock
     const MAX_FAILS = 3;
     const cfg = { cycleMs: 2000, confirmMs: 10000, backoffMs: 5000, lowerWindowTicks: 120, raiseHoldTicks: 60 };   // timings; the tests shorten them. raiseHoldTicks: a raise only stalled groups need waits for the bill this close to it
     // contractLeadMin: a bought contract this close to its end counts as gone
@@ -4978,80 +5222,20 @@ try {
       return { st, catalog, contracts, flows, ws, wsOpen: ws?.readyState === 1, tick, mutTick: st.ssi?.last_user_mutation_tick ?? 0, priceMult: core.powerPriceMult?.() ?? 1, pev: core.powerEvent?.(engine, tick) ?? null };
     }
 
-    const ixRef = new WeakMap();
-    function idx(catalog) {
-      let x = ixRef.get(catalog);
-      if (!x) { x = { b: new Map((catalog.buildings ?? []).map((b) => [b.id, b])), r: new Map((catalog.recipes ?? []).map((r) => [r.id, r])) }; ixRef.set(catalog, x); }
-      return x;
-    }
-    const diurnal = (p, tick) => (((tick % DAY) + DAY) % DAY < DAYLIGHT ? p : Math.floor(p * NIGHT_PCT / 100));
-
     // ---- what is needed (pure: no I/O) -----------------------------------------------------------------------------------
-    // The page's numbers for one utility in one region. Returns what the groups draw, what is generated, stored or bought, what
-    // stalled groups wait for, and need: the subscription that covers all of it (can be negative: the Corporation has a surplus).
-    // flows: the engine's line flows [{ from, to, sent, delivered }] (power only): Lines in add supply, Lines out count as load, as on the page.
-    // ev: the power event plan from eventPlan ({ mode: 'pre' | 'dear' | 'cheap', end }), or null; it counts only where storage is.
+    // The page's numbers for one utility in one region: core.powerMeasure (the one "MW needed" model, plan A4) with conf.contractLeadMin.
+    // flows: the engine's line flows (power only); ev: the power event plan from eventPlan, or null.
+    // asked: MW another module wants free before it adds draw (ask), counted in the need until its tick.
     function measure(util, region, st, catalog, tick, contracts, flows = [], ev = null) {
-      const R = String(region), ix = idx(catalog);
-      const have = st.subscriptions?.[R]?.[util] ?? 0;
-      const groups = Object.values(st.groups ?? {}).filter((g) => (g.region ?? 0) === region);
-      const stockOf = (item) => (INTANGIBLE.has(item) ? (st.items?.[item] ?? 0) : (st.stock?.[R]?.[item] ?? 0));
-      let load = 0, gen = 0, base = 0;
-      for (const g of groups) {
-        const work = g.work ?? [], bd = ix.b.get(g.building), draw = (bd?.draws?.[util] ?? 0) * g.count;
-        // A baseload building (Retail Store: no work rows, no machines) draws whenever its group is unpaused; short of it, no store in
-        // the region sells (plan A3).
-        if (bd?.baseload && !g.paused) { load += draw; base += draw; }
-        else if (work.length) load += draw;
-        for (const w of work) {
-          const rc = ix.r.get(w.recipe);
-          if (!rc) continue;
-          load += (rc.draws?.[util] ?? 0) * w.runs;
-          const p = (rc.generates?.[util] ?? 0) * w.runs;
-          gen += rc.diurnal ? diurnal(p, tick) : p;
-        }
-      }
-      const owned = (id) => (st.building_pool?.[R]?.[id] ?? 0) + groups.filter((g) => g.building === id).reduce((a, g) => a + g.count, 0);
-      let dischargeCap = 0, chargeCap = 0, storeMax = 0;
-      for (const b of catalog.buildings ?? []) {
-        const s = b.storage?.[util], n = s ? owned(b.id) : 0;
-        if (n) { dischargeCap += (s.discharge_limit ?? 0) * n; chargeCap += (s.charge_limit ?? 0) * n; storeMax += (s.max ?? 0) * n; }
-      }
-      // Stored is in MW-ticks (7,200 = 1 MWh): count only the rate it can keep up until the next bill, so a Battery Bank that would run
-      // dry mid-period does not cut the subscription. Right after a bill that is stored / 1,200, and the hold window keeps that sample.
-      const stored = st.stored?.[R]?.[util] ?? 0, toBill = tick > 0 ? BILL_TICKS - (tick % BILL_TICKS) : 0;
-      // Power events: before a dear one and during a cheap one nothing stored is counted on (a cheap one also adds the charge rate until
-      // full); during a dear one what is stored is spread to the event's end.
-      const mode = util === 'power' && dischargeCap + chargeCap > 0 ? ev?.mode ?? null : null;
-      const toUse = mode === 'dear' && ev.end > tick ? ev.end - tick : toBill;
-      const discharge = mode === 'pre' || mode === 'cheap' ? 0 : Math.min(dischargeCap, stored, toUse ? stored / toUse : stored);
-      const charge = mode === 'cheap' ? Math.min(chargeCap, Math.max(0, storeMax - stored)) : 0;
-      const lines = util === 'power' && Array.isArray(flows) ? flows : [];
-      const lineIn = lines.filter((f) => f.to === region).reduce((a, f) => a + (Number(f.delivered) || 0), 0);
-      const lineOut = lines.filter((f) => f.from === region && f.delivered > 0).reduce((a, f) => a + (Number(f.sent) || 0), 0);
-      const corp = st.ssi?.corp_id;
-      // What is bought counts its capacity less any shortfall (core.bought); what is promised to others is owed, whatever has got through.
-      // A contract ending within conf.contractLeadMin counts as gone, so the grid is up before it ends; `ending` is that share
-      // (not urgent: it may wait for the bill).
-      const importedNow = core.bought(util, region, st, contracts);
-      const imported = tick > 0 ? core.bought(util, region, st, contracts, tick + conf.contractLeadMin * 120) : importedNow;
-      const sold = (contracts ?? []).filter((c) => c.utility === util && c.region === region && c.state === 'Active' && c.seller === corp).reduce((a, c) => a + (c.amount ?? 0), 0);
-      // A group that could start but whose draw is more than the free capacity is stalled; the engine starts it once free >= its draw.
-      // A group with no machines yet (equipped 0) cannot start whatever the power: the game calls it "unequipped", not stalled.
-      // Baseload groups are in the load already: the store gets power last, so it sells only while what is left covers it.
-      const free = Math.max(0, have + gen + discharge + imported + lineIn - load - sold - lineOut);
-      let waiting = 0;
-      for (const g of groups) {
-        if (g.paused || g.equipped === 0 || (g.work ?? []).length || ix.b.get(g.building)?.baseload) continue;
-        const draw = (ix.b.get(g.building)?.draws?.[util] ?? 0) * g.count;
-        if (!(draw > 0) || draw <= free) continue;
-        const rc = (g.recipe != null && (st.recipes?.[String(g.recipe)] ?? ix.r.get(g.recipe))) || null;
-        if (!rc || !(rc.inputs ?? []).every((i) => stockOf(i.item) >= i.amount)) continue;
-        waiting += draw;
-      }
-      const need = load + sold + lineOut + waiting + charge - gen - discharge - imported - lineIn;
-      return { util, region, have, load, base, free, sold, gen, discharge, charge, mode, imported, ending: importedNow - imported, lineIn, lineOut, waiting, need };
+      const m = core.powerMeasure(util, region, st, catalog, tick, contracts, flows, ev, conf.contractLeadMin), a = asks.get(util + ':' + region);
+      m.asked = a && tick < a.until ? a.mw : 0;
+      m.need += m.asked;
+      return m;
     }
+    // Core plan asks before a move into a running group (the engine draws by building count at once there, and serves the store last, plan
+    // R-5): Auto raises for it first, and the move waits until the power is free. Held for `ticks` (default 5 min), the latest ask wins.
+    const asks = new Map();
+    function ask(util, region, mw, tick, ticks = 600) { if (mw > 0) asks.set(util + ':' + region, { mw, until: tick + ticks }); else asks.delete(util + ':' + region); }
 
     // The plan for a power event (pev: core.powerEvent()) at tick: { mode, end, mult } or null. 'pre': the PRE_EVENT_TICKS before a dear
     // one, up to a minute (cfg.lowerWindowTicks) before it starts; 'dear' from then to its end; 'cheap' while a x0.5 one is in force, up to a
@@ -5314,7 +5498,7 @@ try {
       get running() { return anyOn(); },
       exportCfg: () => ({ cfg: persistable() }),
       importCfg(o) { const r = apply(o?.cfg ?? o); save(); ensureLoop(); renderAll(); return r; },
-      raiseRoom, _measure: measure, _want: wantOf, _decide: decide, _eventPlan: eventPlan, _eventLine: eventLine, _step: step, _info: info,
+      raiseRoom, ask, _measure: measure, _want: wantOf, _decide: decide, _eventPlan: eventPlan, _eventLine: eventLine, _step: step, _info: info,
       _unload() { unloaded = true; loopTimer?.(); loopTimer = null; if (mounted) unmountUi(); },
     };
 
@@ -6430,15 +6614,24 @@ console.log('[corePlan] ready: corePlan.status() reads the stage and conditions;
 //   - Kiln stock gate: unpause / switch the Kiln until Glass and Concrete reach their gates, pause again after;
 //   - Wooden Frame gate: pause at most cfg.keepFrameTimber Frame Timber Workshops at the WF keep line (Rivet use for cfg.ftKeepHours),
 //     resume below half (plan D-3, A2);
-//   - Stage B-D: spare Frame Timber Workshops switch to furniture (the best $ per Workshop-hour on the board), keeping 1 on Frame Timber;
+//   - Furniture Workshop targets come from the retail allocator (window.idleCore.retailAlloc, plan B1): $/h-best Workshops per good under
+//     Planks (Sawmill output + its measured error + a stock budget above plankReserve, plan B2), running Workshops (owned + buildable) and
+//     smoothed demand and prices, once a Retail Store group exists; before that, or without the retail director's facts (no board), the
+//     appetite / 40-30-30 split (furnitureSplit) stays as the fallback. Plan moves that idle or park Workshops wait cfg.planHoldMin;
+//   - a move into a running group (switch, pool tidy, buy) waits until the power it adds is free, asking Auto utilities for it (plan R-5);
+//   - Stage B-D: spare Frame Timber Workshops switch to the plan's largest gap (plan B3; fallback: the best $ per Workshop-hour), keeping 1 on Frame Timber;
+//   - furniture above the plan's total (the stock budget ended, a demand cap) steps back to the pool, one per step, newest first, and stays
+//     parked there until the plan has a gap (plan B2);
 //   - Stage C-D: Farms go in 4 waves 3 h apart (UnassignBuildings + DemolishBuilding), only when the last wave's acres are built and running
 //     and no group eats Cotton;
 //   - build-out toward core-math landRule: a consumer only when its supplier covers it, each buy gated by acre, kit, wood (R8), bill floor
 //     and the money floor; Stage C-D buys the acre too while the land rule is open, Stage B while (acre + $1,200) / $1,444 <= 20 h (plan D-1).
-//   - Stage B-D: furniture Workshops follow the board: a recipe 1+ Workshops over / under the split for cfg.rebalanceHours moves one (plan D3);
+//   - Stage B-D: furniture Workshops follow the plan: a recipe 1+ Workshops over / under it for cfg.rebalanceHours moves one (plan D3; the
+//     allocator keeps the current mix unless the plan gains more than cfg.moveGainPct);
 //   - Stage D after a checkpoint pass (never on the fail path): cfg.benchWorkshops Bench Workshop(s), the 4th shelf, on the Rivet x3 floor, once
 //     Concrete covers the Kiln gate + 48 h of Bench use; while a Bench group exists the Kiln gate's Concrete target rises by that use (plan D4).
-// Pure helpers for tests: corePlan._buildout.furnitureSplit / nextBuildStep / waveState / waveStep; wfKeep is the keep line Core plan's reserve uses.
+// Pure helpers for tests: corePlan._buildout.furnitureSplit / alloc / nextBuildStep / waveState / waveStep; wfKeep is the keep line Core plan's reserve uses;
+// alloc(v, ctx) is the plan the retail director shelves and sizes stores from.
 // nextBuildStep's saving (a bill / money floor wait) makes the Stage B land director wait too; pendingInvest feeds Core plan's E5.
 // @@MODULE cp-buildout
 try {
@@ -6472,6 +6665,14 @@ try {
     ftKeepMax: 19,               // ... capped here, so stock settles under 20 and E3 can hold (a Rivet Workshop takes 6 per wave start)
     rebalanceHours: 6,           // a furniture recipe's gap to the board's split must hold this long before a Workshop moves (plan D3)
     benchWorkshops: 1,           // Bench Workshops in Stage D after a checkpoint pass (wiki 4.7 step 2)
+    moveGainPct: 3,              // the retail allocator moves furniture Workshops only for a gain above this (plan B1; rebalance also holds rebalanceHours)
+    stockBurnHours: 24,          // Planks above plankReserve are planned to run down over this many hours with extra Workshops (plan R-4)
+    stepBackHours: 4,            // ... stopped when the projected stock would reach plankReserve within this many hours (plan B2)
+    stockBand: 10,               // ... and started again only once the stock is this % above plankReserve (hysteresis)
+    plankReserve: 1000,          // Planks always kept, on top of other modules' reserves, the next Workshop builds and Frame Timber's keep-line need
+    planHoldMin: 30,             // a step back, a park or a pool placement the plan asks for must hold this long first (no churn on a wobbling budget)
+    boardSmoothHours: 2,         // the allocator plans from board prices and appetite smoothed over about this many hours (EMA)
+    plankEmaHours: 2,            // the Planks model's error is measured from the stock, smoothed over about this many hours (EMA)
   };
 
   // ---- small pure helpers ------------------------------------------------------------------------------------------------------
@@ -6531,6 +6732,120 @@ try {
     return val;
   }
 
+  // ---- the retail allocator (plan B1, B2) -------------------------------------------------------------------------------------------
+  // Planks kept in stock (plan B2): cfg.plankReserve, other modules' finite Planks reserves, the next cfg.kitWaveBuilds Workshop builds
+  // (build items + kit), and the Planks Frame Timber needs to bring Wooden Frames up to their keep line.
+  function plankReserve(v, ctx, e) {
+    const pl = e.planksId, other = ctx.reserveItems?.[pl];
+    const builds = amt(e.kitOf(e.id.ws, null), pl) * (cfg.kitWaveBuilds ?? 3);
+    const wfShort = Math.max(0, (wfKeep(v, ctx, e) ?? 0) - v.has('Wooden Frame')) * amt(e.R.ft.inputs, pl);
+    return cfg.plankReserve + (Number.isFinite(other) ? other : 0) + builds + wfShort;
+  }
+  // Workshops cash and acres buy now: each at its price + bill floor, with the acres it lacks (Stage C-D up to the land rule's last acre;
+  // Stage B on free acres only, as nextBuildStep). Kits are nextBuildStep's check.
+  function buildableWs(v, ctx, e, rule) {
+    const bd = v.bld(e.id.ws), addBill = cp._billNeed(v, bd.draws?.power ?? 0) - cp._billNeed(v, 0);
+    const cap = conversionStage(v) && rule ? Math.min(rule.lastAcre, ACRE_CAP) : v.acresOwned;
+    let cash = v.money - (ctx.floorCents ?? 0) - cp._billNeed(v, 0), free = Math.max(0, v.freeAcres - cfg.bufferAcres), bought = 0, n = 0;
+    for (; n < 100; n++) {
+      const lack = Math.max(0, bd.acres - free);
+      if (v.acresOwned + bought + lack > cap) break;
+      let c = W.idleCore.planner.price(bd.cost, v.ownedAll('Workshop'), n) + addBill;
+      for (let i = 0; i < lack; i++) c += cp._acrePriceCents(v.landBought + bought + i);
+      if (cash < c) break;
+      cash -= c; free += lack - bd.acres; bought += lack;
+    }
+    return n;
+  }
+  // Board price and appetite per good smoothed (EMA over about cfg.boardSmoothHours; mem board, sampled every 10 min, reset after a 6 h gap),
+  // so a board that moves fast does not lock the Workshops into one phase of it (plan risk "flip-flops").
+  function smoothBoard(m, mm, goods, now) {
+    const o = mm.board && now >= mm.board.t && now - mm.board.t < 6 * HOUR ? mm.board : null;
+    const dtH = o ? (now - o.t) / HOUR : 0, a = o ? dtH / (dtH + cfg.boardSmoothHours) : 1;
+    const p = {}, ap = {};
+    for (const g of goods) {
+      const op = o?.p?.[g.id], oa = o?.a?.[g.id];
+      p[g.id] = op > 0 ? op + a * (g.boardPrice - op) : g.boardPrice;
+      ap[g.id] = oa >= 0 ? oa + a * (g.appetite - oa) : g.appetite;
+    }
+    if (m && (!o || now - o.t >= 600000)) m.set({ board: { t: now, p, a: ap } });
+    return { p, a: ap };
+  }
+  // Error of the Planks model (plan B2): EMA (cfg.plankEmaHours) of the stock's measured slope less the modelled one (Sawmills - running
+  // Workshops at their nominal rates) over intervals of 10 min to 1 h (mem plk; a longer gap starts over). An interval in which the model
+  // changed (a move: new groups start with a burst of wave inputs) is dropped. Starts at 0, used after 3 intervals, else 0.
+  function plankCorr(m, mm, stock, model, now) {
+    const p = mm.plk, dtH = p ? (now - p.t) / HOUR : -1;
+    if (!m) return 0;
+    if (!p || dtH < 0 || dtH > 1) { m.set({ plk: { t: now, s: stock, m: model, r: p?.r ?? 0, n: 0 } }); return 0; }
+    if (Math.abs(model - p.m) > 1e-6) { m.set({ plk: { ...p, t: now, s: stock, m: model } }); return p.n >= 3 ? p.r : 0; }
+    if (dtH < 1 / 6) return p.n >= 3 ? p.r : 0;
+    const x = (stock - p.s) / dtH - p.m, r = p.r + dtH / (dtH + cfg.plankEmaHours) * (x - p.r);
+    m.set({ plk: { t: now, s: stock, m: model, r, n: p.n + 1 } });
+    return p.n + 1 >= 3 ? r : 0;
+  }
+  // A condition a plan move needs to have held for cfg.planHoldMin (mem hold[key] = since it was first seen); false and cleared when it does not hold.
+  function holdFor(ctx, key, on) {
+    const m = ctx.mem?.('buildout');
+    if (!m) return on;
+    const h = { ...(m.get().hold ?? {}) }, now = ctx.now ?? Date.now();
+    if (!on) { if (h[key] != null) { delete h[key]; m.set({ hold: h }); } return false; }
+    if (h[key] == null) { h[key] = now; m.set({ hold: h }); }
+    return now - h[key] >= cfg.planHoldMin * 60000;
+  }
+  // The plan from window.idleCore.retailAlloc, once per view (ctx._boAlloc), with byKey (Workshops per FURN key), extra (Planks/h the stock
+  // budget adds), burn and reserve. Only once a Retail Store group exists: before it sells, Wooden Frames and the pre-store plan have value
+  // the allocator cannot see. Inputs: the retail director's facts on a smoothed board (price x quality, appetite x 30 x share, stock), runs
+  // per wave x waves/h at the furniture floor, Planks the Sawmills make less what other running Workshops eat (a gate-held one eats nothing)
+  // plus the model's measured error, running furniture Workshops (a paused group is the user's: not counted) + spare Frame Timber + pooled
+  // (owned) + buildable, stores. A good without its floor is out while floors are not applied here. A measured retail fail caps each shelved
+  // good at its kept Workshops (as failKeep).
+  // B2: the Planks stock budget, (stock when the burn started - reserve) / cfg.stockBurnHours (mem burnFrom), is off once the stock is at the
+  // reserve + cfg.stepBackHours of the projected drain, and on again only cfg.stockBand % above that line (mem burn). While on, the current assignment is kept up to one Workshop's Planks over its budget.
+  // null without the retail facts or a store: callers keep the appetite / 40-30-30 split (furnitureSplit) as their fallback.
+  function allocOf(v, ctx, e = engine(v, ctx), rule = null) {
+    if (ctx._boAlloc?.v === v) return ctx._boAlloc.al;
+    const f = ctx.retail, ra = W.idleCore.retailAlloc;
+    let al = null;
+    if (!e.missing && ra && f?.goods && f.share != null && f.storeGroup) {
+      const m = ctx.mem?.('buildout'), mm = m?.get?.() ?? {}, now = ctx.now ?? Date.now();
+      const keyOf = Object.fromEntries(FURN.map(([k, n]) => [n, k]));
+      const by = ctx.retailFail ? f.capDecision?.capBy ?? null : null;
+      const sm = smoothBoard(m, mm, f.goods, now);
+      const goods = f.goods.map((g) => {
+        const k = keyOf[g.name], r = k ? e.R[k] : null;
+        const uph = r ? (r.outputs[0]?.amount ?? 1) * runsH(r, Math.max(e.rateNow(r), FLOOR.Workshop)) : 0;
+        const d = f.demandH({ ...g, appetite: sm.a[g.id] });
+        const dem = by && g.name in by ? Math.min(d, Math.ceil(by[g.name] - 1e-9) * uph) : d;
+        return { id: g.id, name: g.name, unitCents: g.unit * sm.p[g.id] / g.boardPrice, planksPerUnit: g.ppu, unitsPerWorkshopHour: uph, demandPerHour: dem,
+          current: k ? e.furnRun[k] : 0, floorOk: !!r && (cfg.applyFurnitureFloor || !floorMissing(e, r)), region: REGION, stock: g.stock };
+      });
+      const fts = movableFt(ctx, e), ftRate = e.wsPlanksH(e.R.ft), keep = cfg.keepFrameTimber;
+      const ftPaused = e.sum(fts.filter((g) => g.paused)), ftRun = e.sum(fts.filter((g) => !g.paused));
+      const spare = Math.max(0, ftPaused + ftRun - keep), spareRun = Math.max(0, ftRun - Math.max(0, keep - ftPaused));
+      const furnUse = FURN.reduce((a, [k]) => a + e.furnRun[k] * e.runPlanksH(e.R[k]), 0);
+      const stock = v.has('Planks'), net = e.planksSupply - e.planksLive + plankCorr(m, mm, stock, e.planksSupply - e.planksLive, now);
+      const supply = Math.max(0, net + furnUse + spareRun * ftRate);
+      const reserve = plankReserve(v, ctx, e), line = reserve + Math.max(0, -net) * cfg.stepBackHours;
+      // on again cfg.stockBand % above the line: after a step back the drain (so the line) is lower, and the burn restarts at the lower
+      // rate the smaller stock gives, so the stock steps down to the reserve instead of stopping 4 h of the old drain above it
+      const burn = mm.burn ? stock > line : stock >= line * (1 + cfg.stockBand / 100);
+      // the burn rate is set by the stock when it started (raised if the stock grows past it), so it runs down at a steady rate and reaches the line
+      const from = burn ? Math.max(stock, mm.burn ? mm.burnFrom ?? 0 : 0) : null;
+      if (m && (burn !== !!mm.burn || from !== (mm.burnFrom ?? null))) m.set({ burn, burnFrom: from });
+      const maxUse = Math.max(...FURN.map(([k]) => e.wsPlanksH(e.R[k])));
+      al = ra({ goods, supply: { Planks: supply }, stock: { Planks: burn ? from : 0 }, reserve: { Planks: reserve },
+        workshops: { owned: FURN.reduce((a, [k]) => a + e.furnRun[k], 0) + spare + e.ownPool(e.id.ws), buildable: buildableWs(v, ctx, e, rule) },
+        stores: { [REGION]: v.owned('Retail Store') }, cfg: { stockBurnHours: cfg.stockBurnHours, moveGainPct: cfg.moveGainPct, maxShelves: 4, curSlack: burn ? { Planks: maxUse } : {} } });
+      Object.assign(al, { byKey: Object.fromEntries(FURN.map(([k, n]) => [k, al.alloc[v.idI(n)] ?? 0])), extra: (al.budget.Planks ?? 0) - supply, burn, reserve, net });
+    }
+    ctx._boAlloc = { v, al };
+    return al;
+  }
+  // Planks/h a move may add: what the Sawmills make plus the stock budget and the model's measured error, less what the Workshops eat now.
+  // With the allocator a gate-held group eats nothing (al.net is from running groups); the switch then counts a held source as eating nothing.
+  const planksRoom = (v, ctx, e) => { const al = allocOf(v, ctx, e); return al ? al.net + al.extra : e.planksSupply - e.planksDemand; };
+
   // ---- reading the engine from a view ---------------------------------------------------------------------------------------------
   function engine(v, ctx) {
     const N = v.N, C = v.C, st = v.st;
@@ -6551,6 +6866,7 @@ try {
     const furnKeys = FURN.map(([k]) => k);
     const wsGroups = groupsOf(id.ws);
     const furnNow = Object.fromEntries(furnKeys.map((k) => [k, sum(wsGroups.filter((g) => g.recipe === R[k].id))]));
+    const furnRun = Object.fromEntries(furnKeys.map((k) => [k, sum(wsGroups.filter((g) => g.recipe === R[k].id && !g.paused))]));   // a paused furniture group is the user's
     const ftNow = sum(wsGroups.filter((g) => g.recipe === R.ft.id));
     const planksPerSaw = (R.planks.outputs[0]?.amount ?? 1) * runsH(R.planks, rateNow(R.planks));
     const woodPerSaw = amt(R.planks.inputs, woodId) * runsH(R.planks, ratePlan(R.planks, 'Sawmill'));
@@ -6562,6 +6878,7 @@ try {
     // Each group at the floor it really runs (Make Bench x3, not furniture's x5); one with no floor yet at the floor it will get.
     const runPlanksH = (r) => (layout(r) ? amt(r.inputs, planksId) * runsH(r, rateNow(r)) : wsPlanksH(r));
     const planksDemand = wsGroups.filter((g) => live(g) || (ftHeld.has(g.id) && g.count > 0)).reduce((a, g) => a + g.count * (C.recipes[g.recipe] ? runPlanksH(C.recipes[g.recipe]) : 0), 0);
+    const planksLive = wsGroups.filter(live).reduce((a, g) => a + g.count * (C.recipes[g.recipe] ? runPlanksH(C.recipes[g.recipe]) : 0), 0);   // eaten now (no gate-held group)
     const woodSupply = sum(groupsOf(id.camp, R.wood).filter(live)) * woodPerCamp;
     const woodDemand = sum(groupsOf(id.saw, R.planks).filter(live)) * woodPerSaw;
     const kitOf = (b, r) => [...(v.bld(b).build_items ?? []), ...((r && layout(r)?.bom) ?? v.bld(b).default_kit ?? [])];
@@ -6571,8 +6888,8 @@ try {
     const benchRuns = R.bench ? runsH(R.bench, Math.max(rateNow(R.bench), BENCH_FLOOR)) : 0;
     const benchConcreteH = (n) => n * benchRuns * (R.bench ? amt(R.bench.inputs, v.idI('Concrete')) : 0);
     const benchPlanksH = R.bench ? benchRuns * amt(R.bench.inputs, planksId) : 0;
-    return { id, R, ownPool, benchNow, benchConcreteH, benchPlanksH, layout, rateNow, groupsOf, sum, furnNow, ftNow, wsGroups, planksPerSaw, woodPerSaw, woodPerCamp, wsPlanksH,
-      planksSupply, planksDemand, woodSupply, woodDemand, kitOf, woodId, planksId,
+    return { id, R, ownPool, runPlanksH, benchNow, benchConcreteH, benchPlanksH, layout, rateNow, groupsOf, sum, furnNow, furnRun, ftNow, wsGroups, planksPerSaw, woodPerSaw, woodPerCamp, wsPlanksH,
+      planksSupply, planksDemand, planksLive, woodSupply, woodDemand, kitOf, woodId, planksId,
       camps: v.owned('Lumber Camp'), saws: v.owned('Sawmill'), workshops: v.owned('Workshop'), farms: v.owned('Farm') };
   }
   const short = (v, list, n = 1) => {   // what is missing from stock for n x list
@@ -6598,13 +6915,15 @@ try {
     if (e.planksSupply < e.planksDemand + e.benchPlanksH) return 'planks ' + Math.round(e.planksSupply) + '/h cannot feed ' + Math.round(e.planksDemand + e.benchPlanksH) + '/h';
     return null;
   }
-  // Targets: Camps / Sawmills from the land rule, Workshops from the furniture split of the rule's planks, capped by ctx.retailCap.
+  // Targets: Camps / Sawmills from the land rule, Workshops from the retail allocator (plan B1; on a measured fail the Workshops it cannot use
+  // go to Frame Timber), else from the furniture split of the rule's planks, capped by ctx.retailCap.
   function targets(v, ctx, rule, e) {
-    const split = furnitureSplit(ctx.retailBoard, rule.planksH, v.C);
-    const furn = { bookshelf: split.bookshelf, table: split.table, chair: split.chair };
-    let ft = cfg.keepFrameTimber;
-    const kept = failKeep(ctx, furn);
-    if (kept !== furn || (typeof ctx.retailCap === 'number' && split.total > ctx.retailCap)) {
+    const al = allocOf(v, ctx, e, rule);
+    const split = al ? null : furnitureSplit(ctx.retailBoard, rule.planksH, v.C);
+    const furn = al ? { ...al.byKey } : { bookshelf: split.bookshelf, table: split.table, chair: split.chair };
+    let ft = cfg.keepFrameTimber + (al && ctx.retailFail ? al.spareWorkshops : 0);
+    const kept = al ? furn : failKeep(ctx, furn);
+    if (!al && (kept !== furn || (typeof ctx.retailCap === 'number' && split.total > ctx.retailCap))) {
       // Over the retail cap: the per-good keep on a measured fail, else the board's mix inside the cap; the planks left over go to Frame Timber.
       const capped = kept !== furn ? kept : split.alloc(Math.max(0, Math.floor(ctx.retailCap)));
       const extra = Object.keys(furn).reduce((a, k) => a + (furn[k] - capped[k]) * split.planksPerWs[k], 0);
@@ -6620,12 +6939,13 @@ try {
       camps += Math.ceil(q * m.woodPerPlank / m.campWoodH) - Math.ceil(p * m.woodPerPlank / m.campWoodH);
       sawmills += Math.ceil(q / m.smPlanksH) - Math.ceil(p / m.smPlanksH);
     }
-    return { split, furn, ft, rivet, bench, camps, sawmills, workshops: furn.bookshelf + furn.table + furn.chair + ft + rivet + bench };
+    return { split, al, source: al ? 'allocator, ' + al.binding : split.source, furn, ft, rivet, bench, camps, sawmills, workshops: furn.bookshelf + furn.table + furn.chair + ft + rivet + bench };
   }
   // The furniture recipe the next Workshop should run (largest gap to target), or Frame Timber when furniture is at its cap.
   function nextWorkshopRecipe(e, tg) {
     let best = null;
-    for (const [k] of FURN) { const gap = tg.furn[k] - e.furnNow[k]; if (gap > 0 && (!best || gap > best.gap)) best = { k, gap }; }
+    const cur = tg.al ? e.furnRun : e.furnNow;
+    for (const [k] of FURN) { const gap = tg.furn[k] - cur[k]; if (gap > 0 && (!best || gap > best.gap)) best = { k, gap }; }
     if (best) return { key: best.k, r: e.R[best.k] };
     if (e.ftNow < tg.ft) return { key: 'ft', r: e.R.ft };
     return null;
@@ -6653,20 +6973,26 @@ try {
     return { id: 'bo:pause:' + g.id + ':' + paused, text: why + ': ' + (paused ? 'pause' : 'resume') + ' group ' + g.id + ' (' + (v.C.recipes[g.recipe]?.name ?? 'no recipe') + ')',
       steps: [{ msg: { type: 'SetPaused', group: g.id, paused }, until: (x) => !!groupById(x, g.id)?.paused === paused }] };
   }
-  // Group a building of type b on recipe r goes into: the biggest one on that recipe.
+  // Group a building of type b on recipe r goes into: the biggest one on that recipe (a paused furniture group is the user's: never).
   // A group made by CreateGroup has no recipe until SetRecipe lands; it counts by its name, so a second Workshop joins it instead of a new group.
-  const homeGroup = (e, b, r) => e.groupsOf(b, r).sort((a, c) => c.count - a.count)[0]
+  const homeGroup = (e, b, r) => e.groupsOf(b, r).filter((g) => !g.paused || !FURN.some(([k]) => e.R[k].id === r.id)).sort((a, c) => c.count - a.count)[0]
     ?? e.groupsOf(b).filter((g) => g.recipe == null && g.name === r.name).sort((a, c) => c.count - a.count)[0] ?? null;
   // Where a Workshop from the pool goes: a wanted Bench that is ready (as the buy path, Bench first), else the biggest furniture gap that has its floor and that the spare planks feed, else Frame Timber.
+  // With the allocator (running furniture only): a gap that has held cfg.planHoldMin; Frame Timber only while it is below its target; else
+  // null, the Workshop stays parked in the pool (plan B2 step back).
   // Same checks as the switch, so a Workshop the switch freed is never sent back to Frame Timber while the switch still wants it.
   function poolWorkshopRecipe(v, ctx, e, tg, n) {
     if (tg && tg.bench > e.benchNow && !benchHeld(v, e, tg)) return e.R.bench;
     const furnTotal = FURN.reduce((a, [k]) => a + e.furnNow[k], 0);
-    const want = failKeep(ctx, tg ? tg.furn : furnitureSplit(ctx.retailBoard, 0, v.C).alloc(furnTotal + n));
-    const headroom = e.planksSupply - e.planksDemand;
-    const gaps = FURN.map(([k]) => ({ k, gap: want[k] - e.furnNow[k] })).filter((x) => x.gap > 0).sort((a, b) => b.gap - a.gap);
+    const al = allocOf(v, ctx, e);
+    const want = al ? al.byKey : failKeep(ctx, tg ? tg.furn : furnitureSplit(ctx.retailBoard, 0, v.C).alloc(furnTotal + n));
+    const headroom = planksRoom(v, ctx, e);
+    const cur = al ? e.furnRun : e.furnNow;
+    const gaps = FURN.map(([k]) => ({ k, gap: want[k] - cur[k] })).filter((x) => x.gap > 0).sort((a, b) => b.gap - a.gap);
     const ok = gaps.find((x) => !floorMissing(e, e.R[x.k]) && headroom + 1e-9 >= e.wsPlanksH(e.R[x.k]));
-    return ok ? e.R[ok.k] : e.R.ft;
+    if (al && ok) return holdFor(ctx, 'pool', true) ? e.R[ok.k] : null;
+    if (al) holdFor(ctx, 'pool', false);
+    return ok ? e.R[ok.k] : !al || e.ftNow < (tg?.ft ?? cfg.keepFrameTimber) ? e.R.ft : null;
   }
 
   // Ownership memory, like kilnMine: units this director left in the pool (mem poolMine { building: n }: + on a confirmed BuyBuilding or
@@ -6712,8 +7038,10 @@ try {
       const n = poolTake(v, ctx, e, bn);
       if (!n) continue;
       let r = bn === 'Lumber Camp' ? e.R.wood : bn === 'Sawmill' ? e.R.planks : null;
-      if (bn === 'Workshop') r = poolWorkshopRecipe(v, ctx, e, tg, n);
+      if (bn === 'Workshop') { r = poolWorkshopRecipe(v, ctx, e, tg, n); if (!r) continue; }   // parked: the plan has no gap for it
       const g = homeGroup(e, b, r);
+      // into a running group the draw starts at once: only with the power free (asked of Auto utilities first), as the switch
+      if (bn === 'Workshop' && g?.work?.length && powerFor(v, ctx, v.bld(b).draws?.power ?? 0) < (v.bld(b).draws?.power ?? 0)) continue;
       const k = bn === 'Workshop' ? 1 : n;                            // Workshops one at a time: each goes where the split is shortest
       return track(v, ctx, b, g ? assignAction(v, b, g, k, 'pool') : createAction(v, b, k, r.name, 'pool'));
     }
@@ -6861,13 +7189,15 @@ try {
     return { wait: [...new Set(waits)].join('; ') };   // the shared retry wait is the same for every floor
   }
 
-  // MW a move may add now: the free power after every load (store included, contracts counted) plus what Auto utilities can raise now
-  // (0 while it is off, broke or backing off). Infinity without Auto utilities loaded (no power model to ask).
-  function powerRoom(v, ctx) {
+  // MW free now for a move that adds `mw` of draw at once (store included, contracts counted). Short of it, Core plan asks Auto utilities for
+  // the draw (live only, autoUtil.ask) and the move waits until the raise has landed: the store is served last, so a move ahead of the raise
+  // darkens it (plan R-5). Infinity without Auto utilities loaded (no power model to ask).
+  function powerFor(v, ctx, mw) {
     const au = ctx.mods?.autoUtil;
     if (!au?._measure) return Infinity;
-    const m = au._measure('power', REGION, v.st, v.catalog, ctx.tick ?? 0, ctx.contracts ?? []);
-    return Math.max(0, m.free ?? 0) + (au.raiseRoom?.('power', REGION, v.st, ctx.now) ?? 0);
+    const free = Math.max(0, au._measure('power', REGION, v.st, v.catalog, ctx.tick ?? 0, ctx.contracts ?? []).free ?? 0);
+    if (free + 1e-9 < mw && ctx.live) au.ask?.('power', REGION, mw, ctx.tick ?? 0);
+    return free;
   }
   // Frame Timber groups this director may move, biggest first: not one the user paused, nor one the user resumed after the WF gate paused it.
   function movableFt(ctx, e) {
@@ -6889,19 +7219,34 @@ try {
     const fts = movableFt(ctx, e);
     const spare = e.sum(fts) - keep;
     if (spare <= 0) return null;
-    const split = tg?.split ?? furnitureSplit(ctx.retailBoard, 0, v.C);
-    const furnTotal = FURN.reduce((a, [k]) => a + e.furnNow[k], 0);
+    const al = allocOf(v, ctx, e), split = al ? null : tg?.split ?? furnitureSplit(ctx.retailBoard, 0, v.C);
+    const cur = al ? e.furnRun : e.furnNow, furnTotal = FURN.reduce((a, [k]) => a + cur[k], 0);
     const cap = typeof ctx.retailCap === 'number' ? Math.max(0, Math.floor(ctx.retailCap)) : Infinity;
     const n = Math.min(furnTotal + spare, cap);
     if (n <= furnTotal) return { wait: 'switch: furniture at the retail cap (' + cap + '), spare Frame Timber stays' };
-    // Target: the board split; while Wooden Frames are at the keep line (the WF gate would idle them, plan A2) the good with the best $ per
-    // Workshop-hour that has a floor (the first that fits below). A measured fail: never above the per-good keep the fail path cuts to.
-    const val = valueMode(v, ctx, e) ? furnValue(v, ctx, e) : null;
-    const want = failKeep(ctx, val ? Object.fromEntries(FURN.map(([k]) => [k, Infinity])) : split.alloc(n));
-    const gaps = FURN.map(([k]) => ({ k, gap: Math.min(want[k] - e.furnNow[k], n - furnTotal) })).filter((x) => x.gap > 0).sort((a, b) => (val ? val[b.k] - val[a.k] : 0) || b.gap - a.gap);
-    if (!gaps.length) return null;
-    // Planks cap: a switch may not push plank use past what the Sawmills make (a Bookshelf eats more than Frame Timber).
-    const headroom = e.planksSupply - e.planksDemand, ftUse = e.wsPlanksH(e.R.ft);
+    // Target (plan B3): the allocator's largest gap. Without it: the board split; while Wooden Frames are at the keep line (the WF gate
+    // would idle them, plan A2) the good with the best $ per Workshop-hour that has a floor (the first that fits below). A measured fail:
+    // never above the per-good keep the fail path cuts to.
+    const val = !al && valueMode(v, ctx, e) ? furnValue(v, ctx, e) : null;
+    const want = al ? al.byKey : failKeep(ctx, val ? Object.fromEntries(FURN.map(([k]) => [k, Infinity])) : split.alloc(n));
+    // with the allocator only its net gain of furniture Workshops (a good under the plan while another is over waits for the rebalance)
+    const net = al ? FURN.reduce((a, [k]) => a + want[k] - cur[k], 0) : Infinity;
+    // Spare Frame Timber the plan has no use for (Planks bind: it plans fewer furniture Workshops) goes to the pool once that has held
+    // cfg.planHoldMin, parked: no draw, no Planks, which the plan counted as free; the pool tidy places them once the plan has a gap. Never
+    // while a furniture recipe lacks its floor (the plan cannot see that good yet), nor on a measured retail fail (its fail path keeps the
+    // surplus on Frame Timber).
+    const noFloorAll = FURN.filter(([k]) => floorMissing(e, e.R[k])).map(([k]) => e.R[k].name);
+    const surplus = al && !ctx.retailFail && !noFloorAll.length ? spare - Math.max(0, net) : 0, pk = fts[0], park = Math.min(surplus, pk.count - (fts.length === 1 ? keep : 0));
+    if (al && holdFor(ctx, 'park', park > 0)) {
+      const c0 = pk.count;
+      return { action: track(v, ctx, e.id.ws, { id: 'bo:park:' + pk.id + ':' + c0, text: 'switch: park ' + park + ' spare Frame Timber Workshop(s) of group ' + pk.id + ' in the pool (the plan has no Planks for them: ' + al.detail + ')',
+        steps: [{ msg: { type: 'UnassignBuildings', group: pk.id, amount: park }, until: (x) => (groupById(x, pk.id)?.count ?? 0) <= c0 - park }] }) };
+    }
+    const gaps = FURN.map(([k]) => ({ k, gap: Math.min(want[k] - cur[k], n - furnTotal, net) })).filter((x) => x.gap > 0).sort((a, b) => (val ? val[b.k] - val[a.k] : 0) || b.gap - a.gap);
+    if (!gaps.length) return al && noFloorAll.length && !cfg.applyFurnitureFloor ? { wait: 'switch: manual: apply the v1 floor for ' + noFloorAll.join(', ') + ' (furniture Workshops wait for it)' } : null;
+    // Planks cap: a switch may not push plank use past what the Sawmills make plus the stock budget (a Bookshelf eats more than Frame Timber).
+    const headroom = planksRoom(v, ctx, e), ftUse = al && fts[0].paused ? 0 : e.wsPlanksH(e.R.ft);
+    const why = al ? 'allocator: ' + al.binding : val ? 'best $ per Workshop-hour' : split.source;
     const fits = (k) => { const d = e.wsPlanksH(e.R[k]) - ftUse; return d <= 0 ? Infinity : Math.floor((headroom + 1e-9) / d); };
     // Skip recipes without a saved floor: the switch moves what it can now and asks for the floor of the rest.
     const noFloor = gaps.filter((x) => floorMissing(e, e.R[x.k]));
@@ -6915,7 +7260,7 @@ try {
     if (whole) {
       const lack = kit(whole.count);
       if (lack.length) return { wait: 'switch: kit short for ' + whole.count + ' x ' + r.name + ': ' + lack.join(', ') };
-      return { action: recipeAction(v, whole, r, 'switch spare Frame Timber to furniture (' + (val ? 'best $ per Workshop-hour' : split.source) + ')') };
+      return { action: filled(ctx, whole.id, recipeAction(v, whole, r, 'switch spare Frame Timber to furniture (' + why + ')')) };
     }
     const g = fts[0], home = homeGroup(e, e.id.ws, r);
     let take = Math.min(room, g.count - (fts.length === 1 ? keep : 0));
@@ -6925,9 +7270,9 @@ try {
     // Auto utilities can raise now) carries. A whole group's recipe change or a new group starts only once the engine has the power.
     const perB = v.bld(e.id.ws).draws?.power ?? 0, adds = perB > 0 && home?.work?.length > 0 && !(g.work?.length > 0);
     if (adds) {
-      const pw = powerRoom(v, ctx);
+      const pw = powerFor(v, ctx, take * perB);
       take = Math.min(take, Math.floor(pw / perB + 1e-9));
-      if (take <= 0) return { wait: 'switch: waits for power (' + Math.max(0, Math.floor(pw)) + ' MW free for ' + perB + ' MW a Workshop)' };
+      if (take <= 0) return { wait: 'switch: waits for power (' + Math.max(0, Math.floor(pw)) + ' MW free for ' + perB + ' MW a Workshop; asked Auto utilities)' };
     }
     const lack = kit(take);
     if (lack.length) return { wait: 'switch: kit short for ' + take + ' x ' + r.name + ': ' + lack.join(', ') };
@@ -6937,13 +7282,15 @@ try {
     const place = home
       ? { msg: { type: 'AssignBuildings', group: home.id, amount: take }, until: ((h0) => (x) => (groupById(x, home.id)?.count ?? 0) >= h0 + take)(home.count) }
       : { msg: { type: 'CreateGroup', building: e.id.ws, amount: take, name: r.name, region: REGION }, until: (x) => x.groups.some((y) => !ids.has(y.id) && y.building === e.id.ws && y.count >= take) };
-    return { action: track(v, ctx, e.id.ws, { id: 'bo:split:' + g.id, text: 'switch spare Frame Timber to furniture (' + (val ? 'best $ per Workshop-hour' : split.source) + '): move ' + take + ' Workshop(s) from group ' + g.id + ' to ' + r.name + (home ? ' (group ' + home.id + ')' : ' (new group)'),
-      steps: [{ msg: { type: 'UnassignBuildings', group: g.id, amount: take }, until: (x) => (groupById(x, g.id)?.count ?? 0) <= c0 - take }, place] }) };
+    return { action: filled(ctx, home?.id, track(v, ctx, e.id.ws, { id: 'bo:split:' + g.id, text: 'switch spare Frame Timber to furniture (' + why + '): move ' + take + ' Workshop(s) from group ' + g.id + ' to ' + r.name + (home ? ' (group ' + home.id + ')' : ' (new group)'),
+      steps: [{ msg: { type: 'UnassignBuildings', group: g.id, amount: take }, until: (x) => (groupById(x, g.id)?.count ?? 0) <= c0 - take }, place] })) };
   }
 
   // 3b. Furniture rebalance (wiki 4.7 step 3, plan D3): today's furniture Workshops against the board's split of the same total.
   // Gap per recipe (+ under, - over); none without a board (the 40/30/30 default is no reason to move a Workshop).
   function furnGaps(v, ctx, e) {
+    const al = allocOf(v, ctx, e);
+    if (al) return Object.fromEntries(FURN.map(([k]) => [k, al.byKey[k] - e.furnRun[k]]));
     const split = furnitureSplit(ctx.retailBoard, 0, v.C);
     if (split.source !== 'board') return null;
     const want = split.alloc(FURN.reduce((a, [k]) => a + e.furnNow[k], 0));
@@ -6955,7 +7302,8 @@ try {
   // its kit and the plank headroom for the swap. Never on the retail fail path: its per-good caps rule then.
   function rebalanceStep(v, ctx, e) {
     // not on the fail path (its per-good caps rule), nor while the switch targets the best $ per Workshop-hour (it would undo it)
-    const gaps = ctx.retailFail || valueMode(v, ctx, e) ? null : furnGaps(v, ctx, e);
+    // with the allocator the plan already holds the best $ per Workshop-hour (and its 3% move gain): it does not stand down in value mode
+    const al = allocOf(v, ctx, e), gaps = ctx.retailFail || (!al && valueMode(v, ctx, e)) ? null : furnGaps(v, ctx, e);
     if (!gaps) return null;
     const keys = FURN.map(([k]) => k).filter((k) => gaps[k]);
     if (!keys.some((k) => gaps[k] > 0) || !keys.some((k) => gaps[k] < 0)) return null;
@@ -6965,7 +7313,7 @@ try {
     const under = keys.filter((k) => gaps[k] > 0 && ready(k)).sort((a, b) => gaps[b] - gaps[a]);
     const over = keys.filter((k) => gaps[k] < 0 && ready(k)).sort((a, b) => gaps[a] - gaps[b]);
     if (!under.length || !over.length) return { wait: 'rebalance: ' + line + ' (moves once held ' + cfg.rebalanceHours + ' h)' };
-    const headroom = e.planksSupply - e.planksDemand, why = [];
+    const headroom = planksRoom(v, ctx, e), why = [];
     for (const to of under) {
       const r = e.R[to];
       if (floorMissing(e, r)) { why.push(r.name + ' has no floor'); continue; }
@@ -6973,17 +7321,52 @@ try {
       if (lack.length) { why.push(r.name + ' kit short: ' + lack.join(', ')); continue; }
       for (const from of over) {
         if (e.wsPlanksH(r) - e.wsPlanksH(e.R[from]) > headroom + 1e-9) { why.push('planks cannot feed ' + e.R[from].name + ' -> ' + r.name); continue; }
-        const g = e.groupsOf(e.id.ws, e.R[from]).filter((x) => x.count > 0).sort((a, b) => modCount(a) - modCount(b) || b.count - a.count)[0];
+        const g = e.groupsOf(e.id.ws, e.R[from]).filter((x) => x.count > 0 && !x.paused).sort((a, b) => modCount(a) - modCount(b) || b.count - a.count)[0];
         if (!g) continue;
         const c0 = g.count, home = homeGroup(e, e.id.ws, r), ids = new Set(v.groups.map((x) => x.id));
         const place = home
           ? { msg: { type: 'AssignBuildings', group: home.id, amount: 1 }, until: ((h0) => (x) => (groupById(x, home.id)?.count ?? 0) >= h0 + 1)(home.count) }
           : { msg: { type: 'CreateGroup', building: e.id.ws, amount: 1, name: r.name, region: REGION }, until: (x) => x.groups.some((y) => !ids.has(y.id) && y.building === e.id.ws) };
-        return { action: track(v, ctx, e.id.ws, { id: 'bo:rebal:' + g.id, text: 'rebalance furniture to the board (' + line + '): move 1 Workshop from group ' + g.id + ' (' + e.R[from].name + ') to ' + r.name + (home ? ' (group ' + home.id + ')' : ' (new group)'),
+        return { action: track(v, ctx, e.id.ws, { id: 'bo:rebal:' + g.id, text: 'rebalance furniture to the ' + (al ? 'allocator plan' : 'board') + ' (' + line + '): move 1 Workshop from group ' + g.id + ' (' + e.R[from].name + ') to ' + r.name + (home ? ' (group ' + home.id + ')' : ' (new group)'),
           steps: [{ msg: { type: 'UnassignBuildings', group: g.id, amount: 1 }, until: (x) => (groupById(x, g.id)?.count ?? 0) <= c0 - 1 }, place] }) };
       }
     }
     return { wait: 'rebalance: ' + line + ' waits: ' + why.join('; ') };
+  }
+  // Rebalance hysteresis (plan D3): per recipe, the direction of its gap to the plan and when that was first seen (mem rebal).
+  function noteRebal(v, ctx, e) {
+    const m = ctx.mem?.('buildout'), gaps = m ? furnGaps(v, ctx, e) : null;   // no plan or board: the times are kept as they are
+    if (!gaps) return;
+    const old = m.get().rebal ?? {}, rebal = {};
+    for (const [k, g] of Object.entries(gaps)) if (g) { const dir = g > 0 ? 'under' : 'over'; rebal[k] = old[k]?.dir === dir ? old[k] : { dir, at: ctx.now }; }
+    if (JSON.stringify(rebal) !== JSON.stringify(old)) m.set({ rebal });
+  }
+  // mem filled: furniture groups a switch filled, most recent last (the step back takes from the newest first, plan B2).
+  function filled(ctx, gid, a) {
+    if (gid == null || !ctx.mem) return a;
+    const st = a.steps[a.steps.length - 1], u = st.until;
+    st.until = (x) => { const ok = u(x); if (ok) { const m = ctx.mem('buildout'); m.set({ filled: [...(m.get().filled ?? []).filter((id) => id !== gid), gid].slice(-20) }); } return ok; };
+    return a;
+  }
+  // 3c. Step back (plan B2): furniture Workshops above the plan's total (the Planks stock budget ended, a demand cap) go to the pool one
+  // per step, off a good over its plan (a good under it is the rebalance's, after its hold), from the group a switch filled most recently
+  // first, once the excess has held cfg.planHoldMin; never from a paused group. They stay parked there (no draw, no Planks) until the plan has a gap: in the paused Frame Timber group
+  // the WF gate's half-line resume would wake them all.
+  function stepBackStep(v, ctx, e) {
+    const al = allocOf(v, ctx, e);
+    if (!al || ctx.retailFail) return null;   // a measured retail fail: its fail path cuts the excess to Frame Timber in one action
+    const gap = (k) => al.byKey[k] - e.furnRun[k];
+    const excess = -FURN.reduce((a, [k]) => a + gap(k), 0);
+    if (!holdFor(ctx, 'stepback', excess > 0)) return excess > 0 ? { wait: 'step back: ' + excess + ' furniture Workshop(s) over the plan, moves once that holds ' + cfg.planHoldMin + ' min' } : null;
+    const over = new Set(FURN.filter(([k]) => gap(k) < 0).map(([k]) => e.R[k].id));
+    const src = v.groups.filter((g) => g.building === e.id.ws && g.count > 0 && !g.paused && over.has(g.recipe));
+    const recent = [...(ctx.mem?.('buildout')?.get?.()?.filled ?? [])].reverse();
+    const g = recent.map((id) => src.find((x) => x.id === id)).find(Boolean) ?? [...src].sort((a, b) => modCount(a) - modCount(b) || a.count - b.count)[0];
+    const line = 'step back: ' + excess + ' furniture Workshop(s) over the plan (' + al.detail + ')';
+    if (!g) return { wait: line + ', all in paused groups (left alone)' };
+    const c0 = g.count;
+    return { action: track(v, ctx, e.id.ws, { id: 'bo:stepback:' + g.id + ':' + c0, text: line + ': 1 Workshop from group ' + g.id + ' (' + v.C.recipes[g.recipe].name + ') to the pool, parked until the plan has a gap',
+      steps: [{ msg: { type: 'UnassignBuildings', group: g.id, amount: 1 }, until: (x) => (groupById(x, g.id)?.count ?? 0) <= c0 - 1 }] }) };
   }
 
   // 4. Farm conversion waves. Wave memory lives in ctx.mem('buildout'): base (Farms at the first Stage C look), wave, at (ms).
@@ -6998,7 +7381,7 @@ try {
     const ftHeld = new Set(ctx.mem?.('buildout')?.get?.()?.ftMine ?? []);   // paused by the WF gate on purpose
     for (const bn of ENGINE) {
       const b = v.idB(bn);
-      if (poolTake(v, ctx, e, bn) > 0) return v.bld(b).name + ' in the pool';
+      if (poolTake(v, ctx, e, bn) > 0 && !(bn === 'Workshop' && allocOf(v, ctx, e))) return v.bld(b).name + ' in the pool';   // Workshops the plan parked do not hold a wave
       const g = v.groups.find((x) => x.building === b && x.count > 0 && !ftHeld.has(x.id) && (x.paused || (x.equipped ?? x.count) < x.count));
       if (g) return 'group ' + g.id + ' (' + (g.name ?? v.bld(b).name) + ') ' + (g.paused ? 'paused' : 'equipped ' + g.equipped + '/' + g.count);
     }
@@ -7083,6 +7466,7 @@ try {
       else pick = { bn: 'Workshop', r: e.R.bench, label };
     }
     if (!pick && nx && e.sum(movableFt(ctx, e)) > tg.ft) held.push('Workshop: switch the spare Frame Timber Workshops first');
+    else if (!pick && nx && poolTake(v, ctx, e, 'Workshop') > 0) held.push('Workshop: the ' + poolTake(v, ctx, e, 'Workshop') + ' in the pool go first');
     else if (!pick && nx) {
       const extra = e.wsPlanksH(nx.r);
       const covered = e.planksSupply >= e.planksDemand + extra;
@@ -7132,6 +7516,8 @@ try {
     if (ctx._boNoCash) return { pick, b, acres, cost, landCents, price, why };   // the wave gate checks cash itself, for several buildings
     if (v.money - cost < bill) return { saving: pick.label, wait: why + ': bill floor: cash ' + usd(v.money) + ' - ' + usd(cost) + ' < ' + usd(bill) + ' (' + mw + ' new MW x $20 + 2 h of bills)' };
     if (v.money - cost < floor + bill) return { saving: pick.label, wait: why + ': money floor: needs ' + usd(floor + bill + cost - v.money) + ' more above the floor ' + usd(floor) };
+    // a Workshop into a running group draws at once: only with the power free (asked of Auto utilities first), as the switch
+    if (pick.bn === 'Workshop' && homeGroup(e, b, pick.r)?.work?.length && mw > 0 && powerFor(v, ctx, mw) < mw) return { wait: why + ': waits for ' + mw + ' MW free power (asked Auto utilities)' };
     return { pick, b, acres, cost, landCents, price, why };
   }
   function buyAction(v, e, s) {
@@ -7146,7 +7532,7 @@ try {
   const conversionStage = (v) => v.unlocked('Assembly Plant');   // Stage C or D
   const dir = {
     name: 'buildout', order: 40, defaults: DEFAULTS,
-    furnitureSplit, nextBuildStep, targets: (v, ctx, rule) => targets(v, ctx, rule, engine(v, ctx)), benchHeld: (v, ctx, rule) => { const e = engine(v, ctx); return benchHeld(v, e, targets(v, ctx, rule, e)); }, rebalanceStep: (v, ctx) => rebalanceStep(v, ctx, engine(v, ctx)), waveState: (v, ctx) => waveState(v, ctx, engine(v, ctx)), allocate,
+    furnitureSplit, nextBuildStep, alloc: (v, ctx) => allocOf(v, ctx), stepBackStep: (v, ctx) => stepBackStep(v, ctx, engine(v, ctx)), targets: (v, ctx, rule) => targets(v, ctx, rule, engine(v, ctx)), benchHeld: (v, ctx, rule) => { const e = engine(v, ctx); return benchHeld(v, e, targets(v, ctx, rule, e)); }, rebalanceStep: (v, ctx) => rebalanceStep(v, ctx, engine(v, ctx)), waveState: (v, ctx) => waveState(v, ctx, engine(v, ctx)), allocate,
     waveStep: (v, ctx, rule, stage) => waveStep(v, ctx, engine(v, ctx), null, rule, stage), wfKeep: (v, ctx) => wfKeep(v, ctx ?? {}),
     waveGate: (v, ctx, rule, stage, n) => waveGate(v, ctx, engine(v, ctx), rule, stage, n),
     buyAction: (v, ctx, s) => buyAction(v, engine(v, ctx), s),
@@ -7167,6 +7553,9 @@ try {
       // Storage check: write and read back through a fresh handle. Waves (which demolish Farms) need memory that survives; fail closed.
       m.set({ chk: ctx.now });
       ctx.boMemOk = ctx.mem('buildout').get().chk === ctx.now;
+      // Groups it made that are gone drop out of groupsMine.
+      const gm = m.get().groupsMine ?? [], gm2 = gm.filter((id) => v.groups.some((g) => g.id === id));
+      if (gm2.length !== gm.length) m.set({ groupsMine: gm2 });
       // Units placed by hand leave the pool: what tidy may take back is never more than the pool holds.
       const pm = m.get().poolMine ?? {}, pm2 = Object.fromEntries(Object.entries(pm).map(([b, n]) => [b, Math.min(n, v.pool[b] ?? 0)]));
       if (Object.entries(pm).some(([b, n]) => pm2[b] !== n)) m.set({ poolMine: pm2 });
@@ -7180,12 +7569,9 @@ try {
       const ftR = v.idR('Assemble Wooden Frame'), ftMine = m.get().ftMine ?? [], ftKeep = [], ftUser = [];
       for (const id of ftMine) { const g = v.groups.find((x) => x.id === id); if (g && g.count > 0 && g.paused) ftKeep.push(id); else if (g && g.recipe === ftR) ftUser.push(id); }
       if (ftKeep.length !== ftMine.length) m.set({ ftMine: ftKeep, ...(ftUser.length ? { ftUser: [...new Set([...(m.get().ftUser ?? []), ...ftUser])] } : {}) });
+      // (the rebalance hysteresis is noted in decide: the allocator needs the retail facts, which come after this context)
       const e = engine(v, ctx);
       if (e.missing) return;
-      // Rebalance hysteresis (plan D3): per recipe, the direction of its gap to the board's split and when that was first seen.
-      const gaps = furnGaps(v, ctx, e), old = m.get().rebal ?? {}, rebal = {};   // no board read: the times are kept as they are
-      if (gaps) for (const [k, g] of Object.entries(gaps)) if (g) { const dir = g > 0 ? 'under' : 'over'; rebal[k] = old[k]?.dir === dir ? old[k] : { dir, at: ctx.now }; }
-      if (gaps && JSON.stringify(rebal) !== JSON.stringify(old)) m.set({ rebal });
       // Wave bookkeeping from state (right under chaos, dry run and reloads): base at the first Stage C look, a wave counts once the
       // cotton Farms are at or below its target, and its time is when that is first seen.
       if (!conversionStage(v)) return;
@@ -7203,9 +7589,12 @@ try {
       if (e.missing) return { wait: 'off: catalog lacks ' + e.missing.join(', ') };
       const rule = out.rule;
       const tg = rule ? targets(v, ctx, rule, e) : null;
+      noteRebal(v, ctx, e);
+      const al = allocOf(v, ctx, e);
       const readout = {
         camps: e.camps + '/' + (tg?.camps ?? '?'), sawmills: e.saws + '/' + (tg?.sawmills ?? '?'), workshops: e.workshops + '/' + (tg?.workshops ?? '?'),
-        furniture: tg ? FURN.map(([k, n]) => n + ' ' + e.furnNow[k] + '/' + tg.furn[k]).join(', ') + ', Frame Timber ' + e.ftNow + '/' + tg.ft + ' (' + tg.split.source + ')' : null,
+        furniture: tg ? FURN.map(([k, n]) => n + ' ' + e.furnNow[k] + '/' + tg.furn[k]).join(', ') + ', Frame Timber ' + e.ftNow + '/' + tg.ft + ' (' + tg.source + ')' : null,
+        plan: al ? usd(al.dollarsPerHour * 100) + '/h planned (' + al.detail + ')' + (al.burn ? ', burning Planks stock above ' + Math.round(al.reserve) + ' at +' + Math.round(al.extra) + '/h' : '') : null,
         planks: Math.round(e.planksSupply) + '/h made, ' + Math.round(e.planksDemand) + '/h used',
       };
       const never = ctx.ap?.neverSell;
@@ -7224,6 +7613,10 @@ try {
       const fl = floorStep(v, ctx, e, tg);
       if (fl?.action) return done(fl.action);
       if (fl?.wait) waits.push(fl.wait);
+      // furniture over the plan steps back first: it eats Planks now (spare Frame Timber the switch parks may be paused already)
+      const sb = stepBackStep(v, ctx, e);
+      if (sb?.action) return done(sb.action);
+      if (sb?.wait) waits.push(sb.wait);
       const sw = switchStep(v, ctx, e, tg);
       noteBlocked(v, ctx, e, sw);
       if (sw?.action) return done(sw.action);
@@ -7262,7 +7655,9 @@ try {
 //   - Builds 1 store (BuyBuilding, then CreateGroup amount 1 "Retail"; an empty Retail group is reused), then SetAssortment with up
 //     to 4 of the board's goods the Corporation can make (made, assigned or held, best appetite x price first; Bookshelf, Table, Chair,
 //     Bench when the board names none), only when the shelf set differs.
-//     A shelved good leaves only after cfg.retailShelfDropMin minutes absent, so pauses do not churn the shelf.
+//     A shelved good leaves only after cfg.retailShelfDropMin minutes absent, so pauses do not churn the shelf. With the build-out
+//     director's retail allocator (plan B1) the shelves are its planned goods plus the goods still made or kept, planned first, by unit
+//     price (board price x base x the stock's quality factor); then more stores up to its storesNeeded (BuyBuilding + AssignBuildings, plan B5).
 //   - Money gate: floor + store price + bill floor (new MW x $20 + 2 h of bills, plan 8.1); Iron Frames keep cfg.ifReserve back.
 //   - Checkpoint sampler (context): every cfg.retailSampleMin minutes after the shelves are set it records the shelf rows, the rating
 //     and the stock, then judges the four rows of wiki 4.7 (appetite fails only on a fall) plus unsold stock. Sets ctx.retailOk (true / false
@@ -7285,8 +7680,9 @@ try {
   const RECIPE = { Bookshelf: 'Make Bookshelf', Table: 'Make Table', Chair: 'Make Chair', Bench: 'Make Bench' };
   const STORE = 'Retail Store', GROUP_NAME = 'Retail', WORKSHOP = 'Workshop', FT = 'Assemble Wooden Frame', FT_GROUP = 'Frame Timber';
   const RATES = { power: 1000, water: 400, bandwidth: 1500 };   // cents per unit per 10-min bill (same as autoUtil billsOf)
-  // shortcut: the corp state carries no stock quality, so the price uses quality 0; read it once the protocol shows one.
   const Q0 = 0.95;                     // quality factor at quality 0 (wiki retail.md, Price; engine BhehihUq)
+  // Quality factor of the Heartland stock: 0.95 + 0.19 q / (q + 10), q = quality_points / units / 100 (wiki formulas.md); Q0 with none.
+  const qf = (st, id) => { const u = st.stock?.[REGION]?.[id] ?? 0, q = u > 0 ? (st.quality_points?.[REGION]?.[id] ?? 0) / u / 100 : 0; return Q0 + 0.19 * q / (q + 10); };
   const cfg = () => W.corePlan.cfg;
   const usd = (c) => '$' + (c / 100).toLocaleString('en-US', { maximumFractionDigits: 0 });
   const pct = (x) => (x * 100).toFixed(0) + '%';
@@ -7396,7 +7792,7 @@ try {
     const plId = v.idI('Planks');
     f.goods = Object.keys(ids).map((n) => {
       const id = ids[n], rid = v.idR(recipeOf[n]), row = rows[id], base = v.C.items[id]?.base_value ?? 0, o = output(v, rid), rc = v.C.recipes[rid];
-      return { name: n, id, rid, appetite: row.appetite, held: row.held, boardPrice: row.price, base, unit: base * row.price / 10000 * Q0,
+      return { name: n, id, rid, appetite: row.appetite, held: row.held, boardPrice: row.price, base, unit: Math.floor(base * row.price / 10000 * qf(v.st, id)),
         stock: v.has(n), outTick: o.perTick, blockH: perBlockH(o), made: o.perTick > 0,
         // a paused or retuning group still counts: it comes back, and the shelf should not churn meanwhile
         assigned: v.groups.some((g) => g.recipe === rid && g.count > 0),
@@ -7440,6 +7836,7 @@ try {
       return now - absent[g.id] < c.retailShelfDropMin * 60000;
     });
     if (changed) m.set({ absentSince: absent });
+    f.keep = keep;
     f.chosen = pickOrder(keep);
     needOf(f, c);
   }
@@ -7696,6 +8093,10 @@ try {
         : p ? (p.measured ? 're-checkpoint at the capped output: sampling (the earlier FAIL and its cap hold meanwhile)' : 're-checkpoint: sampling (the earlier FAIL had no unsold stock, so no cap; retailOk stays false meanwhile)') : f.storeGroup ? 'sampling' : 'store not built',
       prevDecision: p ? 'FAIL ' + p.kind + (p.measured ? ': cap ' + p.cap + ' furniture blocks' : ': no unsold stock, no cap') + ' (' + p.why + ')' : null,
       e1: !!s.mem?.e1,
+      // the retail allocator (plan B1, D3): $/h if the needed stores exist, what binds it, and the Workshops per good
+      plan: f.alloc ? usd(f.alloc.dollarsPerHour * 100) + '/h planned, with ' + (f.alloc.storesNeeded?.[REGION] ?? 1) + ' store(s)' : null,
+      binding: f.alloc ? f.alloc.binding + ': ' + f.alloc.detail : null,
+      alloc: f.alloc ? f.goods.filter((g) => f.alloc.alloc[g.id] > 0).map((g) => g.name + ' ' + f.alloc.alloc[g.id] + ' Workshop(s)').join(', ') || 'none' : null,
     };
   }
   const workshopGroups = (v, wsB) => v.groups.filter((g) => g.building === wsB);
@@ -7739,8 +8140,37 @@ try {
     }
     return null;
   }
+  // Shelves from the retail allocator (plan B1): its goods (planned Workshops, or stock) and the goods still made or kept on the shelf, up to 4,
+  // planned goods first, then by unit price. Order only matters when store capacity binds; the shelf set is what is sent.
+  function allocPick(f, al) {
+    const planned = (g) => (al.alloc[g.id] ?? 0) > 0 || al.shelves.includes(g.id);
+    const byUnit = (a, b) => b.unit - a.unit;
+    return [...new Set([...f.goods.filter(planned), ...(f.keep ?? f.goods.filter(f.eligible))])].sort((a, b) => planned(b) - planned(a) || byUnit(a, b)).slice(0, 4).sort(byUnit);
+  }
+  // One more store (wiki 4.7, plan B5): its build items (Iron Frames for the prototypes kept back until Stage D; this build's own are not),
+  // its acres, and cash for the money floor + its price + the bill floor (plan 8.1). { wait } or { cost }.
+  function storeGate(v, ctx, f, out) {
+    const bd = v.bld(f.storeB);
+    const cost = P ? P.price(bd.cost, v.ownedAll(STORE), 0) : bd.cost;
+    const ifId = v.idI('Iron Frame'), late = out?.stage === 'D' || out?.stage === 'END';
+    const keepOf = (i) => (i === ifId && !late ? Math.min(cfg().ifReserve ?? 0, W.corePlan._ifNeed(v, STORE)) : 0);
+    // ...and what other modules keep back (finite reserves: Iron Frame, Concrete, Glass for their own builds)
+    const res = (i) => { const r = ctx.reserveItems?.[i]; return Number.isFinite(r) ? r : 0; };
+    const lack = (bd.build_items ?? []).filter((i) => (v.st.stock?.[REGION]?.[i.item] ?? 0) - i.amount < keepOf(i.item) + res(i.item));
+    if (lack.length) return { wait: 'store needs ' + lack.map((i) => i.amount + ' ' + (v.C.items[i.item]?.name ?? i.item) + (keepOf(i.item) ? ' (+' + keepOf(i.item) + ' kept for prototypes)' : '') + (res(i.item) ? ' (+' + res(i.item) + ' other modules keep)' : '')).join(', ') };
+    if (v.freeAcres < bd.acres) return { wait: 'store needs ' + bd.acres + ' free acres (' + v.freeAcres + ' free)' };
+    // bill floor (plan 8.1): the store's always-on draw goes on every bill from now on
+    const mw = bd.draws?.power ?? 0, billFloor = mw * 2000 * (W.idleCore?.powerPriceMult?.() ?? 1) + 12 * billsOf(v.st);
+    const need = (ctx.floorCents ?? 0) + cost + billFloor;
+    if (v.money < need) return { wait: 'store ' + usd(cost) + ' + bill floor ' + usd(billFloor) + ' (' + mw + ' MW x $20 + 2 h of bills): need ' + usd(need - v.money) + ' more above the floor' };
+    return { cost };
+  }
   function decide(v, ctx, out) {
     const f = ctx.retail;
+    if (f?.goods && !f.badBoard && f.share != null) {
+      try { f.alloc = W.corePlan._buildout?.alloc?.(v, ctx) ?? null; } catch (e) { console.error('[corePlan] retail alloc', e); f.alloc = null; }
+      if (f.alloc) { f.chosen = allocPick(f, f.alloc); needOf(f, cfg()); }
+    }
     const readout = readoutOf(f);
     if (!f || f.err) return { wait: f?.err ?? 'no facts (context did not run)', readout };
     if (f.badBoard) return { wait: 'RETAIL BOARD SHAPE CHANGED: ' + f.badBoard + '; not building or shelving until it is checked', readout };
@@ -7757,22 +8187,12 @@ try {
         steps: [{ msg: { type: 'AssignBuildings', group: eg.id, amount: 1 }, until: (x) => (x.groups.find((g) => g.id === eg.id)?.count ?? 0) >= 1 }] }, readout };
     }
     if (!f.storeGroup) {
-      const bd = v.bld(storeB);
       const steps = [];
       if (!p0) {
         const short = f.need.filter((x) => x.g.stock < x.need);
         if (short.length) return { wait: 'pre-store gate: ' + short.map((x) => x.g.name + ' ' + Math.floor(x.g.stock) + ' / ' + x.need).join(', ') + ' (' + cfg().stockHoursPerShelf + ' h of sales at min(demand, output))', readout };
-        const cost = P ? P.price(bd.cost, v.ownedAll(STORE), 0) : bd.cost;
-        // Iron Frames: until Stage D the prototypes and first builds still to pay are kept back (corePlan ifNeed, capped by cfg.ifReserve); this build's own frames are not
-        const ifId = v.idI('Iron Frame'), late = out?.stage === 'D' || out?.stage === 'END';
-        const keepOf = (i) => (i === ifId && !late ? Math.min(cfg().ifReserve ?? 0, W.corePlan._ifNeed(v, STORE)) : 0);
-        const lack = (bd.build_items ?? []).filter((i) => (v.st.stock?.[REGION]?.[i.item] ?? 0) - i.amount < keepOf(i.item));
-        if (lack.length) return { wait: 'store needs ' + lack.map((i) => i.amount + ' ' + (v.C.items[i.item]?.name ?? i.item) + (keepOf(i.item) ? ' (+' + keepOf(i.item) + ' kept for prototypes)' : '')).join(', '), readout };
-        if (v.freeAcres < bd.acres) return { wait: 'store needs ' + bd.acres + ' free acres (' + v.freeAcres + ' free)', readout };
-        // bill floor (plan 8.1): the store's always-on draw goes on every bill from now on
-        const mw = bd.draws?.power ?? 0, billFloor = mw * 2000 * (W.idleCore?.powerPriceMult?.() ?? 1) + 12 * billsOf(v.st);
-        const need = (ctx.floorCents ?? 0) + cost + billFloor;
-        if (v.money < need) return { wait: 'store ' + usd(cost) + ' + bill floor ' + usd(billFloor) + ' (' + mw + ' MW x $20 + 2 h of bills): need ' + usd(need - v.money) + ' more above the floor', readout };
+        const sg = storeGate(v, ctx, f, out);
+        if (sg.wait) return { wait: sg.wait, readout };
         steps.push({ msg: { type: 'BuyBuilding', building: storeB, amount: 1, region: REGION }, until: (x) => (x.pool[storeB] ?? 0) >= 1 || x.groups.some((g) => g.building === storeB && g.count > 0) });
       }
       steps.push({ msg: { type: 'CreateGroup', building: storeB, amount: 1, name: GROUP_NAME, region: REGION }, until: (x) => x.groups.some((g) => g.building === storeB && g.count > 0) });
@@ -7787,6 +8207,22 @@ try {
     if (d) {
       const fa = failAction(v, f, d);
       if (fa) return { ...fa, readout };
+    }
+    // B5: stores up to what the allocator's shelves sell (50 units a tick each), Heartland only; a pooled store joins the group first (one
+    // the user pooled stays while the plan needs no more). A store draws its baseload the moment it joins, and stores are served last: the
+    // power must be free first (asked of Auto utilities), or one more store would darken all of them.
+    const nStores = f.alloc?.storesNeeded?.[REGION] ?? 0, c0 = g.count;
+    const into = { msg: { type: 'AssignBuildings', group: g.id, amount: 1 }, until: (x) => (x.groups.find((y) => y.id === g.id)?.count ?? 0) >= c0 + 1 };
+    if (nStores > c0) {
+      const line = 'store ' + (c0 + 1) + ' of ' + nStores + ' (the planned shelves sell more than ' + c0 + ' store(s) carry)';
+      const au = ctx.mods?.autoUtil, mw = v.bld(storeB).draws?.power ?? 0;
+      const free = au?._measure ? Math.max(0, au._measure('power', REGION, v.st, v.catalog, ctx.tick ?? 0, ctx.contracts ?? []).free ?? 0) : Infinity;
+      if (free + 1e-9 < mw) { if (ctx.live) au.ask?.('power', REGION, mw, ctx.tick ?? 0); return { wait: line + ': waits for ' + mw + ' MW free power (asked Auto utilities)', readout }; }
+      if (p0 > 0) return { action: { id: 'retail:store:pool:' + g.id + ':' + c0, text: 'put the pooled Retail Store into group ' + g.id + ': ' + line, hold: true, steps: [into] }, readout };
+      const sg = storeGate(v, ctx, f, out);
+      if (sg.wait) return { wait: line + ': ' + sg.wait, readout };
+      return { action: { id: 'retail:store:more:' + c0, text: 'build ' + line, hold: true,
+        steps: [{ msg: { type: 'BuyBuilding', building: storeB, amount: 1, region: REGION }, until: (x) => (x.pool[storeB] ?? 0) >= 1 || (x.groups.find((y) => y.id === g.id)?.count ?? 0) > c0 }, into] }, readout };
     }
     return { wait: readout.decision, readout };
   }
@@ -8548,10 +8984,12 @@ try {
       const f = activeFills(v, ctx).sort((a, z) => z.left - a.left)[0];
       c.push(chk('autoship', !!f && f.left >= cfg.slotRearmMinutes * 120, !f ? 'no auto-ship running' : itemName(v, f.bid.item) + ' auto-ship, ' + Math.floor(f.left / 120) + ' min left'));
     }
-    // Power bought on contracts (ctx.contracts, the board) covers part of the load: the subscription only has to cover the rest.
-    const au = ctx.mods?.autoUtil, sub = v.st.subscriptions?.[REGION]?.power ?? 0, load = au?._measure ? au._measure('power', REGION, v.st, v.catalog, 0, []).load : powerLoad(v);
-    const bought = boughtPower(v, ctx);
-    if (load > 0) c.push(chk('power', !!au?.conf?.power?.on && sub + bought >= load, (au?.conf?.power?.on ? 'Auto power on' : 'Auto power off') + ', ' + sub + ' MW subscribed' + (bought > 0 ? ' + ' + bought + ' MW bought' : '') + ' for ' + load + ' MW load'));
+    // MW needed from the shared power model (core.powerMeasure, plan A4): load incl. store baseload and stalled groups, less generation and
+    // power bought on contracts (ctx.contracts). A bought contract within 30 min of its end counts as gone, so the check fails before it ends.
+    const au = ctx.mods?.autoUtil, sub = v.st.subscriptions?.[REGION]?.power ?? 0;
+    const pm = core.powerMeasure('power', REGION, v.st, v.catalog, ctx.tick ?? 0, ctx.contracts ?? [], [], null, au?.conf?.contractLeadMin ?? 30);
+    const need = Math.max(0, Math.ceil(pm.need - 1e-9));
+    if (pm.load > 0) c.push(chk('power', !!au?.conf?.power?.on && sub >= need, (au?.conf?.power?.on ? 'Auto power on' : 'Auto power off') + ', ' + sub + ' MW subscribed' + (pm.imported > 0 ? ' + ' + pm.imported + ' MW bought' : '') + ' for ' + pm.load + ' MW load' + (pm.waiting > 0 ? ' + ' + pm.waiting + ' MW waiting' : '') + ': ' + need + ' MW needed' + (pm.ending > 0 ? ' (' + pm.ending + ' MW of contracts end within 30 min)' : '')));
     const floor = sub * 12000 * (core?.powerPriceMult?.() ?? 1);   // a world event's NPC power price multiplier
     c.push(chk('cash', v.money >= floor, 'money ' + usd(v.money) + (v.money >= floor ? ' >= ' : ' < ') + 'bill floor ' + usd(floor) + ' (2 h of bills)'));
     if (out.stage === 'D' || out.stage === 'END') {
@@ -9426,7 +9864,8 @@ try {
     acresUsed += q.acres;
     const landBought = st.land_bought?.[REGION] ?? 0;
     const drawOf = (b) => bld(b).draws?.power ?? 0;
-    const powerNeed = groups.filter((g) => !g.paused).reduce((a, g) => a + drawOf(g.building) * g.count, 0);
+    // MW needed before what is bought on contracts (read() subtracts powerBought): the shared power model (core.powerMeasure, plan A4).
+    const powerNeed = Math.max(0, Math.ceil(core.powerMeasure('power', REGION, st, catalog, tickNow ?? 0, []).need - 1e-9));
     const powerHave = st.subscriptions?.[REGION]?.power ?? 0;
     const powerBought = 0;   // power bought on contracts: read() sets it from the contract board (not in a pure snapshot)
     const inbound = {};

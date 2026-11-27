@@ -8,7 +8,7 @@
 //   autoUtil.status() / autoUtil.stop()                          // what it does now / both switches off
 //   autoUtil.cfg                                                 // timings; autoUtil.conf: spare per utility, hold minutes
 //
-// What it follows (the game's own page shows the same numbers, except that bought contracts count their capacity less any shortfall; autoUtil._measure is the pure version, used by the tests):
+// What it follows (the game's own page shows the same numbers, except that bought contracts count their capacity less any shortfall; autoUtil._measure is the pure version, core.powerMeasure the one model Core plan and Autopilot share too):
 //   need = load (running groups' building draw + recipe draw, plus every unpaused baseload building such as a Retail Store) + power sold
 //          on contracts (the promised amount) + lines out + what stalled groups wait for - self-generated (generators, at the day/night
 //          rate) - storage that can discharge (at most stored / ticks to the bill it pays for) - bought on contracts (one ending within
@@ -58,10 +58,8 @@ try {
     };
     const NAMES = Object.keys(UTILS);
     const RATES = { power: 1000, water: 400, bandwidth: 1500 };   // cents per unit per bill: what the game bills together (ISP: st.isp, 15 per Mbps)
-    const DAY = 28800, DAYLIGHT = 21600, NIGHT_PCT = 25;       // ticks; diurnal generators make 25% of their output at night
     const BILL_TICKS = 1200;                                   // a bill every 10 minutes at 2 ticks a second
     const PRE_EVENT_TICKS = 14400;                             // keep the batteries this long before a dear power event (a full Battery Bank charges in 10,800)
-    const INTANGIBLE = new Set([0, 24, 25, 26, 106, 107, 108, 109, 110, 111]);   // items held in st.items, not in stock
     const MAX_FAILS = 3;
     const cfg = { cycleMs: 2000, confirmMs: 10000, backoffMs: 5000, lowerWindowTicks: 120, raiseHoldTicks: 60 };   // timings; the tests shorten them. raiseHoldTicks: a raise only stalled groups need waits for the bill this close to it
     // contractLeadMin: a bought contract this close to its end counts as gone
@@ -102,80 +100,20 @@ try {
       return { st, catalog, contracts, flows, ws, wsOpen: ws?.readyState === 1, tick, mutTick: st.ssi?.last_user_mutation_tick ?? 0, priceMult: core.powerPriceMult?.() ?? 1, pev: core.powerEvent?.(engine, tick) ?? null };
     }
 
-    const ixRef = new WeakMap();
-    function idx(catalog) {
-      let x = ixRef.get(catalog);
-      if (!x) { x = { b: new Map((catalog.buildings ?? []).map((b) => [b.id, b])), r: new Map((catalog.recipes ?? []).map((r) => [r.id, r])) }; ixRef.set(catalog, x); }
-      return x;
-    }
-    const diurnal = (p, tick) => (((tick % DAY) + DAY) % DAY < DAYLIGHT ? p : Math.floor(p * NIGHT_PCT / 100));
-
     // ---- what is needed (pure: no I/O) -----------------------------------------------------------------------------------
-    // The page's numbers for one utility in one region. Returns what the groups draw, what is generated, stored or bought, what
-    // stalled groups wait for, and need: the subscription that covers all of it (can be negative: the Corporation has a surplus).
-    // flows: the engine's line flows [{ from, to, sent, delivered }] (power only): Lines in add supply, Lines out count as load, as on the page.
-    // ev: the power event plan from eventPlan ({ mode: 'pre' | 'dear' | 'cheap', end }), or null; it counts only where storage is.
+    // The page's numbers for one utility in one region: core.powerMeasure (the one "MW needed" model, plan A4) with conf.contractLeadMin.
+    // flows: the engine's line flows (power only); ev: the power event plan from eventPlan, or null.
+    // asked: MW another module wants free before it adds draw (ask), counted in the need until its tick.
     function measure(util, region, st, catalog, tick, contracts, flows = [], ev = null) {
-      const R = String(region), ix = idx(catalog);
-      const have = st.subscriptions?.[R]?.[util] ?? 0;
-      const groups = Object.values(st.groups ?? {}).filter((g) => (g.region ?? 0) === region);
-      const stockOf = (item) => (INTANGIBLE.has(item) ? (st.items?.[item] ?? 0) : (st.stock?.[R]?.[item] ?? 0));
-      let load = 0, gen = 0, base = 0;
-      for (const g of groups) {
-        const work = g.work ?? [], bd = ix.b.get(g.building), draw = (bd?.draws?.[util] ?? 0) * g.count;
-        // A baseload building (Retail Store: no work rows, no machines) draws whenever its group is unpaused; short of it, no store in
-        // the region sells (plan A3).
-        if (bd?.baseload && !g.paused) { load += draw; base += draw; }
-        else if (work.length) load += draw;
-        for (const w of work) {
-          const rc = ix.r.get(w.recipe);
-          if (!rc) continue;
-          load += (rc.draws?.[util] ?? 0) * w.runs;
-          const p = (rc.generates?.[util] ?? 0) * w.runs;
-          gen += rc.diurnal ? diurnal(p, tick) : p;
-        }
-      }
-      const owned = (id) => (st.building_pool?.[R]?.[id] ?? 0) + groups.filter((g) => g.building === id).reduce((a, g) => a + g.count, 0);
-      let dischargeCap = 0, chargeCap = 0, storeMax = 0;
-      for (const b of catalog.buildings ?? []) {
-        const s = b.storage?.[util], n = s ? owned(b.id) : 0;
-        if (n) { dischargeCap += (s.discharge_limit ?? 0) * n; chargeCap += (s.charge_limit ?? 0) * n; storeMax += (s.max ?? 0) * n; }
-      }
-      // Stored is in MW-ticks (7,200 = 1 MWh): count only the rate it can keep up until the next bill, so a Battery Bank that would run
-      // dry mid-period does not cut the subscription. Right after a bill that is stored / 1,200, and the hold window keeps that sample.
-      const stored = st.stored?.[R]?.[util] ?? 0, toBill = tick > 0 ? BILL_TICKS - (tick % BILL_TICKS) : 0;
-      // Power events: before a dear one and during a cheap one nothing stored is counted on (a cheap one also adds the charge rate until
-      // full); during a dear one what is stored is spread to the event's end.
-      const mode = util === 'power' && dischargeCap + chargeCap > 0 ? ev?.mode ?? null : null;
-      const toUse = mode === 'dear' && ev.end > tick ? ev.end - tick : toBill;
-      const discharge = mode === 'pre' || mode === 'cheap' ? 0 : Math.min(dischargeCap, stored, toUse ? stored / toUse : stored);
-      const charge = mode === 'cheap' ? Math.min(chargeCap, Math.max(0, storeMax - stored)) : 0;
-      const lines = util === 'power' && Array.isArray(flows) ? flows : [];
-      const lineIn = lines.filter((f) => f.to === region).reduce((a, f) => a + (Number(f.delivered) || 0), 0);
-      const lineOut = lines.filter((f) => f.from === region && f.delivered > 0).reduce((a, f) => a + (Number(f.sent) || 0), 0);
-      const corp = st.ssi?.corp_id;
-      // What is bought counts its capacity less any shortfall (core.bought); what is promised to others is owed, whatever has got through.
-      // A contract ending within conf.contractLeadMin counts as gone, so the grid is up before it ends; `ending` is that share
-      // (not urgent: it may wait for the bill).
-      const importedNow = core.bought(util, region, st, contracts);
-      const imported = tick > 0 ? core.bought(util, region, st, contracts, tick + conf.contractLeadMin * 120) : importedNow;
-      const sold = (contracts ?? []).filter((c) => c.utility === util && c.region === region && c.state === 'Active' && c.seller === corp).reduce((a, c) => a + (c.amount ?? 0), 0);
-      // A group that could start but whose draw is more than the free capacity is stalled; the engine starts it once free >= its draw.
-      // A group with no machines yet (equipped 0) cannot start whatever the power: the game calls it "unequipped", not stalled.
-      // Baseload groups are in the load already: the store gets power last, so it sells only while what is left covers it.
-      const free = Math.max(0, have + gen + discharge + imported + lineIn - load - sold - lineOut);
-      let waiting = 0;
-      for (const g of groups) {
-        if (g.paused || g.equipped === 0 || (g.work ?? []).length || ix.b.get(g.building)?.baseload) continue;
-        const draw = (ix.b.get(g.building)?.draws?.[util] ?? 0) * g.count;
-        if (!(draw > 0) || draw <= free) continue;
-        const rc = (g.recipe != null && (st.recipes?.[String(g.recipe)] ?? ix.r.get(g.recipe))) || null;
-        if (!rc || !(rc.inputs ?? []).every((i) => stockOf(i.item) >= i.amount)) continue;
-        waiting += draw;
-      }
-      const need = load + sold + lineOut + waiting + charge - gen - discharge - imported - lineIn;
-      return { util, region, have, load, base, free, sold, gen, discharge, charge, mode, imported, ending: importedNow - imported, lineIn, lineOut, waiting, need };
+      const m = core.powerMeasure(util, region, st, catalog, tick, contracts, flows, ev, conf.contractLeadMin), a = asks.get(util + ':' + region);
+      m.asked = a && tick < a.until ? a.mw : 0;
+      m.need += m.asked;
+      return m;
     }
+    // Core plan asks before a move into a running group (the engine draws by building count at once there, and serves the store last, plan
+    // R-5): Auto raises for it first, and the move waits until the power is free. Held for `ticks` (default 5 min), the latest ask wins.
+    const asks = new Map();
+    function ask(util, region, mw, tick, ticks = 600) { if (mw > 0) asks.set(util + ':' + region, { mw, until: tick + ticks }); else asks.delete(util + ':' + region); }
 
     // The plan for a power event (pev: core.powerEvent()) at tick: { mode, end, mult } or null. 'pre': the PRE_EVENT_TICKS before a dear
     // one, up to a minute (cfg.lowerWindowTicks) before it starts; 'dear' from then to its end; 'cheap' while a x0.5 one is in force, up to a
@@ -438,7 +376,7 @@ try {
       get running() { return anyOn(); },
       exportCfg: () => ({ cfg: persistable() }),
       importCfg(o) { const r = apply(o?.cfg ?? o); save(); ensureLoop(); renderAll(); return r; },
-      raiseRoom, _measure: measure, _want: wantOf, _decide: decide, _eventPlan: eventPlan, _eventLine: eventLine, _step: step, _info: info,
+      raiseRoom, ask, _measure: measure, _want: wantOf, _decide: decide, _eventPlan: eventPlan, _eventLine: eventLine, _step: step, _info: info,
       _unload() { unloaded = true; loopTimer?.(); loopTimer = null; if (mounted) unmountUi(); },
     };
 
