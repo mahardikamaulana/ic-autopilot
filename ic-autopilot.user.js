@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IC Autopilot
 // @namespace    idlecorp-toolkit
-// @version      2.8.23
+// @version      2.8.24
 // @author       XPARAD0X
 // @description  Early-game Autopilot, CD Farm (Construction Data by building and demolishing buildings; Auto picks the cheapest source itself), Lab runner (keeps the Manufacturing Labs researching), Auto ship (an "Auto ship" button on every distributor bid), Auto utilities (an "Auto" switch that keeps the power and water subscriptions at what the groups need), Core plan, Keep online (keeps the socket alive while the tab is hidden) and Module watch (alerts when a listed module matches a saved filter; never buys) for IdleCorp, each with a panel, menu or switch in the game UI. Everything runs live by default.
 // @homepageURL  https://github.com/mahardikamaulana/ic-autopilot
@@ -132,7 +132,7 @@ try {
         seeTick(m.tick ?? m.diff?.tick);
         if (m.kind === 'Diff') sock.diffs++;
         if (m.kind === 'Snapshot') sock.resyncing = false;
-        if (m.kind === 'WorldEvents') sock.worldEvents = { raw: e.data, at: Date.now() };   // plan D5: kept for a readout only, nothing acts on it
+        if (m.kind === 'WorldEvents') sock.worldEvents = { raw: e.data, at: Date.now() };   // plan D5: kept for a readout; Auto utilities plans power events from engine.worldEventAt (core.powerEvent)
         const u = m.diff?.ssi?.last_user_mutation_tick;
         if (typeof u === 'number' && u > sock.mutTick) { sock.mutTick = u; sock.muts++; if (sock.sendAt && !sock.ackAt) sock.ackAt = hrNow(); for (const w of [...wakers]) w(); }
         if (m.kind === 'Orders') Object.assign(sock.book, { at: Date.now(), pending: Math.max(0, sock.book.pending - 1), truncated: !!m.truncated });
@@ -1146,6 +1146,27 @@ function powerPriceMult(engine = walk().engine, tick = nowTick()) {
     return ev?.outage && Number.isFinite(ev.percent) ? Math.max(0, (100 + ev.percent) / 100) : 1;
   } catch { return 1; }
 }
+// The power world event in force, or the next one to start within `ahead` ticks (default one 12 h event day): { mult, title, start, end }
+// in ticks, or null. The engine works events out from the server's seeds, so worldEventAt answers for later ticks too. Power events last
+// 2 h (14,400 ticks) and start on the hour, so a scan every 1,200 ticks finds them; the result is kept for one 1,200-tick step.
+const POWER_EVENT_TICKS = 14400;
+let powerEventMemo = { key: -1 };
+function powerEvent(engine = walk().engine, tick = nowTick(), ahead = 86400) {
+  if (!(tick > 0) || typeof engine?.worldEventAt !== 'function') return null;
+  const key = Math.floor(tick / 1200), mm = powerEventMemo;
+  if (mm.key === key && mm.engine === engine && mm.ahead === ahead && !(mm.v && mm.v.end <= tick)) return mm.v;
+  let v = null;
+  try {
+    for (let t = tick; t <= tick + ahead && !v; t += 1200) {
+      const ev = JSON.parse(engine.worldEventAt(t));
+      if (!ev?.outage || !Number.isFinite(ev.percent)) continue;
+      const end = Number.isFinite(ev.ends_at) ? ev.ends_at : t + POWER_EVENT_TICKS;
+      if (end > tick) v = { mult: Math.max(0, (100 + ev.percent) / 100), title: ev.title ?? null, start: end - POWER_EVENT_TICKS, end };
+    }
+  } catch { v = null; }
+  powerEventMemo = { key, engine, ahead, v };
+  return v;
+}
 // Power or water this Corporation buys on contracts in one region (a power-market buy is one): each Active contract's capacity, less the
 // part of what the buyer draws (up to the contract) that the seller is not delivering; in a shortfall the grid covers that gap during the
 // grace period. contracts: walk().contracts (null before the board was first seen: nothing bought counts).
@@ -1166,7 +1187,7 @@ W.idleCore = {
   version: 1,
   walk, sleep, every, sleepWake, waitConfirm, tune, markSend, lastRtt, nowTick, seeTick, sock, orderBook, sendBoardFilter, onFrame, link, realHidden,
   h, makeDraggable, toast, ledger: ledgerApi, ui,
-  setBadge, notify, askNotify, notifyPerm, stopAll, reserves, floorDesigns, courierCU, powerPriceMult, bought,
+  setBadge, notify, askNotify, notifyPerm, stopAll, reserves, floorDesigns, courierCU, powerPriceMult, powerEvent, bought,
   exportConfig, importConfig, exportFile, importFile, missingFields,
   _unload() {
     orderBook.release();
@@ -4877,6 +4898,14 @@ try {
 //     and the two never undo each other.
 //   - every change is confirmed by the subscription value in the game state; 3 unconfirmed sends in a row switch that utility off
 //     (a closed game socket is waited out, it is not a failed send).
+// World power events (core.powerEvent: NPC power x2, x1.5 or x0.5 for 2 h, worked out ahead from the server's seeds), only where Battery Banks are:
+//   - the 2 h before a x2 / x1.5 event: stored power is not counted on and the level is not lowered, so the batteries keep and gain charge
+//     at the normal price; a minute before it starts the plan switches to the event so a lower lands on the bill before it.
+//   - during a x2 / x1.5 event: what is stored is spread over the rest of the event (not just to the next bill), so the batteries carry
+//     the load and the subscription is not raised mid-event.
+//   - during a x0.5 event: stored power is not counted on and the batteries' charge rate (until full) is added, so they fill cheaply.
+//     Unverified: that a Battery Bank charges from spare grid service, not only from generators (the wiki says generated surplus).
+//   The Load tile shows the next power event (or the one in force), whether Auto is on or not.
 // The switches are saved in this browser. Alt+Shift+X switches them off with everything else.
 // @@MODULE utilities
 try {
@@ -4903,6 +4932,7 @@ try {
     const RATES = { power: 1000, water: 400, bandwidth: 1500 };   // cents per unit per bill: what the game bills together (ISP: st.isp, 15 per Mbps)
     const DAY = 28800, DAYLIGHT = 21600, NIGHT_PCT = 25;       // ticks; diurnal generators make 25% of their output at night
     const BILL_TICKS = 1200;                                   // a bill every 10 minutes at 2 ticks a second
+    const PRE_EVENT_TICKS = 14400;                             // keep the batteries this long before a dear power event (a full Battery Bank charges in 10,800)
     const INTANGIBLE = new Set([0, 24, 25, 26, 106, 107, 108, 109, 110, 111]);   // items held in st.items, not in stock
     const MAX_FAILS = 3;
     const cfg = { cycleMs: 2000, confirmMs: 10000, backoffMs: 5000, lowerWindowTicks: 120, raiseHoldTicks: 60 };   // timings; the tests shorten them. raiseHoldTicks: a raise only stalled groups need waits for the bill this close to it
@@ -4939,7 +4969,7 @@ try {
       // Transmission lines: the client asks its engine for the flows (lineFlows, a BigInt tick) only when the state has lines.
       let flows = [];
       try { if ((st.lines ?? []).length && tick > 0 && typeof engine?.lineFlows === 'function') flows = JSON.parse(engine.lineFlows(BigInt(tick))) ?? []; } catch { flows = []; }
-      return { st, catalog, contracts, flows, ws, wsOpen: ws?.readyState === 1, tick, mutTick: st.ssi?.last_user_mutation_tick ?? 0, priceMult: core.powerPriceMult?.() ?? 1 };
+      return { st, catalog, contracts, flows, ws, wsOpen: ws?.readyState === 1, tick, mutTick: st.ssi?.last_user_mutation_tick ?? 0, priceMult: core.powerPriceMult?.() ?? 1, pev: core.powerEvent?.(engine, tick) ?? null };
     }
 
     const ixRef = new WeakMap();
@@ -4954,7 +4984,8 @@ try {
     // The page's numbers for one utility in one region. Returns what the groups draw, what is generated, stored or bought, what
     // stalled groups wait for, and need: the subscription that covers all of it (can be negative: the Corporation has a surplus).
     // flows: the engine's line flows [{ from, to, sent, delivered }] (power only): Lines in add supply, Lines out count as load, as on the page.
-    function measure(util, region, st, catalog, tick, contracts, flows = []) {
+    // ev: the power event plan from eventPlan ({ mode: 'pre' | 'dear' | 'cheap', end }), or null; it counts only where storage is.
+    function measure(util, region, st, catalog, tick, contracts, flows = [], ev = null) {
       const R = String(region), ix = idx(catalog);
       const have = st.subscriptions?.[R]?.[util] ?? 0;
       const groups = Object.values(st.groups ?? {}).filter((g) => (g.region ?? 0) === region);
@@ -4972,12 +5003,20 @@ try {
         }
       }
       const owned = (id) => (st.building_pool?.[R]?.[id] ?? 0) + groups.filter((g) => g.building === id).reduce((a, g) => a + g.count, 0);
-      let dischargeCap = 0;
-      for (const b of catalog.buildings ?? []) { const s = b.storage?.[util]; if (s) dischargeCap += (s.discharge_limit ?? 0) * owned(b.id); }
+      let dischargeCap = 0, chargeCap = 0, storeMax = 0;
+      for (const b of catalog.buildings ?? []) {
+        const s = b.storage?.[util], n = s ? owned(b.id) : 0;
+        if (n) { dischargeCap += (s.discharge_limit ?? 0) * n; chargeCap += (s.charge_limit ?? 0) * n; storeMax += (s.max ?? 0) * n; }
+      }
       // Stored is in MW-ticks (7,200 = 1 MWh): count only the rate it can keep up until the next bill, so a Battery Bank that would run
       // dry mid-period does not cut the subscription. Right after a bill that is stored / 1,200, and the hold window keeps that sample.
       const stored = st.stored?.[R]?.[util] ?? 0, toBill = tick > 0 ? BILL_TICKS - (tick % BILL_TICKS) : 0;
-      const discharge = Math.min(dischargeCap, stored, toBill ? stored / toBill : stored);
+      // Power events: before a dear one and during a cheap one nothing stored is counted on (a cheap one also adds the charge rate until
+      // full); during a dear one what is stored is spread to the event's end.
+      const mode = util === 'power' && dischargeCap + chargeCap > 0 ? ev?.mode ?? null : null;
+      const toUse = mode === 'dear' && ev.end > tick ? ev.end - tick : toBill;
+      const discharge = mode === 'pre' || mode === 'cheap' ? 0 : Math.min(dischargeCap, stored, toUse ? stored / toUse : stored);
+      const charge = mode === 'cheap' ? Math.min(chargeCap, Math.max(0, storeMax - stored)) : 0;
       const lines = util === 'power' && Array.isArray(flows) ? flows : [];
       const lineIn = lines.filter((f) => f.to === region).reduce((a, f) => a + (Number(f.delivered) || 0), 0);
       const lineOut = lines.filter((f) => f.from === region && f.delivered > 0).reduce((a, f) => a + (Number(f.sent) || 0), 0);
@@ -4997,7 +5036,24 @@ try {
         if (!rc || !(rc.inputs ?? []).every((i) => stockOf(i.item) >= i.amount)) continue;
         waiting += draw;
       }
-      return { util, region, have, load, sold, gen, discharge, imported, lineIn, lineOut, waiting, need: load + sold + lineOut + waiting - gen - discharge - imported - lineIn };
+      return { util, region, have, load, sold, gen, discharge, charge, mode, imported, lineIn, lineOut, waiting, need: load + sold + lineOut + waiting + charge - gen - discharge - imported - lineIn };
+    }
+
+    // The plan for a power event (pev: core.powerEvent()) at tick: { mode, end, mult } or null. 'pre': the PRE_EVENT_TICKS before a dear
+    // one, up to a minute (cfg.lowerWindowTicks) before it starts; 'dear' from then to its end; 'cheap' while a x0.5 one is in force, up to a
+    // minute before its end, so the charge headroom is lowered on the bill at its end rather than paid for one more period.
+    function eventPlan(pev, tick) {
+      if (!pev || !(tick > 0) || !(pev.end > tick) || pev.mult === 1) return null;
+      const mult = pev.mult, end = pev.end;
+      if (pev.start <= tick) return mult > 1 ? { mode: 'dear', end, mult } : end - tick > cfg.lowerWindowTicks ? { mode: 'cheap', end, mult } : null;
+      if (mult > 1 && pev.start - tick <= PRE_EVENT_TICKS) return { mode: pev.start - tick <= cfg.lowerWindowTicks ? 'dear' : 'pre', end, mult };
+      return null;
+    }
+    const ticksText = (t) => { const m = Math.max(1, Math.ceil(t / 120)); return m >= 60 ? Math.floor(m / 60) + ' h' + (m % 60 ? ' ' + (m % 60) + ' min' : '') : m + ' min'; };
+    function eventLine(pev, tick) {
+      if (!pev || !(tick > 0) || !(pev.end > tick)) return '';
+      const x = 'NPC power x' + pev.mult + (pev.title ? ' (' + pev.title + ')' : '');
+      return pev.start <= tick ? 'Event now: ' + x + ', ' + ticksText(pev.end - tick) + ' left' : 'Upcoming event: ' + x + ' in ' + ticksText(pev.start - tick);
     }
 
     // The level that covers a measurement: ceil(need) plus the spare (only when something needs it), over the cap flagged.
@@ -5018,7 +5074,7 @@ try {
     // What to do about one level. peak: the highest want over the hold window; observedMs: how long it has been watched;
     // ticksToBill: ticks until the next bill (null: unknown); bills: what that bill is now. Returns { kind: 'ok' | 'raise' | 'lower' | 'hold' | 'broke', ... }.
     // urgent: the want without what stalled groups wait for (null: all of it is urgent). mult: the NPC power price multiplier.
-    function decide({ util, have, want, peak, observedMs, holdMs, money, bills = 0, ticksToBill, canLower = true, lowerWindowTicks = cfg.lowerWindowTicks, urgent = null, mult = 1, raiseHoldTicks = cfg.raiseHoldTicks }) {
+    function decide({ util, have, want, peak, observedMs, holdMs, money, bills = 0, ticksToBill, canLower = true, lowerWindowTicks = cfg.lowerWindowTicks, urgent = null, mult = 1, raiseHoldTicks = cfg.raiseHoldTicks, keepWhy = null }) {
       const rate = UTILS[util].rate * (util === 'power' ? Math.max(1, mult) : 1);
       // A raise is charged up front for the period and the bill charges the level again: one only stalled groups need waits out the
       // last raiseHoldTicks before the bill instead of paying twice for a few seconds.
@@ -5032,6 +5088,7 @@ try {
       }
       if (peak < have) {
         if (!canLower) return { kind: 'hold', why: 'contracts not readable' };
+        if (keepWhy) return { kind: 'hold', why: keepWhy };
         if (observedMs < holdMs) return { kind: 'hold', why: 'watching the load first' };
         if (ticksToBill != null && ticksToBill > lowerWindowTicks) return { kind: 'hold', why: 'lowering just before the next bill', level: peak };
         return { kind: 'lower', level: peak };
@@ -5094,7 +5151,10 @@ try {
       const key = util + ':' + region, u = UTILS[util];
       let c = ctl.get(key);
       if (!c) ctl.set(key, c = { samples: [], first: now, fails: 0, retryAt: 0 });
-      const m = measure(util, region, r.st, r.catalog, r.tick, r.contracts, r.flows);
+      const ev = util === 'power' ? eventPlan(r.pev, r.tick) : null;
+      const m = measure(util, region, r.st, r.catalog, r.tick, r.contracts, r.flows, ev);
+      if (c.mode !== m.mode) { c.mode = m.mode; c.samples = []; }      // a new event plan: the old peak does not hold the level
+      const evNote = !m.mode ? '' : m.mode === 'pre' ? ' · keeping batteries for NPC power x' + ev.mult : m.mode === 'dear' ? ' · on batteries during NPC power x' + ev.mult : ' · filling batteries at NPC power x' + ev.mult;
       const { want, over } = wantOf(m, conf[util].spare);
       const urgent = wantOf({ ...m, need: m.need - m.waiting }, conf[util].spare).want;
       const mult = util === 'power' ? Math.max(1, r.priceMult ?? 1) : 1;
@@ -5104,7 +5164,7 @@ try {
       const peak = Math.max(...c.samples.map((s) => s.want));
       const money = r.st.items?.[0] ?? 0, bills = billsOf(r.st, r.priceMult ?? 1);
       const ticksToBill = r.tick > 0 ? BILL_TICKS - (r.tick % BILL_TICKS) : null;
-      const d = decide({ util, have: m.have, want, peak, observedMs: now - c.first, holdMs, money, bills, ticksToBill, canLower: Array.isArray(r.contracts), urgent, mult });
+      const d = decide({ util, have: m.have, want, peak, observedMs: now - c.first, holdMs, money, bills, ticksToBill, canLower: Array.isArray(r.contracts), urgent, mult, keepWhy: m.mode === 'pre' ? 'keeping spare for the batteries before NPC power x' + ev.mult : null });
       const where = regionName(region);
       const row = { region, util, have: m.have, need: m.need, want, kind: d.kind };
       if (d.kind === 'raise' || d.kind === 'lower') {
@@ -5116,7 +5176,7 @@ try {
           c.fails = 0; c.retryAt = 0;
           const why = d.kind === 'raise' ? 'need ' + Math.ceil(m.need) + (d.partial ? ', cash pays for ' + d.level + ' only' : '') : 'highest need in the last ' + conf.holdMin + ' min: ' + peak;
           core.ledger.add(TAG, 'action', where + ' ' + util + ' ' + u.noun + ' ' + was + ' → ' + d.level + ' ' + unit(util) + ' (' + why + ')');
-          return { ...row, have: d.level, sent: true, text: (d.kind === 'raise' ? 'Raised to ' : 'Lowered to ') + d.level + ' ' + unit(util), tone: 'good' };
+          return { ...row, have: d.level, sent: true, text: (d.kind === 'raise' ? 'Raised to ' : 'Lowered to ') + d.level + ' ' + unit(util) + evNote, tone: 'good' };
         }
         if (core.link().state !== 'open') return { ...row, text: 'Waiting for the game connection', tone: 'muted' };
         c.fails++;
@@ -5135,7 +5195,7 @@ try {
       if (d.kind === 'broke') return { ...row, text: 'Needs ' + want + ' ' + unit(util) + ' but cash cannot cover the upfront ' + usd((want - m.have) * u.rate * mult) + ' and the next bill' + (mult > 1 ? ' (NPC power x' + mult + ')' : ''), tone: 'warn' };
       if (over) return { ...row, text: 'Needs ' + Math.ceil(over) + ' ' + unit(util) + ', the cap is ' + u.max, tone: 'warn' };
       if (d.kind === 'hold') return { ...row, text: 'Holding ' + m.have + ' ' + unit(util) + boughtNote + ': ' + d.why, tone: 'muted' };
-      return { ...row, text: 'Following the load: ' + m.have + ' ' + unit(util) + boughtNote + ' for ' + Math.max(0, Math.ceil(m.need + m.imported)) + ' needed' + lowNote, tone: 'muted' };
+      return { ...row, text: 'Following the load: ' + m.have + ' ' + unit(util) + boughtNote + ' for ' + Math.max(0, Math.ceil(m.need + m.imported)) + ' needed' + lowNote + evNote, tone: 'muted' };
     }
 
     function ensureLoop() {
@@ -5176,7 +5236,7 @@ try {
       if (!HAS_DOM || unloaded || !mounted) return;
       for (const util of NAMES) {
         const tile = tileOf(util);
-        for (const el of document.querySelectorAll('[data-au="' + util + '"],[data-au-note="' + util + '"]')) if (el.parentElement !== tile) el.remove();
+        for (const el of document.querySelectorAll('[data-au="' + util + '"],[data-au-note="' + util + '"],[data-au-ev="' + util + '"]')) if (el.parentElement !== tile) el.remove();
         if (!tile) continue;
         tile.classList.add('au-host');
         let sw = tile.querySelector(':scope > [data-au="' + util + '"]'), note = tile.querySelector(':scope > [data-au-note="' + util + '"]');
@@ -5195,6 +5255,12 @@ try {
         if (note.textContent !== text) note.textContent = text;
         note.className = 'au-note' + (tone ? ' ' + tone : '');
         note.hidden = !text;
+        if (util !== 'power') continue;
+        let evEl = tile.querySelector(':scope > [data-au-ev="power"]');
+        if (!evEl) { evEl = h('div', { class: 'au-note', 'data-au-ev': 'power' }); tile.append(evEl); }
+        const evText = eventLine(core.powerEvent?.(), core.nowTick());
+        if (evEl.textContent !== evText) evEl.textContent = evText;
+        evEl.hidden = !evText;
       }
     }
     const render = () => { if (mounted && !unloaded) inject(); };
@@ -5213,7 +5279,7 @@ try {
       obs?.(); obs = null;
       clearInterval(tickTimer); clearTimeout(passTimer);
       styleEl?.remove(); styleEl = null;
-      document.querySelectorAll('[data-au],[data-au-note]').forEach((e) => e.remove());
+      document.querySelectorAll('[data-au],[data-au-note],[data-au-ev]').forEach((e) => e.remove());
       document.querySelectorAll('.au-host').forEach((e) => e.classList.remove('au-host'));
     }
 
@@ -5223,7 +5289,7 @@ try {
       get running() { return anyOn(); },
       exportCfg: () => ({ cfg: persistable() }),
       importCfg(o) { const r = apply(o?.cfg ?? o); save(); ensureLoop(); renderAll(); return r; },
-      _measure: measure, _want: wantOf, _decide: decide, _step: step, _info: info,
+      _measure: measure, _want: wantOf, _decide: decide, _eventPlan: eventPlan, _eventLine: eventLine, _step: step, _info: info,
       _unload() { unloaded = true; loopTimer?.(); loopTimer = null; if (mounted) unmountUi(); },
     };
 

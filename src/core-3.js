@@ -52,6 +52,27 @@ function powerPriceMult(engine = walk().engine, tick = nowTick()) {
     return ev?.outage && Number.isFinite(ev.percent) ? Math.max(0, (100 + ev.percent) / 100) : 1;
   } catch { return 1; }
 }
+// The power world event in force, or the next one to start within `ahead` ticks (default one 12 h event day): { mult, title, start, end }
+// in ticks, or null. The engine works events out from the server's seeds, so worldEventAt answers for later ticks too. Power events last
+// 2 h (14,400 ticks) and start on the hour, so a scan every 1,200 ticks finds them; the result is kept for one 1,200-tick step.
+const POWER_EVENT_TICKS = 14400;
+let powerEventMemo = { key: -1 };
+function powerEvent(engine = walk().engine, tick = nowTick(), ahead = 86400) {
+  if (!(tick > 0) || typeof engine?.worldEventAt !== 'function') return null;
+  const key = Math.floor(tick / 1200), mm = powerEventMemo;
+  if (mm.key === key && mm.engine === engine && mm.ahead === ahead && !(mm.v && mm.v.end <= tick)) return mm.v;
+  let v = null;
+  try {
+    for (let t = tick; t <= tick + ahead && !v; t += 1200) {
+      const ev = JSON.parse(engine.worldEventAt(t));
+      if (!ev?.outage || !Number.isFinite(ev.percent)) continue;
+      const end = Number.isFinite(ev.ends_at) ? ev.ends_at : t + POWER_EVENT_TICKS;
+      if (end > tick) v = { mult: Math.max(0, (100 + ev.percent) / 100), title: ev.title ?? null, start: end - POWER_EVENT_TICKS, end };
+    }
+  } catch { v = null; }
+  powerEventMemo = { key, engine, ahead, v };
+  return v;
+}
 // Power or water this Corporation buys on contracts in one region (a power-market buy is one): each Active contract's capacity, less the
 // part of what the buyer draws (up to the contract) that the seller is not delivering; in a shortfall the grid covers that gap during the
 // grace period. contracts: walk().contracts (null before the board was first seen: nothing bought counts).
@@ -72,7 +93,7 @@ W.idleCore = {
   version: 1,
   walk, sleep, every, sleepWake, waitConfirm, tune, markSend, lastRtt, nowTick, seeTick, sock, orderBook, sendBoardFilter, onFrame, link, realHidden,
   h, makeDraggable, toast, ledger: ledgerApi, ui,
-  setBadge, notify, askNotify, notifyPerm, stopAll, reserves, floorDesigns, courierCU, powerPriceMult, bought,
+  setBadge, notify, askNotify, notifyPerm, stopAll, reserves, floorDesigns, courierCU, powerPriceMult, powerEvent, bought,
   exportConfig, importConfig, exportFile, importFile, missingFields,
   _unload() {
     orderBook.release();

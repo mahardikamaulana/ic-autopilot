@@ -974,6 +974,12 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       assert.strictEqual(core.powerPriceMult(eng(() => { throw new Error('wasm'); }), 100), 1, 'engine error');
       assert.strictEqual(core.powerPriceMult(eng({ outage: true, percent: 50 }), 0), 1, 'tick unknown');
       assert.strictEqual(core.powerPriceMult(), 1, 'no engine on the page');
+      // powerEvent scans ahead: a x2 outage ending at 50,000 is found from tick 100 and starts 2 h (14,400 ticks) before its end.
+      const ahead = { worldEventAt: (t) => JSON.stringify(t >= 35600 && t < 50000 ? { id: 12, outage: true, percent: 100, ends_at: 50000, title: 'Grid maintenance' } : null) };
+      assert.deepStrictEqual(core.powerEvent(ahead, 100), { mult: 2, title: 'Grid maintenance', start: 35600, end: 50000 });
+      assert.strictEqual(core.powerEvent(ahead, 50001), null, 'over, and none after it');
+      assert.strictEqual(core.powerEvent(eng({ id: 2, outage: false, percent: 20, ends_at: 900 }), 101), null, 'a demand event is not a power event');
+      assert.strictEqual(core.powerEvent(eng({ id: 14, outage: true, percent: -50, ends_at: 9000 }), 102).mult, 0.5, 'subsidy x0.5');
     } finally { core._unload(); globalThis.idleCore = undefined; }
   });
 
@@ -1489,6 +1495,25 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       st.stored = { 0: { power: 1000 } };
       st.stored = { 0: { power: 5 } };
       assert.strictEqual(m('power', st, 0).discharge, 5, 'never more than is held');
+      // Power event plans: 'pre' keeps the stored power, 'dear' spreads it to the event end, 'cheap' adds the charge rate until full.
+      st.stored = { 0: { power: 100000 } };
+      const me = (ev, tick = 100) => ut._measure('power', 0, st, cat, tick, [], [], ev);
+      assert.deepStrictEqual([me({ mode: 'pre', end: 20000 }).discharge, me({ mode: 'pre', end: 20000 }).need], [0, 6], 'pre: nothing stored counted on');
+      assert.strictEqual(me({ mode: 'dear', end: 10100 }).discharge, 10, 'dear: 100,000 over the 10,000 ticks to the end');
+      assert.strictEqual(me({ mode: 'dear', end: 1100 }).discharge, 36, 'dear: never over the discharge limit');
+      assert.deepStrictEqual([me({ mode: 'cheap', end: 9000 }).discharge, me({ mode: 'cheap', end: 9000 }).charge, me({ mode: 'cheap', end: 9000 }).need], [0, 24, 30], 'cheap: two banks charge 12 MW each');
+      st.stored = { 0: { power: 2 * 129600 - 5 } };
+      assert.strictEqual(me({ mode: 'cheap', end: 9000 }).charge, 5, 'cheap: only the room left');
+      assert.strictEqual(ut._measure('water', 0, st, cat, 100, [], [], { mode: 'cheap', end: 9000 }).charge, 0, 'water has no power events');
+      // eventPlan: null -> pre -> dear (a minute before the start, so the lower lands on that bill) -> null; cheap ends a minute early.
+      const dearEv = { mult: 2, start: 36000, end: 50400 }, cheapEv = { mult: 0.5, start: 36000, end: 50400 };
+      assert.deepStrictEqual([21000, 21600, 35880, 35879, 40000, 50400].map((tk) => ut._eventPlan(dearEv, tk)?.mode ?? null), [null, 'pre', 'dear', 'pre', 'dear', null]);
+      assert.deepStrictEqual([35000, 36000, 50279, 50280].map((tk) => ut._eventPlan(cheapEv, tk)?.mode ?? null), [null, 'cheap', 'cheap', null]);
+      assert.strictEqual(ut._eventLine(dearEv, 35880 - 7200), 'Upcoming event: NPC power x2 in 1 h 1 min');
+      assert.strictEqual(ut._eventLine(dearEv, 40000), 'Event now: NPC power x2, 1 h 27 min left');
+      const dk = (o) => ut._decide({ util: 'power', have: 12, want: 6, peak: 6, observedMs: 3600000, holdMs: 600000, money: 1e7, ticksToBill: 60, ...o });
+      assert.strictEqual(dk({ keepWhy: 'before x2' }).kind, 'hold', 'pre: no lower');
+      assert.strictEqual(dk({}).kind, 'lower', 'dear at the bill: lowers');
       st.building_pool = { 0: {} };
       const deals = [
         { utility: 'power', region: 0, state: 'Active', seller: 1, buyer: 9, amount: 8, delivered: 3 },

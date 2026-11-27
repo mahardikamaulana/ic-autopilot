@@ -95,7 +95,7 @@ try {
         seeTick(m.tick ?? m.diff?.tick);
         if (m.kind === 'Diff') sock.diffs++;
         if (m.kind === 'Snapshot') sock.resyncing = false;
-        if (m.kind === 'WorldEvents') sock.worldEvents = { raw: e.data, at: Date.now() };   // plan D5: kept for a readout only, nothing acts on it
+        if (m.kind === 'WorldEvents') sock.worldEvents = { raw: e.data, at: Date.now() };   // plan D5: kept for a readout; Auto utilities plans power events from engine.worldEventAt (core.powerEvent)
         const u = m.diff?.ssi?.last_user_mutation_tick;
         if (typeof u === 'number' && u > sock.mutTick) { sock.mutTick = u; sock.muts++; if (sock.sendAt && !sock.ackAt) sock.ackAt = hrNow(); for (const w of [...wakers]) w(); }
         if (m.kind === 'Orders') Object.assign(sock.book, { at: Date.now(), pending: Math.max(0, sock.book.pending - 1), truncated: !!m.truncated });
