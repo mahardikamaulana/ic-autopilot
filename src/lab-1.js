@@ -63,7 +63,7 @@ try {
       autoClaim: true,       // claim finished results
       keepLive: true,       // a Live run that was still running when the page reloaded starts Live again (off: it stays stopped)
       dryRun: false,         // log "would send ..." instead of sending (session-only: never remembered or imported)
-      list: [],              // [{ product, focus: 0 | 1 | 2, tier: 'default' | 1 | 2 | 3 }], cycled in order
+      list: [],              // [{ product, focus: 0 | 1 | 2, tier: 'default' | 1 | 2 | 3 }], cycled in order (a Tier II / III entry short of RD / Catalyst runs at Tier I)
       intervalMs: 10000,     // look this often
       delayMs: 500,          // look again this soon after sending something
       jitterMinMs: 150,      // random extra wait before each command (min)
@@ -280,7 +280,10 @@ try {
         const setting = p.tier === 'default' ? c.tierMode : p.tier;
         const best = setting === 'best' || !TIERS[setting - 1];
         const ladder = best ? [2, 1, 0] : [setting - 1];
-        const tier = ladder.find((t) => !shortfall(t, have, r, c.mdReserve) && (!best || richOk(t, have, r, c.mdReserve)));
+        let tier = ladder.find((t) => !shortfall(t, have, r, c.mdReserve) && (!best || richOk(t, have, r, c.mdReserve)));
+        // a list entry at Tier II / III that lacks its Research Data or Catalyst runs at Tier I instead of holding the Lab idle (MD short: it waits)
+        const k0 = TIERS[ladder[0]];
+        if (tier === undefined && !best && p.index != null && ladder[0] > 0 && ((k0.rd && have.rd < k0.rd) || (k0.cat && have.cat < k0.cat)) && !shortfall(0, have, r, c.mdReserve)) tier = 0;
         if (tier === undefined) { row.wait = shortfall(ladder[ladder.length - 1], have, r, c.mdReserve); continue; }
         const k = TIERS[tier], pct = successPct(tier, p.focus, bonus);
         const label = `${pname(ix, p.product)} · ${focusName(p.focus)} · Tier ${k.name}`;

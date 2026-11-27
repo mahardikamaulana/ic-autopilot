@@ -481,5 +481,123 @@ function fakeLab({ running = true, dryRun = true, mode = 'process', list = [], s
     cp.stop(); F.unload();
   });
 
+  // ---- plan D1: the preset follows the retail allocator; strictly better Lab results are adopted -----------------------------------
+  const MDid = I('Manufacturing Data'), RDid = I('Research Data');
+  // ctx.retail goods and a stubbed allocator plan (Workshops per good); unit x blockH is $ per Workshop-hour
+  const planCtx = (alloc, o = {}) => F.ctxOf({ retail: { goods: [['Bookshelf', 4000, 30], ['Table', 3300, 30], ['Chair', 2500, 30]].map(([n, unit, blockH]) => ({ id: I(n), name: n, unit, blockH })) }, ...o });
+  const stubPlan = (cp, byName) => { cp._buildout = { alloc: () => ({ alloc: Object.fromEntries(Object.entries(byName).map(([n, x]) => [I(n), x])) }) }; };
+
+  await t('D1 preset: MD 1.9M and RD 10 -> Tier II Quality engineering on the top planned good (Bookshelf) first, then a Planks process study (Tier I), then the other planned goods', () => {
+    const { cp } = F.load(['cp-lab']);
+    const st = F.stageA(); st.items[MDid] = 1900000; st.items[RDid] = 10;
+    stubPlan(cp, { Bookshelf: 15, Table: 2, Chair: 0 });
+    const v = cp._view(st, F.board.catalog, []);
+    assert.deepStrictEqual([...cp._lab.presetList(v, planCtx())], [{ product: I('Bookshelf'), focus: 2, tier: 2 }, { product: I('Planks'), focus: 0, tier: 1 }, { product: I('Table'), focus: 2, tier: 2 }]);
+    // Table first once it carries more $/h; Tier I below cfg.mdRich or with RD < 5
+    stubPlan(cp, { Bookshelf: 1, Table: 9 });
+    st.items[MDid] = 900000;
+    assert.deepStrictEqual([...cp._lab.presetList(cp._view(st, F.board.catalog, []), planCtx())].map((e) => [e.product, e.focus, e.tier]), [[I('Table'), 2, 1], [I('Planks'), 0, 1], [I('Bookshelf'), 2, 1]]);
+    st.items[MDid] = 1900000; st.items[RDid] = 4;
+    assert.ok(cp._lab.presetList(cp._view(st, F.board.catalog, []), planCtx()).every((e) => e.tier === 1), 'RD 4: Tier I');
+    // no plan (no retail facts, or no allocator): the wiki 10 Tier I list
+    assert.deepStrictEqual(cp._lab.presetList(v, F.ctxOf()).map((e) => e.product), ['Bookshelf', 'Planks', 'Table', 'Chair'].map((n) => I(n)));
+    F.unload();
+  });
+
+  await t('D1 preset: a dry-run runner restarts live on the allocator list; a live runner on any list is left alone', async () => {
+    const { cp } = F.load(['cp-lab']);
+    const st = F.stageA(); st.items[MDid] = 1900000; st.items[RDid] = 10;
+    stubPlan(cp, { Bookshelf: 15 });
+    const lr = fakeLab(), ctx = planCtx({}, { mods: { labRunner: lr } });
+    const a = labOf(decideA(cp, st, ctx)).find((x) => x.id === 'lab:preset');
+    assert.match(a.text, /allocator list \(Bookshelf quality \(Tier II\), Planks process\)/);
+    assert.strictEqual(await a.run(), true);
+    assert.deepStrictEqual(lr.cfg.list, [{ product: I('Bookshelf'), focus: 2, tier: 2 }, { product: I('Planks'), focus: 0, tier: 1 }]);
+    lr.cfg.list = [{ product: I('Chair'), focus: 0, tier: 1 }];   // the user edits the live runner's list
+    const d = decideA(cp, st, ctx);
+    assert.ok(!labOf(d).some((x) => x.id === 'lab:preset')); assert.match(d.readouts.lab.preset, /your own setting/);
+    F.unload();
+  });
+
+  await t('D1 preset (review): a live runner still on the list Core plan applied restarts live on the new allocator list once the plan moves; a user edit is never overridden', async () => {
+    const { cp } = F.load(['cp-lab']);
+    const st = F.stageA(); st.items[MDid] = 1900000; st.items[RDid] = 10;
+    stubPlan(cp, { Bookshelf: 15 });
+    const lr = fakeLab(), ctx = planCtx({}, { mods: { labRunner: lr } });
+    assert.strictEqual(await labOf(decideA(cp, st, ctx)).find((x) => x.id === 'lab:preset').run(), true);
+    stubPlan(cp, { Bookshelf: 1, Table: 9 });   // the plan moves to Table
+    const a = labOf(decideA(cp, st, ctx)).find((x) => x.id === 'lab:preset');
+    assert.match(a.text, /allocator list \(Table quality \(Tier II\), Planks process, Bookshelf quality \(Tier II\)\): the plan changed/);
+    lr.active = false;
+    assert.strictEqual(await a.run(), true);
+    assert.strictEqual(lr.cfg.list[0].product, I('Table'));
+    lr.cfg.list = [{ product: I('Chair'), focus: 0, tier: 1 }];   // your edit
+    stubPlan(cp, { Bookshelf: 15 });
+    assert.ok(!labOf(decideA(cp, st, ctx)).some((x) => x.id === 'lab:preset'), 'your own list stays');
+    F.unload();
+  });
+
+  await t('D1 runner (review): a list entry at Tier II with 3 Research Data runs at Tier I instead of holding the Lab idle; MD short still waits', () => {
+    F.load(['lab']);
+    const lr = globalThis.labRunner, st = F.stageA();
+    st.items[MDid] = 2000000; st.items[RDid] = 3; st.mfg_research = {};
+    const list = [{ product: I('Bookshelf'), focus: 2, tier: 2 }, { product: I('Planks'), focus: 0, tier: 1 }];
+    let d = lr._decide(st, F.board.catalog, { ...lr.cfg, mode: 'list', list, mdReserve: 0 }, {});
+    assert.deepStrictEqual(d.msg, { type: 'StartResearch', product: I('Bookshelf'), context: 2, tier: 0, region: 0 }, JSON.stringify(d.wait ?? d.msg));
+    st.items[RDid] = 10;
+    d = lr._decide(st, F.board.catalog, { ...lr.cfg, mode: 'list', list, mdReserve: 0 }, {});
+    assert.strictEqual(d.msg.tier, 1, 'Tier II with the RD');
+    st.items[MDid] = 5000;
+    d = lr._decide(st, F.board.catalog, { ...lr.cfg, mode: 'list', list, mdReserve: 0 }, {});
+    assert.ok(!d.msg && /MD/.test(d.wait), 'MD short: waits (' + d.wait + ')');
+    F.unload();
+  });
+
+  // Stage A plus a running Table group on its v1 floor and Lab processes in st.recipes.
+  function withProcesses(procs) {
+    const st = F.stageA(), tb = F.board.catalog.recipes.find((r) => r.name === 'Make Table');
+    st.groups[12] = { building: B('Workshop'), region: 0, count: 3, recipe: tb.id, modules: {} };
+    st.layouts = { [tb.id]: { cells: { '0,0': { item: 114, rot: 0 } }, fx: { rate: 5 } } };
+    st.recipes = Object.fromEntries(procs.map((p, k) => { const id = 2147483648 + k; return [id, { id, building: tb.building, inputs: tb.inputs, outputs: tb.outputs, ticks: tb.ticks, quality: 0, ...p }]; }));
+    return { st, tb };
+  }
+  await t('D1 adopt: a process with the same inputs and ticks and quality 2: copy the floor, then SetRecipe (one step each); the group still counts as Table', () => {
+    const { cp } = F.load(['cp-lab', 'cp-retail']);
+    const { st, tb } = withProcesses([{ name: 'Table Process #2 · Quality +2', quality: 2 }, { name: 'Table Process #3', inputs: [{ item: I('Planks'), amount: 30 }], ticks: 900 }]);
+    const pid = 2147483648;
+    let d = decideA(cp, st);
+    let a = labOf(d).find((x) => x.id.startsWith('lab:adopt'));
+    assert.deepStrictEqual(a.steps[0].msg, { type: 'EditLayout', recipe: pid, cells: st.layouts[tb.id].cells });
+    st.layouts[pid] = { cells: st.layouts[tb.id].cells, fx: { rate: 5 } };
+    d = decideA(cp, st);
+    a = labOf(d).find((x) => x.id.startsWith('lab:adopt'));
+    assert.deepStrictEqual(a.steps[0].msg, { type: 'SetRecipe', group: 12, recipe: pid });
+    assert.match(d.readouts.lab.adopt, /Table Process #2 · Quality \+2 on group 12 .*quality 2 vs 0/);
+    st.groups[12].recipe = pid;
+    assert.ok(a.steps[0].until(cp._view(st, F.board.catalog, [])), 'confirmed by the real recipe id');
+    const v = cp._view(st, F.board.catalog, []);
+    assert.strictEqual(v.groups.find((g) => g.id === 12).recipe, tb.id, 'the view shows the group on Make Table');
+    assert.strictEqual(v.groups.find((g) => g.id === 12).process, pid);
+    assert.ok(!labOf(decideA(cp, st)).some((x) => x.id.startsWith('lab:adopt')), 'adopted: nothing beats it');
+    F.unload();
+  });
+
+  await t('D1 adopt: not strictly better (more Planks, more ticks, lower quality, an extra input, a paused group, a floor at a lower rate) -> no action', () => {
+    const { cp } = F.load(['cp-lab']);
+    const tbIn = F.board.catalog.recipes.find((r) => r.name === 'Make Table').inputs[0].amount;
+    for (const p of [{ inputs: [{ item: I('Planks'), amount: tbIn + 1 }], quality: 3 }, { ticks: 1300, quality: 3 }, { inputs: [{ item: I('Planks'), amount: tbIn }, { item: I('Iron Sheet'), amount: 1 }], quality: 3 }, { quality: 0 }]) {
+      const { st } = withProcesses([{ name: 'P', ...p }]);
+      assert.ok(!labOf(decideA(cp, st)).some((x) => x.id.startsWith('lab:adopt')), JSON.stringify(p));
+    }
+    const { st } = withProcesses([{ name: 'Fewer Planks', inputs: [{ item: I('Planks'), amount: tbIn - 5 }] }]);
+    assert.ok(labOf(decideA(cp, st)).some((x) => x.id.startsWith('lab:adopt:floor')), 'fewer Planks, same ticks: adopted');
+    st.groups[12].paused = true;
+    assert.ok(!labOf(decideA(cp, st)).some((x) => x.id.startsWith('lab:adopt')), 'paused group: the user\'s');
+    st.groups[12].paused = false; st.layouts[2147483648] = { cells: {}, fx: { rate: 1 } };
+    const d = decideA(cp, st);
+    assert.ok(!labOf(d).some((x) => x.id.startsWith('lab:adopt')) && /runs at x1 < x5/.test(d.readouts.lab.adopt), d.readouts.lab.adopt);
+    F.unload();
+  });
+
   F.done();
 })();

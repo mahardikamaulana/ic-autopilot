@@ -251,7 +251,7 @@ try {
         handle.addEventListener('pointerup', up);
       });
     }
-    // Toasts: up to 3 stacked, pause while hovered, optional action (Undo). opts: 'info' | 'success' | 'error' or { kind, undo }.
+    // Toasts: up to 3 stacked, pause while hovered, optional action (Undo, or { label, run }). opts: 'info' | 'success' | 'error' or { kind, undo, action }.
     let toastBox = null;
     const toasts = [];
     function toast(text, opts) {
@@ -263,7 +263,8 @@ try {
       const t = { el: null, timer: 0 };
       const dismiss = () => { clearTimeout(t.timer); t.el.remove(); const i = toasts.indexOf(t); if (i >= 0) toasts.splice(i, 1); };
       const arm = (ms) => { clearTimeout(t.timer); t.timer = setTimeout(dismiss, ms); };
-      const act = o.undo ? [h('button', { type: 'button', onclick: () => { dismiss(); o.undo(); } }, 'Undo')] : [];
+      const btn = o.undo ? ['Undo', o.undo] : o.action ? [o.action.label, o.action.run] : null;   // action: { label, run }
+      const act = btn ? [h('button', { type: 'button', onclick: () => { dismiss(); btn[1](); } }, btn[0])] : [];
       t.el = h('div', { class: 'idc-toast k-' + (o.kind || 'info') }, h('span', {}, text), ...act);
       for (const [on, off] of [['mouseenter', 'mouseleave'], ['focusin', 'focusout']]) {   // hovered or keyboard-focused: stay
         t.el.addEventListener(on, () => clearTimeout(t.timer));
@@ -272,7 +273,7 @@ try {
       toastBox.append(t.el);
       toasts.push(t);
       while (toasts.length > 3) { const old = toasts[0]; clearTimeout(old.timer); old.el.remove(); toasts.shift(); }
-      arm(o.undo ? 7000 : 3500);
+      arm(btn ? 7000 : 3500);
     }
 
     // ---- ledger: what the modules did, kept across reloads ------------------------------

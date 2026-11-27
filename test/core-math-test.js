@@ -167,6 +167,17 @@ t('fixedExtra: acres of the Retail Store / Assembly Plant not built yet replace 
   assert.strictEqual(CM.landRule({ ...state, fixedExtra: 0 }, catalog).fixedAcres, state.fixedAcres);
 });
 
+t('B4 chainFor: Camps / Sawmills for a Planks target at the plan floors (Camp 1,080 Wood/h, Sawmill 120 Planks/h) or measured rates; landRule sizes with it', () => {
+  const m = CM.engineModel(catalog);
+  near(m.campWoodH, 1080, 1e-9, 'Camp x3'); near(m.smPlanksH, 120, 1e-9, 'Sawmill x2');
+  assert.deepStrictEqual(CM.chainFor(16800, catalog), { camps: Math.ceil(16800 * m.woodPerPlank / 1080), sawmills: 140 });
+  assert.deepStrictEqual(CM.chainFor(2400, catalog, { campWoodH: 720, smPlanksH: 60 }), { camps: Math.ceil(2400 * m.woodPerPlank / 720), sawmills: 40 });
+  assert.deepStrictEqual(CM.chainFor(0, catalog), { camps: 0, sawmills: 0 });
+  assert.deepStrictEqual(CM.chainFor(240, catalog), { camps: Math.ceil(240 * m.woodPerPlank / 1080), sawmills: 2 }, 'an exact multiple needs no extra Sawmill');
+  const r = CM.landRule(state, catalog), c = CM.chainFor(r.planksH, catalog);
+  assert.deepStrictEqual([r.camps, r.sawmills], [c.camps, c.sawmills]);
+});
+
 t('determinism and no input mutation', () => {
   const s = JSON.stringify(state), c = JSON.stringify(catalog);
   const a = CM.landRule(state, catalog), b = CM.landRule(state, catalog);

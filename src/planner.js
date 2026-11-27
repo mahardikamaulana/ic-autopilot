@@ -101,6 +101,7 @@ try {
     for (const [r, pool] of Object.entries(st.building_pool ?? {})) if (Object.values(pool ?? {}).some((n) => n > 0)) held.add(Number(r));
     let best = 0, bestFree = regionAcres({ st, catalog, region: 0 }).free;
     for (const r of [...held].sort((a, b) => a - b)) {
+      if (r !== 0 && core.acreHolds?.[r] > 0) continue;   // Core plan's expansion is building this region (cp-expand)
       const f = regionAcres({ st, catalog, region: r }).free;
       if (f > bestFree) { best = r; bestFree = f; }
     }

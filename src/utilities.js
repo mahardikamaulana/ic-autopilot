@@ -196,6 +196,7 @@ try {
       const s = new Set();
       for (const g of Object.values(st.groups ?? {})) s.add(g.region ?? 0);
       for (const [r, o] of Object.entries(st.subscriptions ?? {})) if ((o?.[util] ?? 0) > 0) s.add(Number(r));
+      for (const k of asks.keys()) { const [u, r] = k.split(':'); if (u === util) s.add(Number(r)); }   // a new region with no group or level yet (cp-expand asks first)
       return [...s].sort((a, b) => a - b);
     }
 
@@ -376,7 +377,7 @@ try {
       get running() { return anyOn(); },
       exportCfg: () => ({ cfg: persistable() }),
       importCfg(o) { const r = apply(o?.cfg ?? o); save(); ensureLoop(); renderAll(); return r; },
-      raiseRoom, ask, _measure: measure, _want: wantOf, _decide: decide, _eventPlan: eventPlan, _eventLine: eventLine, _step: step, _info: info,
+      raiseRoom, ask, _measure: measure, _want: wantOf, _decide: decide, _regionsOf: regionsOf, _eventPlan: eventPlan, _eventLine: eventLine, _step: step, _info: info,
       _unload() { unloaded = true; loopTimer?.(); loopTimer = null; if (mounted) unmountUi(); },
     };
 

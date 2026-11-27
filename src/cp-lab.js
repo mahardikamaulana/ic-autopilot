@@ -12,7 +12,9 @@
 //      Refiner (kind 62) -> furniture Workshops (never an Overclock on a Workshop: it raises plank use), Insightful quirk -> Lab.
 //      A quirk that names a cell (e.g. CornerTuned "1,-1") is installed only in that cell. Stacking is unverified (risk R2), so
 //      after the first module of a kind on a group no second one goes there until cfg.modulesStackOk is true.
-// Manual only (no message in the protocol, or spends money on the market): adopting Process / Quality results, Module Exchange.
+//   2b. The preset list follows the retail allocator (plan D1): Quality engineering on the top planned good by $/h, then Planks Process study.
+//   4. Adopt: a Lab result strictly better than a running furniture group's recipe: its floor copied (EditLayout), then SetRecipe (plan D1).
+// Manual only (spends money on the market, or not clearly better): Module Exchange, other Process results.
 // @@MODULE cp-lab
 try {
 (() => {
@@ -90,11 +92,21 @@ try {
     return { install: null, notes };
   }
 
-  // The Tier I list with ids by name; null when a name is missing (the preset is then off, with a readout).
-  function presetList(v) {
-    const list = PRESET.map(([n, focus]) => ({ product: v.idI(n), focus, tier: 1 }));
-    return list.some((e) => e.product == null) ? null : list;
+  // The list with ids by name; null when a name is missing (the preset is then off, with a readout).
+  // With the retail allocator's plan (plan D1): Quality engineering on the planned good with the most $/h first, then a Planks process study,
+  // then the other planned goods by $/h; Quality engineering at Tier II when MD > cfg.mdRich and RD >= 5 (Tier II also costs 5 RD).
+  // Without a plan: the wiki 10 Tier I list.
+  function presetList(v, ctx = {}) {
+    let al = null;
+    try { al = ctx.retail?.goods ? W.corePlan._buildout?.alloc?.(v, ctx) ?? null : null; } catch { al = null; }
+    const ph = (g) => (al?.alloc?.[g.id] ?? 0) * g.unit * g.blockH;   // planned $/h (cents): Workshops x unit price x units per Workshop-hour
+    const top = al ? ctx.retail.goods.filter((g) => ph(g) > 0).sort((a, b) => ph(b) - ph(a)) : [];
+    const rich = (v.st.items?.[v.idI('Manufacturing Data')] ?? 0) > W.corePlan.cfg.mdRich && (v.st.items?.[v.idI('Research Data')] ?? 0) >= 5;
+    const rows = top.length ? [[top[0].name, 2], ['Planks', 0], ...top.slice(1).map((g) => [g.name, 2])] : PRESET;
+    const list = rows.map(([n, focus]) => ({ product: v.idI(n), focus, tier: top.length && focus === 2 && rich ? 2 : 1 }));
+    return list.some((e) => e.product == null) ? null : Object.assign(list, { label: top.length ? 'allocator list' : 'Tier I list' });
   }
+  const listText = (v, list) => list.map((e) => v.C.items[e.product]?.name + (e.focus === 2 ? ' quality' : ' process') + (e.tier === 2 ? ' (Tier II)' : '')).join(', ');
   const sameList = (a, b) => Array.isArray(a) && a.length === b.length && a.every((e, i) => e && e.product === b[i].product && e.focus === b[i].focus && e.tier === b[i].tier);
 
   // Lab preset: what to do with the Lab runner. Returns { action?, alert?, note }.
@@ -105,10 +117,17 @@ try {
     if (!cfg.labPreset) return { note: 'preset off (cfg.labPreset)', alert: lr && lr.running && lr.cfg?.dryRun && ctx.live ? 'ALERT: the Lab runner is a dry run while Core plan is live, the Lab sends nothing' : null };
     if (!lr) return { note: 'Lab runner not loaded' };
     if (v.owned('Manufacturing Lab') < 1) return { note: 'no Manufacturing Lab yet' };
-    const list = presetList(v);
+    const list = presetList(v, ctx);
     if (!list) return { note: 'preset off: an item of the Tier I list is missing from the catalog', alert: 'ALERT: Lab preset items not found by name' };
     const c = lr.cfg ?? {};
-    if (lr.running && !c.dryRun) return { note: c.mode === 'list' && sameList(c.list, list) ? 'Lab runner live on the Tier I list' : 'Lab runner live on your own setting (' + (c.mode ?? '?') + '): left alone' };
+    if (lr.running && !c.dryRun) {
+      if (c.mode === 'list' && sameList(c.list, list)) return { note: 'Lab runner live on the ' + list.label + ' (' + listText(v, list) + ')' };
+      // still on the list Core plan applied (you did not change it) but the plan moved: restart it live on the new list (never over your own edit)
+      const ma = ctx.mem?.(LAB)?.get?.() ?? {};
+      if (ctx.live && ma.applied != null && sigOf(c) === ma.applied && !(ma.presetFailAt != null && ctx.now - ma.presetFailAt < PRESET_BACKOFF))
+        return { note: 'Lab runner live on an older preset list', action: { id: 'lab:preset', text: 'Lab runner: restart live on the ' + list.label + ' (' + listText(v, list) + '): the plan changed', run: () => applyPreset(lr, list, ctx) } };
+      return { note: 'Lab runner live on your own setting (' + (c.mode ?? '?') + '): left alone' };
+    }
     const state = lr.running ? 'running as a dry run' : 'stopped';
     const alert = lr.running ? 'ALERT: the Lab runner is a dry run' + (ctx.live ? ' while Core plan is live: the Lab sits idle' : '') : null;
     if (!ctx.live) return { note: 'Lab runner ' + state + '; the preset is applied once Core plan runs live', alert };
@@ -122,7 +141,7 @@ try {
     // Mode and list survive a reload (only dryRun resets). If they differ from what this director last applied, you changed them: keep yours.
     const own = m.applied != null && sigOf(c) !== m.applied;
     const verb = lr.running ? 'restart' : 'start';
-    const text = own ? 'Lab runner: ' + verb + ' live on your own setting (' + (c.mode ?? '?') + ')' : 'Lab runner: ' + verb + ' live on the Tier I list (Bookshelf, Planks, Table, Chair)';
+    const text = own ? 'Lab runner: ' + verb + ' live on your own setting (' + (c.mode ?? '?') + ')' : 'Lab runner: ' + verb + ' live on the ' + list.label + ' (' + listText(v, list) + ')';
     return { alert, note: 'Lab runner ' + state, action: { id: 'lab:preset', text, run: () => applyPreset(lr, own ? null : list, ctx) } };
   }
   const sigOf = (c) => JSON.stringify([c.mode ?? null, c.mode === 'list' ? (c.list ?? []).map((e) => [e?.product, e?.focus, e?.tier]) : null]);
@@ -174,11 +193,50 @@ try {
     return { want: true, note: text, action: { id: 'lab:buy:' + owned, text, steps, hold: true } };
   }
 
+  // Adopt a Lab result (plan D1). A claimed Process / Quality result is a new recipe in st.recipes; a group adopts it with SetRecipe. Only
+  // when it is strictly better than the running furniture group's recipe, per unit made: no more ticks, no input it lacks or more of one,
+  // and higher quality (no more Planks) or fewer Planks (no lower quality). Floors belong to a recipe, so the group's floor is first copied
+  // to the new recipe (EditLayout: no building runs it yet, so nothing is charged), and the switch waits until that floor runs at least
+  // the old rate. One message per step; a paused group (the user's) is left alone. Pure: { action?, note }.
+  function adoptStep(v, ctx = {}) {
+    const ws = v.idB('Workshop'), pl = v.idI('Planks'), furn = FURNITURE.map((n) => v.idR(n)).filter((x) => x != null);
+    const recOf = (id) => v.st.recipes?.[id] ?? v.C.recipes[id] ?? null;
+    const per = (r) => { const o = r.outputs?.[0]?.amount || 1, inp = {}; for (const i of r.inputs ?? []) inp[i.item] = (inp[i.item] ?? 0) + i.amount / o; return { t: r.ticks / o, inp, q: r.quality ?? 0, pl: inp[pl] ?? 0 }; };
+    const better = (c, cur) => {
+      const a = per(c), b = per(cur), eps = 1e-9;
+      if (c.building !== cur.building || c.outputs?.[0]?.item !== cur.outputs?.[0]?.item || a.t > b.t + eps) return false;
+      if (Object.entries(a.inp).some(([i, x]) => !(i in b.inp) || x > b.inp[i] + eps)) return false;
+      return (a.q > b.q && a.pl <= b.pl + eps) || (a.pl < b.pl - eps && a.q >= b.q);
+    };
+    const notes = [];
+    for (const g of v.groups.filter((x) => x.building === ws && x.count > 0 && !x.paused && furn.includes(x.recipe)).sort((a, b) => b.count - a.count)) {
+      const curId = g.process ?? g.recipe, cur = recOf(curId);
+      if (!cur) continue;
+      const cands = Object.values(v.st.recipes ?? {}).filter((c) => c.id !== curId && better(c, cur)).sort((a, b) => (b.quality ?? 0) - (a.quality ?? 0) || per(a).pl - per(b).pl);
+      const c = cands[0];
+      if (!c) continue;
+      const label = c.name + ' on ' + groupLabel(v, g) + ' (quality ' + (c.quality ?? 0) + ' vs ' + (cur.quality ?? 0) + ', Planks ' + +per(c).pl.toFixed(2) + ' vs ' + +per(cur).pl.toFixed(2) + ' per unit)';
+      const floor = v.st.layouts?.[curId], has = v.st.layouts?.[c.id];
+      if (!floor?.cells) { notes.push('adopt ' + label + ': waits, the group runs no saved floor to copy'); continue; }
+      if (!has) {   // the shared floor wrapper: an EditLayout the server did not apply waits cfg.floorRetryMin (no fail-stop loop)
+        const fa = W.corePlan._floorAction(ctx, LAB, 'adopt:' + c.id, c, floor.cells, 'adopt ' + label + ': the server did not apply the floor copy', { id: 'lab:adopt:floor:' + c.id, text: 'adopt Lab result: copy the floor of ' + cur.name + ' to ' + c.name });
+        if (fa.action) return { note: 'adopt ' + label + ': copy its floor first', action: fa.action };
+        notes.push(fa.wait); continue;
+      }
+      if ((has.fx?.rate ?? 1) < (floor.fx?.rate ?? 1)) { notes.push('adopt ' + label + ': waits, its floor runs at x' + (has.fx?.rate ?? 1) + ' < x' + (floor.fx?.rate ?? 1)); continue; }
+      return { note: 'adopt ' + label, action: { id: 'lab:adopt:' + g.id + ':' + c.id, text: 'adopt Lab result ' + label,
+        steps: [{ msg: { type: 'SetRecipe', group: g.id, recipe: c.id }, until: (x) => x.st.groups?.[g.id]?.recipe === c.id }] } };
+    }
+    return { note: notes.join('; ') || 'no Lab result beats a furniture recipe' };
+  }
+
   const pendingInvest = (v, ctx, rule, stage) => (labBuy(v, ctx, W.corePlan.cfg, rule, stage).want ? [{ what: 'second Manufacturing Lab', paybackH: null }] : []);
 
   W.corePlan.addDirector({
     name: LAB, order: 55,
-    defaults: { labPreset: true, labGroup: true, labModules: true, modulesStackOk: false, labTarget: 2 },
+    defaults: { labPreset: true, labGroup: true, labModules: true, modulesStackOk: false, labTarget: 2,
+      mdRich: 1000000,        // Manufacturing Data above this (and RD >= 5): the preset's Quality engineering runs at Tier II (plan D1)
+      labAdopt: true },       // adopt a Lab process that is strictly better than a furniture group's recipe (plan D1)
     // E5: the second Lab is an investment still to make while it is wanted and not bought.
     pendingInvest,
     // Records every installed module once (group, kind, cell, first seen) for the readout. Stacking (R2) is not measured here:
@@ -246,12 +304,19 @@ try {
         });
       } else readout.modules = ['module installer off (cfg.labModules)'];
 
+      // 4. Adopt Lab results that are strictly better (plan D1).
+      if (cfg.labAdopt) {
+        const ad = adoptStep(v, ctx);
+        readout.adopt = ad.note;
+        if (ad.action) actions.push(ad.action);
+      } else readout.adopt = 'off (cfg.labAdopt)';
+
       // Manual work: no "adopt process" message exists in the protocol, and the Module Exchange spends money on unverified rows.
       const furn = FURNITURE.map((n) => v.idR(n)).filter((x) => x != null);
       const qg = v.groups.filter((g) => furn.includes(g.recipe)), pg = v.groups.filter((g) => g.recipe != null && g.recipe === v.idR('Saw Planks'));
       const results = (v.st.pending_results ?? []).length;
       readout.manual = [
-        'adopt by hand: Quality engineering results on ' + (qg.length ? qg.map((g) => groupLabel(v, g)).join(', ') + ' (one group first)' : 'the furniture groups, none yet'),
+        'adopt by hand: Quality engineering results that are not strictly better (more Planks or time) on ' + (qg.length ? qg.map((g) => groupLabel(v, g)).join(', ') : 'the furniture groups, none yet'),
         'adopt by hand: Process study results for Planks on ' + (pg.length ? pg.map((g) => groupLabel(v, g)).join(', ') : 'the Planks group, none yet') + ' if output per acre-second rises >= 3%',
         'Module Exchange: search "overclock" and buy modules for free Fell Wood sockets by hand',
         ...(results ? [results + ' Lab result' + (results > 1 ? 's' : '') + ' waiting to be claimed'] : []),
@@ -266,7 +331,7 @@ try {
       { duty: 'confirm module stacking (R2): read the group speed after the first Overclock, then corePlan.importCfg({ modulesStackOk: true })', owner: 'you', done: false },
     ],
   });
-  W.corePlan._lab = { freeModules, planInstall, presetList, CELLS, timing, labBuy, pendingInvest };
+  W.corePlan._lab = { freeModules, planInstall, presetList, adoptStep, CELLS, timing, labBuy, pendingInvest };
 })();
 } catch (e) { console.error('[IdleCorp] cp-lab failed to load:', e); }
 // @@END cp-lab

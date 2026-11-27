@@ -1007,15 +1007,19 @@ const wsGroups = (st) => Object.values(st.groups).filter((g) => g.building === B
     const r = cat.recipes.find((x) => x.name === 'Make Bench'), benchP = r.inputs.find((i) => i.item === I('Planks')).amount * 3 * 7200 / r.ticks;   // x3 runs an hour x planks a run
     const sized = (p) => [Math.ceil(p * m.woodPerPlank / m.campWoodH), Math.ceil(p / m.smPlanksH)];
     const tg = cp._buildout.targets(v, ctx, rule), q = sized(rule.planksH + benchP), p = sized(rule.planksH);
-    assert.deepStrictEqual([tg.camps, tg.sawmills], [rule.camps + q[0] - p[0], rule.sawmills + q[1] - p[1]]);
-    const r0 = { ...rule, planksH: 0, camps: 0, sawmills: 0 };   // a rule with no planks: the Bench's own Camps / Sawmills
+    // plan B4: at least the chain the plan's Workshops eat (tg.chain, Bench included)
+    const atLeast = (x, t) => [Math.max(x[0], t.chain?.camps ?? 0), Math.max(x[1], t.chain?.sawmills ?? 0)];
+    assert.deepStrictEqual([tg.camps, tg.sawmills], atLeast([rule.camps + q[0] - p[0], rule.sawmills + q[1] - p[1]], tg));
+    const r0 = { ...rule, planksH: 0, camps: 0, sawmills: 0 };   // a rule with no planks: the Bench's own Camps / Sawmills (and the chain floor)
     const t0 = cp._buildout.targets(v, ctx, r0);
-    assert.deepStrictEqual([t0.camps, t0.sawmills], sized(benchP));
+    assert.deepStrictEqual([t0.camps, t0.sawmills], atLeast(sized(benchP), t0));
     assert.ok(t0.camps >= 1 && t0.sawmills >= 1);
     const tn = cp._buildout.targets(v, F.ctxOf({ retailBoard: retail }), r0);
-    assert.deepStrictEqual([tn.camps, tn.sawmills], [0, 0], 'no pass: no Bench, the rule alone');
+    assert.deepStrictEqual([tn.camps, tn.sawmills], atLeast([0, 0], tn), 'no pass: no Bench, the rule alone (and the chain floor)');
+    if (t0.chain && tn.chain) assert.ok(Math.abs(t0.chain.planksH - tn.chain.planksH - benchP) < 1e-6, 'the chain counts the Bench planks: ' + t0.chain.planksH + ' vs ' + tn.chain.planksH);
     cp.cfg.benchWorkshops = 0;
-    assert.deepStrictEqual([cp._buildout.targets(v, ctx, r0).camps, cp._buildout.targets(v, ctx, r0).sawmills], [0, 0], 'benchWorkshops 0');
+    const tz = cp._buildout.targets(v, ctx, r0);
+    assert.deepStrictEqual([tz.camps, tz.sawmills], atLeast([0, 0], tz), 'benchWorkshops 0');
     F.unload();
   });
 

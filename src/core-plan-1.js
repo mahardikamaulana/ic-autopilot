@@ -109,7 +109,13 @@ try {
     // ---- a small pure view of the game state ---------------------------------------------------------------------------------
     function view(st, raw, deals = []) {
       const N = names(raw), C = N.C;
-      const groups = Object.entries(st.groups ?? {}).map(([id, g]) => ({ id: +id, ...g })).filter((g) => (g.region ?? REGION) === REGION);
+      // A group on a Lab process (st.recipes, wiki research.md) shows as on the catalog recipe of the same building and product, so every
+      // director counts it as that recipe (plan D1 adoption); g.process keeps the real id.
+      const baseOf = (r) => Object.values(C.recipes).find((x) => x.building === r.building && x.inputs?.length && x.outputs?.[0]?.item === r.outputs?.[0]?.item);
+      const groups = Object.entries(st.groups ?? {}).map(([id, g]) => {
+        const pr = g.recipe != null && !C.recipes[g.recipe] ? st.recipes?.[g.recipe] : null, b = pr ? baseOf(pr) : null;
+        return { id: +id, ...g, ...(b ? { recipe: b.id, process: g.recipe } : {}) };
+      }).filter((g) => (g.region ?? REGION) === REGION);
       const pool = st.building_pool?.[REGION] ?? {};
       const stock = st.stock?.[REGION] ?? {}, items = st.items ?? {};
       const bld = (b) => C.buildings[b] ?? { name: 'building ' + b, cost: 0, acres: 1, build_items: [] };

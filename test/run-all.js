@@ -36,7 +36,9 @@ add('planner', ['bun', T('planner-test.js')], ['src/core-1.js', 'src/core-2.js',
 add('keep-online', ['bun', T('keep-online-test.js')], [BUILT, T('keep-online-test.js')], 1);
 add('engine-power', ['bun', T('engine-power-test.js')], [BUILT, T('engine-power-test.js'), T('engine.js'), T('cp-fixtures.js'), T('live-2026-11-28.json')], 6);   // real engine wasm; skips offline
 // real engine wasm, one job per scenario (static 4 h, churn 8 h, reserve 10 h, board 9 h, pool 2 h); skips offline
-for (const [sc, est] of [['static', 10], ['churn', 18], ['reserve', 22], ['board', 20], ['pool', 5]]) add('engine-retail:' + sc, ['bun', T('engine-retail-test.js'), sc], [BUILT, T('engine-retail-test.js'), T('engine.js'), T('cp-fixtures.js'), T('live-2026-11-28.json')], est);
+for (const [sc, est] of [['static', 10], ['churn', 18], ['reserve', 22], ['board', 20], ['pool', 5], ['rival', 10], ['adopt', 20], ['convert', 20]]) add('engine-retail:' + sc, ['bun', T('engine-retail-test.js'), sc], [BUILT, T('engine-retail-test.js'), T('engine.js'), T('cp-fixtures.js'), T('live-2026-11-28.json')], est);
+add('cp-expand', ['bun', T('cp-expand-test.js')], [BUILT, path.join('src', 'cp-expand.js'), T('cp-expand-test.js'), T('cp-fixtures.js'), T('live-board.json'), T('live-2026-11-28.json')], 4);
+add('engine-expand', ['bun', T('engine-expand-test.js')], [BUILT, path.join('src', 'cp-expand.js'), T('engine-expand-test.js'), T('engine.js'), T('cp-fixtures.js'), T('live-2026-11-28.json')], 15);   // real engine wasm; skips offline
 add('retail-alloc', ['bun', T('retail-alloc-test.js')], ['src/core-retail-alloc.js', T('retail-alloc-test.js')], 1);
 add('module-watch', ['bun', T('module-watch-test.js')], [BUILT, T('module-watch-test.js')], 1);
 const argv = process.argv.slice(2);

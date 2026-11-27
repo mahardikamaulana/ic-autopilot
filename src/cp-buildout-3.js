@@ -3,7 +3,7 @@
   const conversionStage = (v) => v.unlocked('Assembly Plant');   // Stage C or D
   const dir = {
     name: 'buildout', order: 40, defaults: DEFAULTS,
-    furnitureSplit, nextBuildStep, alloc: (v, ctx) => allocOf(v, ctx), stepBackStep: (v, ctx) => stepBackStep(v, ctx, engine(v, ctx)), targets: (v, ctx, rule) => targets(v, ctx, rule, engine(v, ctx)), benchHeld: (v, ctx, rule) => { const e = engine(v, ctx); return benchHeld(v, e, targets(v, ctx, rule, e)); }, rebalanceStep: (v, ctx) => rebalanceStep(v, ctx, engine(v, ctx)), waveState: (v, ctx) => waveState(v, ctx, engine(v, ctx)), allocate,
+    furnitureSplit, nextBuildStep, convertStep: (v, ctx, rule, stage) => { const e = engine(v, ctx); return convertStep(v, ctx, e, targets(v, ctx, rule, e), rule, stage, true); }, alloc: (v, ctx) => allocOf(v, ctx), stepBackStep: (v, ctx) => stepBackStep(v, ctx, engine(v, ctx)), targets: (v, ctx, rule) => targets(v, ctx, rule, engine(v, ctx)), benchHeld: (v, ctx, rule) => { const e = engine(v, ctx); return benchHeld(v, e, targets(v, ctx, rule, e)); }, rebalanceStep: (v, ctx) => rebalanceStep(v, ctx, engine(v, ctx)), waveState: (v, ctx) => waveState(v, ctx, engine(v, ctx)), allocate,
     waveStep: (v, ctx, rule, stage) => waveStep(v, ctx, engine(v, ctx), null, rule, stage), wfKeep: (v, ctx) => wfKeep(v, ctx ?? {}),
     waveGate: (v, ctx, rule, stage, n) => waveGate(v, ctx, engine(v, ctx), rule, stage, n),
     buyAction: (v, ctx, s) => buyAction(v, engine(v, ctx), s),
@@ -74,6 +74,11 @@
       const done = (action, extra) => ({ action, readout: { ...readout, ...extra, next: action.text } });
       const t1 = tidy(v, ctx, e, tg);
       if (t1) return done(t1);
+      // a land conversion under way goes first: its freed acres are bought at once (CD Farm takes free acres)
+      const cv0 = convertStep(v, ctx, e, tg, rule, stage, false);
+      if (cv0) readout.convert = cv0.status;
+      if (cv0?.action) return done(cv0.action);
+      if (cv0?.wait) waits.push(cv0.wait);
       const k = kilnStep(v, ctx, e);
       readout.kiln = k.wait ?? k.action?.text;
       if (k.action) return done(k.action);
@@ -95,13 +100,18 @@
       const rb = rebalanceStep(v, ctx, e);
       if (rb?.action) return done(rb.action);
       if (rb?.wait) waits.push(rb.wait);
+      const cv = cv0 ? null : convertStep(v, ctx, e, tg, rule, stage, true);
+      if (cv) readout.convert = cv.status;
+      if (cv?.action) return done(cv.action);
+      if (cv?.wait) waits.push(cv.wait);
       if (conversionStage(v)) {
         const ws = waveStep(v, ctx, e, tg, rule, stage);
         readout.waves = ws.status;
         if (ws.action) return done(ws.action);
         if (ws.wait) waits.push(ws.wait);
       } else readout.waves = 'Stage C: ' + cottonFarms(v, e) + ' cotton Farms to convert';
-      const nb = nextBuildStep(v, { ...ctx, _boEngine: e, _boTargets: tg ?? undefined }, rule, stage);
+      // no buy while a conversion runs: the acres its demolitions free are its own
+      const nb = cv0 ? { wait: 'waits for the land conversion' } : nextBuildStep(v, { ...ctx, _boEngine: e, _boTargets: tg ?? undefined }, rule, stage);
       if (nb.pick) return done(track(v, ctx, nb.b, buyAction(v, e, nb)));
       waits.push('build-out: ' + nb.wait);
       readout.next = waits[waits.length - 1];
@@ -110,6 +120,7 @@
     duties: () => [
       { duty: 'Stage C-D land, engine build-out, Farm conversion', owner: 'Core plan', done: true },
       { duty: 'spare Frame Timber Workshops to furniture, Kiln Glass / Concrete gate, Wooden Frame gate', owner: 'Core plan', done: true },
+      { duty: 'land conversion: confirm the first one (the toast, or corePlan.importCfg({ convertConfirmed: true })); protect groups with cfg.convertProtect', owner: 'you', done: !!cfg.convertConfirmed },
     ],
   };
   cp.addDirector(dir);

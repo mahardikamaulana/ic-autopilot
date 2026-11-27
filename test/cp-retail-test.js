@@ -873,5 +873,28 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
     assert.strictEqual(unit(st), Math.floor(base * 1.6 * 0.95));
   });
 
+  await t('D2 rival mode: a rival at 10,000 and Chair always short (no stock, output below demand): the Chair shelf drops; quality goods first; a shelved good with a little stock stays, an unshelved one waits for 2 h of it', () => {
+    const { cp: c } = F.load(['cp-retail']);
+    const rb = () => { const b = board(); b.ratings = { 0: { 7: 10000 } }; return b; };
+    const items = (st, o = {}) => c._decide(c._view(st, cat, []), F.ctxOf({ retailBoard: rb(), mem: memFn(), ...o })).actions.find((x) => x.director === 'retail')?.steps[0].msg.items;
+    const st = storeSt(), tb = I('Table');
+    st.stock[0][I('Chair')] = 0;
+    st.quality_points = { 0: { [tb]: 50000 * 100 } };   // Table at quality 1
+    assert.deepStrictEqual(items(st), [tb, I('Bookshelf')], 'Chair dropped, Table (quality) first: ' + items(st));
+    // a shelved Chair with a little stock (well under 2 h at its drain) stays; unshelved it is not added
+    st.stock[0][I('Chair')] = 50;
+    assert.strictEqual(items(st), undefined, 'shelf unchanged: Chair kept while it has stock');
+    st.groups[90].assortment = [I('Bookshelf'), tb];
+    assert.strictEqual(items(st), undefined, 'Chair (under 2 h of stock) not added');
+    // nothing stocked: an empty shelf set, not empty shelves scoring -2
+    for (const n of ['Bookshelf', 'Table', 'Chair']) st.stock[0][I(n)] = 0;
+    assert.deepStrictEqual(items(st), []);
+    // off without a rival, or with rivalStockHours 0
+    st.stock[0][I('Chair')] = 0; st.stock[0][I('Bookshelf')] = 50000; st.stock[0][tb] = 50000;
+    assert.strictEqual(items(st, { retailBoard: board() }).length, 3, 'alone: every made good');
+    c.cfg.rivalStockHours = 0;
+    try { assert.strictEqual(items(st).length, 3, 'rivalStockHours 0: off'); } finally { c.cfg.rivalStockHours = 2; }
+  });
+
   done();
 })();

@@ -92,6 +92,14 @@ try {
     return c;
   };
 
+  // Camps and Sawmills that make planksH Planks/h (plan B4): Wood per plank from Saw Planks, Wood per Camp-hour and Planks per Sawmill-hour at
+  // the floors given in rates ({ campWoodH, smPlanksH }, e.g. measured from the live layouts), else at the plan's floors (Camp x3, Sawmill x2).
+  function chainFor(planksH, catalog, rates = {}) {
+    const m = engineModel(catalog), p = Math.max(0, planksH || 0);
+    const campWoodH = rates.campWoodH > 0 ? rates.campWoodH : m.campWoodH, smPlanksH = rates.smPlanksH > 0 ? rates.smPlanksH : m.smPlanksH;
+    return { camps: Math.max(0, Math.ceil(p * m.woodPerPlank / campWoodH - 1e-9)), sawmills: Math.max(0, Math.ceil(p / smPlanksH - 1e-9)) };
+  }
+
   // The engine target and land rule as data. state: acres, acrePrice, camps, sawmills, workshops, fixedAcres, fixedExtra (acres of the Retail Store / Assembly Plant not built yet, default 8), cyclesPerHour, cdBufferAcres.
   function landRule(state, catalog, opts = {}) {
     const m = engineModel(catalog);
@@ -117,7 +125,7 @@ try {
     if (Ecap < Infinity) rule.last = Math.min(rule.last, Math.max(st.acres, Math.ceil(Ecap + fixed + buffer)));   // no acre the capped engine cannot fill
     const acreN = Math.max(rule.last, st.acres);
     const planks = m.planksFor(E);
-    const camps = Math.ceil(planks * m.woodPerPlank / m.campWoodH), saws = Math.ceil(planks / m.smPlanksH);
+    const { camps, sawmills: saws } = chainFor(planks, catalog);
     const ws = MIX.map((s, i) => Math.ceil(planks * s / m.furn[i].planksH));
     const wsTotal = ws.reduce((a, b) => a + b) + 2;   // + Frame Timber, Rivet
     const buildingCost = costTo(41, st.camps, Math.max(st.camps, camps)) + costTo(400, st.sawmills, Math.max(st.sawmills, saws)) + costTo(5000, st.workshops, Math.max(st.workshops, wsTotal));
@@ -135,7 +143,7 @@ try {
     };
   }
 
-  core.coreMath = { TYPES, batchCost, bestBatch, acrePrice, engineModel, landRule };
+  core.coreMath = { TYPES, batchCost, bestBatch, acrePrice, engineModel, landRule, chainFor };
 })();
 } catch (e) { console.error('[IdleCorp] core-math failed to load:', e); }
 // @@END core-math

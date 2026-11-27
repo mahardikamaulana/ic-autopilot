@@ -17,6 +17,9 @@
 //     parked there until the plan has a gap (plan B2);
 //   - Stage C-D: Farms go in 4 waves 3 h apart (UnassignBuildings + DemolishBuilding), only when the last wave's acres are built and running
 //     and no group eats Cotton;
+//   - land conversion (plan R-6, B4, convertStep): with no land to buy and the Workshops short of Planks, a group whose output nothing uses
+//     becomes Camps + Sawmills (payback <= cfg.convertPaybackH; the first one asks: cfg.convertConfirmed);
+//   - Camps / Sawmills at least what the plan's Workshops eat (allocator Planks target at the live floors, plan B4);
 //   - build-out toward core-math landRule: a consumer only when its supplier covers it, each buy gated by acre, kit, wood (R8), bill floor
 //     and the money floor; Stage C-D buys the acre too while the land rule is open, Stage B while (acre + $1,200) / $1,444 <= 20 h (plan D-1).
 //   - Stage B-D: furniture Workshops follow the plan: a recipe 1+ Workshops over / under it for cfg.rebalanceHours moves one (plan D3; the
@@ -66,6 +69,9 @@ try {
     planHoldMin: 30,             // a step back, a park or a pool placement the plan asks for must hold this long first (no churn on a wobbling budget)
     boardSmoothHours: 2,         // the allocator plans from board prices and appetite smoothed over about this many hours (EMA)
     plankEmaHours: 2,            // the Planks model's error is measured from the stock, smoothed over about this many hours (EMA)
+    convertPaybackH: 6,          // land conversion (plan R-6): a group whose output nothing uses becomes Camps + Sawmills only if this pays back within this many hours
+    convertConfirmed: false,     // ... the first conversion waits for your Confirm (toast); after that conversions run on their own
+    convertProtect: [],          // ... group ids or names never converted
   };
 
   // ---- small pure helpers ------------------------------------------------------------------------------------------------------
@@ -227,10 +233,19 @@ try {
       const from = burn ? Math.max(stock, mm.burn ? mm.burnFrom ?? 0 : 0) : null;
       if (m && (burn !== !!mm.burn || from !== (mm.burnFrom ?? null))) m.set({ burn, burnFrom: from });
       const maxUse = Math.max(...FURN.map(([k]) => e.wsPlanksH(e.R[k])));
+      const wsOwned = FURN.reduce((a, [k]) => a + e.furnRun[k], 0) + spare + e.ownPool(e.id.ws), stores = { [REGION]: v.owned('Retail Store') };
       al = ra({ goods, supply: { Planks: supply }, stock: { Planks: burn ? from : 0 }, reserve: { Planks: reserve },
-        workshops: { owned: FURN.reduce((a, [k]) => a + e.furnRun[k], 0) + spare + e.ownPool(e.id.ws), buildable: buildableWs(v, ctx, e, rule) },
-        stores: { [REGION]: v.owned('Retail Store') }, cfg: { stockBurnHours: cfg.stockBurnHours, moveGainPct: cfg.moveGainPct, maxShelves: 4, curSlack: burn ? { Planks: maxUse } : {} } });
-      Object.assign(al, { byKey: Object.fromEntries(FURN.map(([k, n]) => [k, al.alloc[v.idI(n)] ?? 0])), extra: (al.budget.Planks ?? 0) - supply, burn, reserve, net });
+        workshops: { owned: wsOwned, buildable: buildableWs(v, ctx, e, rule) },
+        stores, cfg: { stockBurnHours: cfg.stockBurnHours, moveGainPct: cfg.moveGainPct, maxShelves: 4, curSlack: burn ? { Planks: maxUse } : {} } });
+      // B4: Planks/h the Workshops it counts (owned, pooled, spare Frame Timber; none still to buy) eat with Planks unlimited: the chain
+      // target. With the best $ per Workshop-hour (cents) and that good's Planks per Workshop-hour: the chain's $ per acre-hour (convertStep).
+      const free = ra({ goods, supply: { Planks: (wsOwned + 1) * maxUse * 10 }, workshops: { owned: wsOwned, buildable: 0 }, stores, cfg: { maxShelves: 4, moveGainPct: cfg.moveGainPct } });   // the current mix kept as the allocator keeps it
+      const best = goods.filter((g) => g.floorOk && g.unitsPerWorkshopHour > 0).sort((a, b) => b.unitCents * b.unitsPerWorkshopHour - a.unitCents * a.unitsPerWorkshopHour)[0];
+      Object.assign(al, { byKey: Object.fromEntries(FURN.map(([k, n]) => [k, al.alloc[v.idI(n)] ?? 0])), extra: (al.budget.Planks ?? 0) - supply, burn, reserve, net,
+        planksWant: goods.reduce((a, g) => a + (free.alloc[g.id] ?? 0) * g.unitsPerWorkshopHour * g.planksPerUnit, 0),
+        bestWs: best ? { name: best.name, cents: best.unitCents * best.unitsPerWorkshopHour, planksH: best.unitsPerWorkshopHour * best.planksPerUnit } : null,
+        // $/h the LP plans on what the Sawmills make and the stock budget, plus dPlanks/h (Workshops it counts): the marginal value of more Planks
+        valueAt: (dPlanks) => ra({ goods: goods.map((g) => ({ ...g, current: 0 })), supply: { Planks: (al.budget.Planks ?? supply) + dPlanks }, workshops: { owned: wsOwned, buildable: 0 }, stores, cfg: { maxShelves: 4, moveGainPct: 0 } }).lpDollarsPerHour });
     }
     ctx._boAlloc = { v, al };
     return al;
@@ -267,13 +282,16 @@ try {
     const wsPlanksH = (r) => amt(r.inputs, planksId) * runsH(r, ratePlan(r, 'Workshop'));
     const live = (g) => !g.paused && g.count > 0;
     const ftHeld = new Set(ctx.mem?.('buildout')?.get?.()?.ftMine ?? []);   // Frame Timber the WF gate paused comes back: its planks stay spoken for
-    const planksSupply = sum(groupsOf(id.saw, R.planks).filter(live)) * planksPerSaw;
+    // A group on a Lab process (g.process, see corePlan view) at that process's own inputs, outputs, time and floor.
+    const real = (g) => st.recipes?.[g.process] ?? C.recipes[g.recipe] ?? null;
+    const perG = (gs, f) => gs.filter(live).reduce((a, g) => { const r = real(g); return a + (r ? g.count * f(r) : 0); }, 0);
+    const planksSupply = perG(groupsOf(id.saw, R.planks), (r) => amt(r.outputs, planksId) * runsH(r, rateNow(r)));
     // Each group at the floor it really runs (Make Bench x3, not furniture's x5); one with no floor yet at the floor it will get.
     const runPlanksH = (r) => (layout(r) ? amt(r.inputs, planksId) * runsH(r, rateNow(r)) : wsPlanksH(r));
-    const planksDemand = wsGroups.filter((g) => live(g) || (ftHeld.has(g.id) && g.count > 0)).reduce((a, g) => a + g.count * (C.recipes[g.recipe] ? runPlanksH(C.recipes[g.recipe]) : 0), 0);
-    const planksLive = wsGroups.filter(live).reduce((a, g) => a + g.count * (C.recipes[g.recipe] ? runPlanksH(C.recipes[g.recipe]) : 0), 0);   // eaten now (no gate-held group)
-    const woodSupply = sum(groupsOf(id.camp, R.wood).filter(live)) * woodPerCamp;
-    const woodDemand = sum(groupsOf(id.saw, R.planks).filter(live)) * woodPerSaw;
+    const planksDemand = wsGroups.filter((g) => live(g) || (ftHeld.has(g.id) && g.count > 0)).reduce((a, g) => a + g.count * (real(g) ? runPlanksH(real(g)) : 0), 0);
+    const planksLive = wsGroups.filter(live).reduce((a, g) => a + g.count * (real(g) ? runPlanksH(real(g)) : 0), 0);   // eaten now (no gate-held group)
+    const woodSupply = perG(groupsOf(id.camp, R.wood), (r) => amt(r.outputs, woodId) * runsH(r, rateNow(r)));
+    const woodDemand = perG(groupsOf(id.saw, R.planks), (r) => amt(r.inputs, woodId) * runsH(r, ratePlan(r, 'Sawmill')));
     const kitOf = (b, r) => [...(v.bld(b).build_items ?? []), ...((r && layout(r)?.bom) ?? v.bld(b).default_kit ?? [])];
     // Make Bench is optional (no Bench in the catalog: no Bench Workshop); it runs on the Rivet x3 floor, not v1's x5.
     R.bench = rec('Make Bench');
@@ -285,6 +303,9 @@ try {
       planksSupply, planksDemand, planksLive, woodSupply, woodDemand, kitOf, woodId, planksId,
       camps: v.owned('Lumber Camp'), saws: v.owned('Sawmill'), workshops: v.owned('Workshop'), farms: v.owned('Farm') };
   }
+  // Wood per Camp-hour and Planks per Sawmill-hour at the floor they run (at least the plan's floor): 1,080 and 120 at x3 / x2 (plan B4).
+  const chainRates = (e) => ({ campWoodH: (e.R.wood.outputs[0]?.amount ?? 1) * runsH(e.R.wood, Math.max(e.rateNow(e.R.wood), FLOOR['Lumber Camp'])),
+    smPlanksH: (e.R.planks.outputs[0]?.amount ?? 1) * runsH(e.R.planks, Math.max(e.rateNow(e.R.planks), FLOOR.Sawmill)) });
   const short = (v, list, n = 1) => {   // what is missing from stock for n x list
     const need = {};
     for (const x of list) need[x.item] = (need[x.item] ?? 0) + x.amount * n;
@@ -326,13 +347,24 @@ try {
     const rivet = Math.max(1, e.sum(e.groupsOf(e.id.ws, e.R.rivet)));
     const bench = benchWanted(v, ctx, e) ? Math.max(0, cfg.benchWorkshops) : 0;
     // A wanted Bench eats planks at its Rivet x3 rate on top of the rule's: Camps / Sawmills for them, sized as core-math sizes the rule's (the rule is unchanged).
-    let camps = rule.camps, sawmills = rule.sawmills;
+    let camps = rule.camps, sawmills = rule.sawmills, chain = null;
     if (bench > 0) {
       const m = W.idleCore.coreMath.engineModel(v.C), p = Math.max(0, rule.planksH || 0), q = p + bench * e.benchPlanksH;
       camps += Math.ceil(q * m.woodPerPlank / m.campWoodH) - Math.ceil(p * m.woodPerPlank / m.campWoodH);
       sawmills += Math.ceil(q / m.smPlanksH) - Math.ceil(p / m.smPlanksH);
     }
-    return { split, al, source: al ? 'allocator, ' + al.binding : split.source, furn, ft, rivet, bench, camps, sawmills, workshops: furn.bookshelf + furn.table + furn.chair + ft + rivet + bench };
+    // B4 chain balance: at least the Camps / Sawmills that feed the Workshops the plan has (allocator Planks target + Frame Timber, Rivet and
+    // Bench use) at the live floors; the land rule still grows the engine past that with land.
+    if (al) {
+      // Frame Timber only while it runs: the kept group paused at the Wooden Frame keep line eats nothing (its restart burns stock above the reserve)
+      const ftRun = Math.min(ft, e.sum(e.groupsOf(e.id.ws, e.R.ft).filter((g) => !g.paused)));
+      // less the Planks stock budget while the stock above the reserve is burned: the stock feeds those Workshops for now (no Camp / Sawmill for them)
+      const planksH = Math.max(0, al.planksWant + ftRun * e.wsPlanksH(e.R.ft) + rivet * e.runPlanksH(e.R.rivet) + bench * e.benchPlanksH - (al.burn ? al.extra : 0));
+      const c = W.idleCore.coreMath.chainFor(planksH, v.C, chainRates(e));
+      chain = { planksH, ...c, sawmillsNoStock: al.burn ? W.idleCore.coreMath.chainFor(planksH + al.extra, v.C, chainRates(e)).sawmills : c.sawmills };
+      camps = Math.max(camps, c.camps); sawmills = Math.max(sawmills, c.sawmills);
+    }
+    return { split, al, chain, source: al ? 'allocator, ' + al.binding : split.source, furn, ft, rivet, bench, camps, sawmills, workshops: furn.bookshelf + furn.table + furn.chair + ft + rivet + bench };
   }
   // The furniture recipe the next Workshop should run (largest gap to target), or Frame Timber when furniture is at its cap.
   function nextWorkshopRecipe(e, tg) {

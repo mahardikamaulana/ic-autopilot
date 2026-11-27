@@ -486,6 +486,147 @@
         { msg: { type: 'DemolishBuilding', building: e.id.farm, amount: n, region: REGION }, until: (x) => x.owned('Farm') <= o0 - n }] } };
   }
 
+  // 4b. Land conversion (plan R-6, B4). When the Workshops the plan has want more Planks than the Sawmills make (tg.chain, B4, net of the
+  // Planks stock budget: while the stock above the reserve feeds Workshops, no Sawmill for them) and there is no land to buy (Heartland at its
+  // cap or past the land rule), a group whose output only sells on the market is demolished and its acres rebuilt as Camps + Sawmills.
+  // Candidate: a running Heartland extraction group (a recipe with no inputs: removing a processing group would strand its inputs), not
+  // paused, not in cfg.convertProtect by id or name, not CD Farm's building, not an engine / Farm / store / Lab building, with no
+  // demolition of its building queued, whose output
+  //   - has a positive market bid in Heartland (an output nothing buys, e.g. Inspiration for module Refits, is never free land) and is no
+  //     intangible / global item;
+  //   - is no input of any group's recipe (any region, Lab processes included) or of the plan's own recipes (Kiln gate, furniture, Frame Timber);
+  //   - is no floor piece material, no build item and no kit part (default kit or applied floor) of an unlocked building (the plan buys
+  //     Camps, Sawmills, Workshops and stores) nor a build item of a locked one (prototypes);
+  //   - is not researched or on the Lab runner's list, not an endgame target, not kept back by another module.
+  // Ranked by $ per acre-hour (output x the marginal bid), below the chain's (the allocator's best $ per Workshop-hour over the acres of a
+  // Workshop, its Sawmills and Camps). Size: the acres the chain gap needs (acres of queued demolitions count as coming); the split keeps Wood
+  // >= what the Sawmills eat. Gates before anything is sent: payback (chain buildings + their kits - demolish refund) / (the allocator's $/h
+  // with the new Planks - without them - the group's $/h) <= cfg.convertPaybackH, cash (money floor + bills), kits, the Sawmill wood gate,
+  // saved memory. The first conversion waits for cfg.convertConfirmed (a toast with Confirm, and the readout). Sequence, one message per step
+  // (mem conv): UnassignBuildings + DemolishBuilding (queued: the acres free when the demolitions finish), then at once BuyBuilding the Camps
+  // and the Sawmills (CD Farm takes free acres), then the pool tidy puts them in their groups. Buildings a lost buy did not get are left to
+  // the build-out (its targets still want them). After 1 h a conversion still under way is dropped (the build-out takes over).
+  // start: false only continues a conversion under way.
+  const GLOBAL_ITEMS = ['Inspiration', 'Manufacturing Data', 'Research Data', 'Construction Data', 'Data'];
+  function convertStep(v, ctx, e, tg, rule, stage, start) {
+    const m = ctx.mem?.('buildout'), mm = m?.get?.() ?? {}, cv = mm.conv ?? null;
+    const mf = () => ctx.mem('buildout');   // a fresh handle inside a confirm: never write back a copy read before the send
+    const cb = e.id.camp, sb = e.id.saw, campA = v.bld(cb).acres || 1, sawA = v.bld(sb).acres || 1;
+    const demolishing = (b) => (v.st.construction?.demolitions ?? []).filter((x) => x.building === b && (x.region ?? REGION) === REGION).reduce((a, x) => a + x.count, 0);
+    if (cv) {
+      const name = v.bld(cv.b).name, wantA = cv.camps * campA + cv.saws * sawA;
+      // stuck (CD Farm keeps the Mine demolition queue busy, a lost message): after an hour the build-out takes the freed acres over
+      if ((ctx.now ?? Date.now()) - (cv.at ?? 0) > HOUR) { m.set({ conv: null }); return { status: 'conversion dropped after 1 h (the build-out buys what is missing): ' + cv.text }; }
+      const dq = demolishing(cv.b);
+      if (dq > 0 && v.freeAcres < wantA) return { status: cv.text, wait: 'conversion: ' + dq + ' ' + name + ' demolition(s) left before the chain is bought' };
+      // only the units this conversion put in the pool (pool above what it held before the unassign; unknown: none)
+      const pooled = Math.min(cv.n, Math.max(0, (v.pool[cv.b] ?? 0) - (cv.p0 ?? Infinity)));
+      if (!cv.demolished && pooled > 0) {
+        const p1 = v.pool[cv.b] ?? 0;
+        return { status: cv.text, action: { id: 'bo:convert:demolish:' + cv.b, text: 'conversion: demolish the ' + pooled + ' ' + name + ' it left in the pool', hold: true,
+          steps: [{ msg: { type: 'DemolishBuilding', building: cv.b, amount: pooled, region: REGION }, until: (x) => { const ok = (x.pool[cv.b] ?? 0) <= p1 - pooled; if (ok) { const h = mf(); h.set({ conv: { ...h.get().conv, demolished: true } }); } return ok; } }] } };
+      }
+      const sent = cv.sent ?? {}, steps = [];
+      // both buys share the free acres (a queued build holds its acres): fewer than planned (CD Farm took some) scales both alike
+      const left = (sent[cb] ? 0 : cv.camps * campA) + (sent[sb] ? 0 : cv.saws * sawA), f = left > 0 ? Math.min(1, Math.max(0, v.freeAcres) / left) : 0;
+      for (const [b, n, bn] of [[cb, cv.camps, 'Lumber Camp'], [sb, cv.saws, 'Sawmill']]) {
+        const k = Math.floor(n * f + 1e-9);
+        if (sent[b] || k <= 0) continue;
+        const o0 = v.ownedAll(bn);
+        let marked = false;   // the first look after the send marks it sent: a lost confirm never buys twice (the build-out buys what is missing)
+        steps.push({ msg: { type: 'BuyBuilding', building: b, amount: k, region: REGION }, until: (x) => {
+          const h = mf();
+          if (!marked) { marked = true; const c = h.get().conv; if (c) h.set({ conv: { ...c, sent: { ...(c.sent ?? {}), [b]: true } } }); }
+          const ok = x.ownedAll(bn) >= o0 + k;
+          if (ok) { const pm = { ...(h.get().poolMine ?? {}) }; pm[b] = (pm[b] ?? 0) + k; h.set({ poolMine: pm }); }
+          return ok;
+        } });
+      }
+      if (!steps.length) { m.set({ conv: null, convDone: (mm.convDone ?? 0) + 1 }); return { status: 'conversion done: ' + cv.text }; }
+      return { status: cv.text, action: { id: 'bo:convert:buy:' + cv.b, text: 'conversion: buy ' + steps.map((s) => s.msg.amount + ' ' + v.bld(s.msg.building).name).join(' + ') + ' on the freed acres', hold: true, steps } };
+    }
+    const al = tg?.al;
+    if (!start || !tg?.chain || !al?.bestWs || !al.valueAt || ctx.retailFail) return null;
+    // a Camp / Sawmill group on a Lab process: its rates are in the model, but keep the irreversible step to plain chains
+    if (v.groups.some((g) => (g.building === cb || g.building === sb) && g.process != null)) return { status: 'no conversion: a Camp / Sawmill group runs a Lab process' };
+    const cGap = Math.max(0, tg.chain.camps - e.camps), sGap = Math.max(0, tg.chain.sawmills - e.saws);
+    const coming = W.idleCore.planner.queued({ st: v.st, catalog: v.catalog, region: REGION }).demolishAcres;   // acres queued demolitions will free
+    const free = Math.max(0, v.freeAcres + coming - cfg.bufferAcres), need = cGap * campA + sGap * sawA - free;
+    if (!sGap || need <= 0) return al.burn && al.extra > 0 && tg.chain.sawmillsNoStock > e.saws ? { status: 'no conversion while the Planks stock above the reserve feeds the Workshops (' + Math.round(v.has('Planks')) + ' in stock, burned at +' + Math.round(al.extra) + '/h)' } : null;
+    if (v.acresOwned < Math.min(rule?.lastAcre ?? ACRE_CAP, ACRE_CAP)) return null;   // land can still be bought: the build-out's job
+    if (!(ctx.deals ?? []).length) return { status: 'no conversion: market rows not loaded (an output is only valued by its bid)' };
+    const nb = nextBuildStep(v, { ...ctx, _boEngine: e, _boTargets: tg }, rule, stage);
+    if (nb.pick || nb.saving) return null;
+    // the chain's $ per acre-hour over a Workshop, its Sawmills and its Camps (for the ranking)
+    const rt = chainRates(e), wpp = amt(e.R.planks.inputs, e.woodId) / (e.R.planks.outputs[0]?.amount || 1), bw = al.bestWs;
+    const chainAcreH = bw.cents / ((v.bld(e.id.ws).acres || 2) + bw.planksH / rt.smPlanksH * sawA + bw.planksH * wpp / rt.campWoodH * campA);
+    // items something uses or keeps
+    const used = new Set(), C = v.C;
+    for (const g of Object.values(v.st.groups ?? {})) if (g.count > 0) for (const i of (v.st.recipes?.[g.recipe] ?? C.recipes[g.recipe])?.inputs ?? []) used.add(i.item);
+    for (const r of Object.values(e.R)) for (const i of r?.inputs ?? []) used.add(i.item);   // the plan's own recipes (the Kiln gate switches to Mix Concrete)
+    for (const p of Object.values(v.N.pieces ?? {})) for (const x of p.materials ?? []) used.add(x.item);   // floor pieces (kits, floor upgrades)
+    for (const bd of Object.values(C.buildings)) {
+      for (const x of bd.build_items ?? []) used.add(x.item);   // unlocked: the plan buys them; locked: prototypes
+      if (v.unlocked(bd.name)) for (const x of bd.default_kit ?? []) used.add(x.item);
+    }
+    for (const l of Object.values(v.st.layouts ?? {})) for (const x of l?.bom ?? []) used.add(x.item);
+    for (const x of Object.values(v.st.mfg_research ?? {})) if (x?.product != null) used.add(x.product);
+    for (const x of ctx.mods?.labRunner?.cfg?.list ?? []) used.add(x.product);
+    for (const [n] of cp._cadence?.TARGETS ?? []) used.add(v.idI(n));
+    for (const [i, k] of Object.entries(ctx.reserveItems ?? {})) if (k > 0) used.add(+i);
+    const protect = new Set([].concat(cfg.convertProtect ?? []).map(String)), units = ctx.boFarmUnits ?? {};
+    const skipB = new Set([cb, sb, e.id.ws, e.id.farm, v.idB('Retail Store'), v.idB('Manufacturing Lab')]);
+    const lots = (item) => (ctx.deals ?? []).filter((d) => d.side === 'Sell' && d.item === item && (d.region ?? REGION) === REGION && d.amount > 0).map((d) => ({ price: d.price / d.amount, amount: d.amount }));
+    const cands = [];
+    for (const g of v.groups) {
+      const r = v.st.recipes?.[g.process ?? g.recipe] ?? C.recipes[g.recipe], out = r?.outputs?.[0], it = C.items[out?.item];
+      if (!(g.count > 0) || g.paused || !r || !out || !it || (r.inputs ?? []).length || skipB.has(g.building) || (units[g.building] ?? 0) > 0 || protect.has(String(g.id)) || (g.name && protect.has(g.name))) continue;
+      if ((r.outputs ?? []).some((o) => used.has(o.item)) || it.intangible || GLOBAL_ITEMS.includes(it.name) || W.corePlan.ENGINE_ITEMS.includes(it.name) || demolishing(g.building) > 0) continue;
+      const bid = W.idleCore.planner.itemValues({ catalog: v.catalog, bids: { [out.item]: lots(out.item) }, stock: { [out.item]: v.st.stock?.[REGION]?.[out.item] ?? 0 } })[out.item];
+      if (!(bid > 0)) continue;   // no buyer: not free land, its use is unknown
+      const perH = g.count * out.amount * runsH(r, v.st.layouts?.[g.process ?? g.recipe]?.fx?.rate ?? 1) * bid, acres = g.count * (v.bld(g.building).acres || 1);
+      if (perH / acres < chainAcreH) cands.push({ g, r, item: it.name, perH, acreH: perH / acres });
+    }
+    cands.sort((a, b) => a.acreH - b.acreH);
+    const why = [];
+    const kitCents = (list) => list.reduce((a, x) => a + x.amount * (C.items[x.item]?.base_value ?? 0), 0);
+    for (const c of cands) {
+      const bA = v.bld(c.g.building).acres || 1, n = Math.min(c.g.count, Math.ceil(need / bA - 1e-9)), A = n * bA + free;
+      // Sawmills first, as many as the Wood (now plus the new Camps on the rest of the acres) feeds; Camps for the Wood they need
+      const s = Math.max(0, Math.min(sGap, Math.floor((e.woodSupply - e.woodDemand + A / campA * rt.campWoodH) / (e.woodPerSaw + sawA / campA * rt.campWoodH) + 1e-9)));
+      const k = Math.max(0, Math.min(Math.floor((A - s * sawA) / campA + 1e-9), Math.ceil((e.woodDemand + s * e.woodPerSaw - e.woodSupply) / rt.campWoodH - 1e-9)));
+      if (!s) continue;
+      let cost = k * kitCents(e.kitOf(cb, e.R.wood)) + s * kitCents(e.kitOf(sb, e.R.planks));
+      for (let i = 0; i < k; i++) cost += W.idleCore.planner.price(v.bld(cb).cost, v.ownedAll('Lumber Camp'), i);
+      for (let i = 0; i < s; i++) cost += W.idleCore.planner.price(v.bld(sb).cost, v.ownedAll('Sawmill'), i);
+      // the new Planks at the allocator's marginal value now: its $/h with them less without them (Sawmills + the stock budget: Planks the stock
+      // already covers add nothing yet)
+      const refund = n * Math.floor((v.bld(c.g.building).cost ?? 0) / 2), groupH = c.perH * n / c.g.count;
+      const gain = (al.valueAt(s * rt.smPlanksH) - al.valueAt(0)) * 100 - groupH;
+      const pb = gain > 0 ? (cost - refund) / gain : Infinity;
+      const text = 'Convert ' + n + ' ' + v.bld(c.g.building).name + ' (' + c.item + ', ' + usd(groupH) + '/h) to ' + k + ' Lumber Camps + ' + s + ' Sawmills: +' + usd(Math.max(0, gain)) + '/h, payback ' + (Number.isFinite(pb) ? pb.toFixed(1) : 'never') + ' h';
+      if (pb > cfg.convertPaybackH) { why.push(text + ' > ' + cfg.convertPaybackH + ' h'); continue; }
+      const lack = [...short(v, e.kitOf(cb, e.R.wood), k), ...short(v, [...e.kitOf(sb, e.R.planks), { item: e.woodId, amount: (e.saws + s) * cfg.woodRunsPerSawmill * amt(e.R.planks.inputs, e.woodId) / s }], s)];   // + the R8 wood gate for the Sawmills after the buy
+      if (lack.length) return { status: text, wait: 'conversion waits: kit / wood short: ' + lack.join(', ') };
+      const floor = ctx.floorCents ?? 0, bill = cp._billNeed(v, 0);
+      if (v.money - cost < floor + bill) return { status: text, wait: 'conversion waits: cash ' + usd(v.money) + ' < ' + usd(cost + floor + bill) + ' (chain + money floor + bills)' };
+      if (!ctx.boMemOk || !m) return { status: text, wait: 'conversion: memory not saved (browser storage), no demolition' };
+      if (!cfg.convertConfirmed) {
+        const key = c.g.id + ':' + n + ':' + k + ':' + s, o = mm.convOffer ?? {}, now = ctx.now ?? Date.now();
+        if (ctx.live && (o.key !== key || now - (o.at ?? 0) >= HOUR)) {
+          m.set({ convOffer: { key, at: now } });
+          try { W.idleCore.toast?.(text + ' (Core plan, first conversion)', { kind: 'info', action: { label: 'Confirm', run: () => cp.importCfg({ convertConfirmed: true }) } }); } catch (err) { console.error(err); }
+        }
+        return { status: text + ': waits for your Confirm', wait: 'conversion offer: ' + text + ' -- Confirm on the toast, or corePlan.importCfg({ convertConfirmed: true })' };
+      }
+      const g = c.g, c0 = g.count, p0 = v.pool[g.building] ?? 0, conv = { g: g.id, b: g.building, n, p0, camps: k, saws: s, text, at: ctx.now ?? Date.now() };
+      return { status: text, action: { id: 'bo:convert:' + g.id + ':' + c0, text: 'conversion: ' + text + ': unassign and demolish ' + n + ' ' + v.bld(g.building).name, hold: true,
+        steps: [{ msg: { type: 'UnassignBuildings', group: g.id, amount: n }, until: (x) => { const ok = (groupById(x, g.id)?.count ?? 0) <= c0 - n; if (ok) { const h = mf(); if (!h.get().conv) h.set({ conv }); } return ok; } },
+          { msg: { type: 'DemolishBuilding', building: g.building, amount: n, region: REGION }, until: (x) => { const ok = (x.pool[g.building] ?? 0) <= p0; if (ok) { const h = mf(); h.set({ conv: { ...(h.get().conv ?? conv), demolished: true } }); } return ok; } }] } };
+    }
+    return why.length ? { status: 'no conversion: ' + why.join('; ') } : null;
+  }
+
   // Dollars an engine acre earns an hour (plan D-1): BLOCK_HOURLY at board price 160% and quality 0, scaled by the live board price of the
   // furniture mix, and 0 once the planks made already cover what the shelves sell (appetite x share). BLOCK_HOURLY without a board.
   function blockHourly(ctx, e) {

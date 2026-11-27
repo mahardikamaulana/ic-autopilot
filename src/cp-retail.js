@@ -10,6 +10,8 @@
 //     A shelved good leaves only after cfg.retailShelfDropMin minutes absent, so pauses do not churn the shelf. With the build-out
 //     director's retail allocator (plan B1) the shelves are its planned goods plus the goods still made or kept, planned first, by unit
 //     price (board price x base x the stock's quality factor); then more stores up to its storesNeeded (BuyBuilding + AssignBuildings, plan B5).
+//   - Rival mode (plan R-8, D2): with another corp's store on the board (share < 1), only goods with cfg.rivalStockHours of stock at their
+//     drain go on the shelf, an empty one with output short of demand leaves, quality goods first (the rating is scored per shelf).
 //   - Money gate: floor + store price + bill floor (new MW x $20 + 2 h of bills, plan 8.1); Iron Frames keep cfg.ifReserve back.
 //   - Checkpoint sampler (context): every cfg.retailSampleMin minutes after the shelves are set it records the shelf rows, the rating
 //     and the stock, then judges the four rows of wiki 4.7 (appetite fails only on a fall) plus unsold stock. Sets ctx.retailOk (true / false
@@ -34,7 +36,8 @@ try {
   const RATES = { power: 1000, water: 400, bandwidth: 1500 };   // cents per unit per 10-min bill (same as autoUtil billsOf)
   const Q0 = 0.95;                     // quality factor at quality 0 (wiki retail.md, Price; engine BhehihUq)
   // Quality factor of the Heartland stock: 0.95 + 0.19 q / (q + 10), q = quality_points / units / 100 (wiki formulas.md); Q0 with none.
-  const qf = (st, id) => { const u = st.stock?.[REGION]?.[id] ?? 0, q = u > 0 ? (st.quality_points?.[REGION]?.[id] ?? 0) / u / 100 : 0; return Q0 + 0.19 * q / (q + 10); };
+  const qOf = (st, id) => { const u = st.stock?.[REGION]?.[id] ?? 0; return u > 0 ? (st.quality_points?.[REGION]?.[id] ?? 0) / u / 100 : 0; };
+  const qf = (st, id) => { const q = qOf(st, id); return Q0 + 0.19 * q / (q + 10); };
   const cfg = () => W.corePlan.cfg;
   const usd = (c) => '$' + (c / 100).toLocaleString('en-US', { maximumFractionDigits: 0 });
   const pct = (x) => (x * 100).toFixed(0) + '%';
@@ -117,7 +120,7 @@ try {
     let perTick = 0, runs = 0, blds = 0;
     for (const g of v.groups) {
       if (g.recipe !== recipeId || g.paused || !(g.count > 0)) continue;
-      const w = (g.work ?? []).filter((x) => x.recipe === recipeId);
+      const w = (g.work ?? []).filter((x) => x.recipe === recipeId || (g.process != null && x.recipe === g.process));   // a Lab process counts as its base recipe
       if (w.length) for (const x of w) { perTick += x.runs * amt * (x.outputs_pct ?? 100) / 100 / rc.ticks; runs += x.runs; blds += x.buildings ?? g.count; }
       else perTick += g.count * cfg().retailRunsPerWave * amt / rc.ticks;
     }
@@ -144,7 +147,7 @@ try {
     const plId = v.idI('Planks');
     f.goods = Object.keys(ids).map((n) => {
       const id = ids[n], rid = v.idR(recipeOf[n]), row = rows[id], base = v.C.items[id]?.base_value ?? 0, o = output(v, rid), rc = v.C.recipes[rid];
-      return { name: n, id, rid, appetite: row.appetite, held: row.held, boardPrice: row.price, base, unit: Math.floor(base * row.price / 10000 * qf(v.st, id)),
+      return { name: n, id, rid, appetite: row.appetite, held: row.held, boardPrice: row.price, base, unit: Math.floor(base * row.price / 10000 * qf(v.st, id)), q: qOf(v.st, id),
         stock: v.has(n), outTick: o.perTick, blockH: perBlockH(o), made: o.perTick > 0,
         // a paused or retuning group still counts: it comes back, and the shelf should not churn meanwhile
         assigned: v.groups.some((g) => g.recipe === rid && g.count > 0),
@@ -152,6 +155,8 @@ try {
     });
     f.eligible = (g) => g.made || g.assigned || g.stock > 0;
     f.demandH = (g) => demandH(g, f.share);
+    // rival mode (plan R-8, D2): another corp's store is on the board, so empty shelves cost rating, and rating is share
+    f.rival = !!storeGroup && f.share < 1 && c.rivalStockHours > 0;
     // Planks per hour the best four plank goods sell: the land rule sizes the engine to it (corePlan decide). Before a store sells, at the
     // share the target rating (cfg.retailRating) will give, not today's rating of 0.
     const dShare = f.storeGroup ? f.share : shareOf(ctx.retailBoard, Math.max(f.rating ?? 0, c.retailRating ?? 0), v.st.ssi?.corp_id);
@@ -169,7 +174,14 @@ try {
     const drain = demandH(g, share) - g.outTick * TICKS_H;
     return drain > 0 ? g.stock / drain : Infinity;
   }
-  const pickOrder = (gs) => [...gs].sort((a, b) => b.appetite * b.unit - a.appetite * a.unit).slice(0, 4);
+  // qFirst (rival mode): goods with quality > 0 first, they score +2 a sale instead of +1
+  const qRank = (a, b) => (b.q >= 0.01) - (a.q >= 0.01);
+  const pickOrder = (gs, qFirst = false) => [...gs].sort((a, b) => (qFirst && qRank(a, b)) || b.appetite * b.unit - a.appetite * a.unit).slice(0, 4);
+  // Rival mode (plan R-8, D2): the rating is scored per shelf each tick: +1 for a shelf that sold (+2 at quality >= 0.01), -2 for a shelf
+  // with a customer due but no stock or no power (wiki retail.md). So a good goes on the shelf only with cfg.rivalStockHours of stock at
+  // its drain (demand at today's share less output; any stock when output keeps up), and leaves once it is empty with output short of
+  // demand (it cannot stay stocked); in between it stays, so an output-limited good fills off the shelf and sells down on it, no churn.
+  const rivalOk = (f, g, shelf) => (shelf.includes(g.id) ? !(g.stock < 1 && shelfHours(g, f.share) < Infinity) : shelfHours(g, f.share) >= cfg().rivalStockHours);
   // 1 h of what will sell: sales stop at output once output is below demand, so stock past an hour of output adds nothing.
   // Only made goods: a held-only good cannot grow, it just sells out.
   function needOf(f, c) {
@@ -188,8 +200,8 @@ try {
       return now - absent[g.id] < c.retailShelfDropMin * 60000;
     });
     if (changed) m.set({ absentSince: absent });
-    f.keep = keep;
-    f.chosen = pickOrder(keep);
+    f.keep = f.rival ? keep.filter((g) => rivalOk(f, g, shelf)) : keep;
+    f.chosen = pickOrder(f.keep, f.rival);
     needOf(f, c);
   }
   // What the next bill is now, every subscription together (cents).
@@ -257,7 +269,7 @@ try {
     }
     out.push({ id: 'price', ok: bad || !pName ? null : true, why: bad ? 'a shelf row has no board price' : 'live board: ' + (pName || '-') + (pw > 0 ? ', board moved up to ' + pct(pw) + ' during the run' : '') });
     // 4. rating >= target within cfg.retailRatingMin minutes of the shelves being set, checked only while a rival store is on the board.
-    // The rating is scored per shelf (+1 per shelf that sold, -2 per shelf with a customer but no stock; wiki retail.md), so an
+    // The rating is scored per shelf (+1 per shelf that sold, +2 at quality >= 0.01, -2 per shelf with a customer due but no stock or power; wiki retail.md), so an
     // output-limited store sits near 0; alone, share is 100% at any rating, so the rating is no test of the store.
     const rival = samples.some((s) => num(s.share) && s.share < 1);
     const rated = samples.filter((s) => num(s.r));
@@ -437,6 +449,7 @@ try {
     const s = f.sampler ?? {}, d = s.mem?.decision, p = s.mem?.prevDecision;
     return {
       board: f.badBoard ? 'BAD: ' + f.badBoard : 'ok', share: f.share, rating: f.rating,
+      rival: f.rival ? 'a rival store is on the board: shelves only goods with ' + cfg().rivalStockHours + ' h of stock at their drain, quality goods first' : null,
       shelf: (f.chosen ?? []).map((g) => g.name + ' appetite ' + g.appetite + '/2min, ' + usd(g.unit) + ', stock ' + Math.floor(g.stock) + (g.made ? ', ' + (g.outTick * TICKS_H).toFixed(1) + '/h made' : '')),
       samples: s.n ?? 0, shelvedAt: s.mem?.shelvedAt ?? null,
       rows: (s.rows ?? []).map((r) => r.id + ' ' + (r.ok === null ? '?' : r.ok ? 'pass' : 'FAIL') + ': ' + r.why),
@@ -494,10 +507,13 @@ try {
   }
   // Shelves from the retail allocator (plan B1): its goods (planned Workshops, or stock) and the goods still made or kept on the shelf, up to 4,
   // planned goods first, then by unit price. Order only matters when store capacity binds; the shelf set is what is sent.
+  // Rival mode: only goods that pass rivalOk, quality goods first (also in the shelf order).
   function allocPick(f, al) {
     const planned = (g) => (al.alloc[g.id] ?? 0) > 0 || al.shelves.includes(g.id);
-    const byUnit = (a, b) => b.unit - a.unit;
-    return [...new Set([...f.goods.filter(planned), ...(f.keep ?? f.goods.filter(f.eligible))])].sort((a, b) => planned(b) - planned(a) || byUnit(a, b)).slice(0, 4).sort(byUnit);
+    const shelf = f.storeGroup?.assortment ?? [];
+    const byUnit = (a, b) => (f.rival && qRank(a, b)) || b.unit - a.unit;
+    return [...new Set([...f.goods.filter(planned), ...(f.keep ?? f.goods.filter(f.eligible))])].filter((g) => !f.rival || rivalOk(f, g, shelf))
+      .sort((a, b) => (f.rival && qRank(a, b)) || planned(b) - planned(a) || byUnit(a, b)).slice(0, 4).sort(byUnit);
   }
   // One more store (wiki 4.7, plan B5): its build items (Iron Frames for the prototypes kept back until Stage D; this build's own are not),
   // its acres, and cash for the money floor + its price + the bill floor (plan 8.1). { wait } or { cost }.
@@ -528,7 +544,8 @@ try {
     if (f.badBoard) return { wait: 'RETAIL BOARD SHAPE CHANGED: ' + f.badBoard + '; not building or shelving until it is checked', readout };
     if (f.share == null) return { wait: 'RETAIL BOARD: unknown "ratings" shape, share not computed; not acting', readout };
     if (!f.unlocked && !f.storeGroup && !f.pooled && !f.emptyGroup) return { wait: 'Retail Store not unlocked', readout };
-    if (!f.chosen.length) return { wait: 'no shelf good: the Corporation makes or holds none of ' + f.names.join(', '), readout };
+    // rival mode with nothing stocked: an empty shelf set (the engine takes it), so no shelf scores -2 while stock builds up
+    if (!f.chosen.length && !(f.rival && f.storeGroup)) return { wait: 'no shelf good: the Corporation makes or holds none of ' + f.names.join(', '), readout };
     const want = f.chosen.map((g) => g.id);
     const storeB = f.storeB, p0 = f.pooled;
     if (!f.storeGroup && f.emptyGroup) {
@@ -552,7 +569,7 @@ try {
     }
     const g = f.storeGroup, have = g.assortment ?? [];
     if (!sameSet(have, want)) {
-      return { action: { id: 'retail:shelf:' + want.join(','), text: 'shelves: ' + f.chosen.map((x) => x.name).join(', '),
+      return { action: { id: 'retail:shelf:' + want.join(','), text: 'shelves: ' + (f.chosen.map((x) => x.name).join(', ') || 'none') + (f.rival ? ' (rival mode: only goods that stay stocked)' : ''),
         steps: [{ msg: { type: 'SetAssortment', group: g.id, items: want }, until: (x) => sameSet(x.groups.find((y) => y.id === g.id)?.assortment ?? [], want) }] }, readout };
     }
     const d = f.capDecision;   // a re-run keeps cutting to the earlier fail's cap until it decides
@@ -596,6 +613,7 @@ try {
       retailShelfDropMin: 60,      // minutes a shelved good may be unmade and out of stock before it leaves the shelf
       retailGoneMin: 10,           // minutes with no store owned before the checkpoint starts over
       retailRunsPerWave: 5,        // runs per wave per Workshop when no group runs a recipe yet (wiki 2.1)
+      rivalStockHours: 2,          // rival on the board (plan R-8): a good goes on the shelf only with this many hours of stock at its drain (0: off)
     },
     context, decide,
     duties: () => [{ duty: 'Retail Store, shelves and the retail checkpoint (wiki 4.7)', owner: 'Core plan', done: true }],
