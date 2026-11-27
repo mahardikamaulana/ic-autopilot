@@ -146,10 +146,17 @@
     const rivetH = e.sum(e.groupsOf(e.id.ws, e.R.rivet).filter((g) => !g.paused)) * runsH(e.R.rivet, e.rateNow(e.R.rivet)) * amt(e.R.rivet.inputs, v.idI('Wooden Frame'));
     return Math.min(cfg.ftKeepMax, Math.ceil(rivetH * cfg.ftKeepHours) + cp._ifNeed(v, null, 'Wooden Frame'));
   }
+  // Frames need no more Frame Timber: at or above the keep line, or while the gate holds one of its groups paused (until below half).
+  // Then the switch targets the best $ per Workshop-hour and the board rebalance stands down (plan A2).
+  function valueMode(v, ctx, e) {
+    const wk = wfKeep(v, ctx, e), mine = new Set(ctx.mem?.('buildout')?.get?.()?.ftMine ?? []);
+    return (wk > 0 && v.has('Wooden Frame') >= wk) || v.groups.some((g) => mine.has(g.id) && g.paused && g.recipe === e.R.ft.id && g.count > 0);
+  }
   // 2b. Wooden Frame gate: pause Frame Timber at or above the keep line, resume below half of it (planks above the line are worth more as
-  // furniture, wiki 11.4). Kiln-gate bookkeeping: only groups paused here come back (mem ftMine), one the user resumed is left alone
-  // (ftUser, from context()). On the retail fail path after a pass CD Farm burns the frames above the line: nothing is paused, ours come
-  // back. That holds only while the ladder has a CD need (ctx.ladderNeed) and CD Farm runs Auto; otherwise the gate bounds the frames.
+  // furniture, wiki 11.4). It pauses at most cfg.keepFrameTimber Workshops (plan A2): Frame Timber above that goes to furniture through the
+  // switch. Only when the switch has been blocked (planks, kit, floor, cap, power) for cfg.ftBlockedMin minutes (mem ftBlockedSince) does
+  // it pause the extra too; the switch moves them later. Kiln-gate bookkeeping: only groups paused here come back (mem ftMine), one the
+  // user resumed is left alone (ftUser, from context()); a paused group moved off Frame Timber is resumed at once.
   function ftStep(v, ctx, e) {
     const keep = wfKeep(v, ctx, e), wf = v.has('Wooden Frame');
     const km = ctx.mem?.('buildout')?.get?.() ?? {};
@@ -163,20 +170,20 @@
     const line = 'Wooden Frame ' + Math.floor(wf) + ', keep line ' + keep;
     const paused = v.groups.filter((g) => mine.has(g.id) && g.paused && g.count > 0);
     // a paused group the switch or the retail fail path moved off Frame Timber comes back at once
-    const cf = ctx.mods?.cdFarm?.cfg;   // CD Farm farms (the ladder's Oil Rig / Refinery need) only after a pass, with Auto on
-    const burn = !!(ctx.retailFailPath && ctx.retailOk === true && ctx.ladderNeed && typeof ctx.ladderNeed === 'object' && cf?.building === 'auto' && cf.autoStart);
-    const back = paused.find((g) => g.recipe !== e.R.ft.id) ?? (burn || wf < keep / 2 ? paused[0] : null);
+    const back = paused.find((g) => g.recipe !== e.R.ft.id) ?? (wf < keep / 2 ? paused[0] : null);
     if (back) {
       const mw = (v.bld(back.building).draws?.power ?? 0) * back.count, bill = cp._billNeed(v, mw), floor = ctx.floorCents ?? 0;
       if (v.money < floor + bill) return { wait: 'WF gate: resume group ' + back.id + ' waits: cash ' + usd(v.money) + ' < ' + usd(floor + bill) + ' (money floor + ' + mw + ' MW bills)' };
       return { action: confirmed(pauseAction(v, back, false, 'Wooden Frame gate (' + line + ')'), note(back.id, false)) };
     }
-    if (burn) return { wait: line + ' (retail fail path after a pass: CD Farm burns the frames above it)' };
     if (!(keep > 0) || wf < keep) return { wait: line };
     if (!ctx.boMemOk) return { wait: line + ': Frame Timber not paused, browser storage does not save (a pause it forgets would starve Rivet)' };
-    const g = e.groupsOf(e.id.ws, e.R.ft).find((x) => !x.paused && x.count > 0 && !user.has(x.id));
-    if (!g) return { wait: line };
-    return { action: confirmed(pauseAction(v, g, true, 'Wooden Frame gate (' + line + ')'), note(g.id, true)) };
+    const since = km.ftBlockedSince, blocked = since != null && (ctx.now ?? Date.now()) - since >= cfg.ftBlockedMin * 60000;
+    const room = blocked ? Infinity : cfg.keepFrameTimber - e.sum(paused.filter((x) => x.recipe === e.R.ft.id));
+    const run = e.groupsOf(e.id.ws, e.R.ft).filter((x) => !x.paused && x.count > 0 && !user.has(x.id));
+    const g = run.find((x) => x.count <= room);
+    if (!g) return { wait: line + (run.length ? ' (Frame Timber above the ' + cfg.keepFrameTimber + ' kept goes to furniture, not paused)' : '') };
+    return { action: confirmed(pauseAction(v, g, true, 'Wooden Frame gate (' + line + ')' + (blocked && g.count > cfg.keepFrameTimber ? ': the switch has been blocked ' + cfg.ftBlockedMin + ' min' : '')), note(g.id, true)) };
   }
 
   // 3. Spare Frame Timber Workshops to furniture (Stage B on), keeping cfg.keepFrameTimber (and the Rivet group, never touched).
@@ -220,18 +227,44 @@
     return { wait: [...new Set(waits)].join('; ') };   // the shared retry wait is the same for every floor
   }
 
+  // MW a move may add now: the free power after every load (store included, contracts counted) plus what Auto utilities can raise now
+  // (0 while it is off, broke or backing off). Infinity without Auto utilities loaded (no power model to ask).
+  function powerRoom(v, ctx) {
+    const au = ctx.mods?.autoUtil;
+    if (!au?._measure) return Infinity;
+    const m = au._measure('power', REGION, v.st, v.catalog, ctx.tick ?? 0, ctx.contracts ?? []);
+    return Math.max(0, m.free ?? 0) + (au.raiseRoom?.('power', REGION, v.st, ctx.now) ?? 0);
+  }
+  // Frame Timber groups this director may move, biggest first: not one the user paused, nor one the user resumed after the WF gate paused it.
+  function movableFt(ctx, e) {
+    const km = ctx.mem?.('buildout')?.get?.() ?? {}, mine = new Set(km.ftMine ?? []), user = new Set(km.ftUser ?? []);
+    return e.groupsOf(e.id.ws, e.R.ft).filter((g) => g.count > 0 && (!g.paused || mine.has(g.id)) && !user.has(g.id)).sort((a, b) => b.count - a.count);
+  }
+  // mem ftBlockedSince: when the switch first waited with Frame Timber above the kept Workshops while frames are not needed (ftStep pauses
+  // the extra after cfg.ftBlockedMin); cleared once the switch moves or has nothing to move.
+  function noteBlocked(v, ctx, e, sw) {
+    const m = ctx.mem?.('buildout');
+    if (!m) return;
+    const blocked = !sw?.action && !!sw?.wait && valueMode(v, ctx, e), since = m.get().ftBlockedSince ?? null;
+    if (blocked && since == null) m.set({ ftBlockedSince: ctx.now ?? Date.now() });
+    else if (!blocked && since != null) m.set({ ftBlockedSince: null });
+  }
   function switchStep(v, ctx, e, tg) {
     // Keep only the reserve here: the retail cap already limits n, and extra Frame Timber for leftover planks is the purchase path's job.
     const keep = cfg.keepFrameTimber;
-    const spare = e.ftNow - keep;
+    const fts = movableFt(ctx, e);
+    const spare = e.sum(fts) - keep;
     if (spare <= 0) return null;
     const split = tg?.split ?? furnitureSplit(ctx.retailBoard, 0, v.C);
     const furnTotal = FURN.reduce((a, [k]) => a + e.furnNow[k], 0);
     const cap = typeof ctx.retailCap === 'number' ? Math.max(0, Math.floor(ctx.retailCap)) : Infinity;
     const n = Math.min(furnTotal + spare, cap);
     if (n <= furnTotal) return { wait: 'switch: furniture at the retail cap (' + cap + '), spare Frame Timber stays' };
-    const want = failKeep(ctx, split.alloc(n));   // a measured fail: never above the per-good keep the fail path cuts to
-    const gaps = FURN.map(([k]) => ({ k, gap: want[k] - e.furnNow[k] })).filter((x) => x.gap > 0).sort((a, b) => b.gap - a.gap);
+    // Target: the board split; while Wooden Frames are at the keep line (the WF gate would idle them, plan A2) the good with the best $ per
+    // Workshop-hour that has a floor (the first that fits below). A measured fail: never above the per-good keep the fail path cuts to.
+    const val = valueMode(v, ctx, e) ? furnValue(v, ctx, e) : null;
+    const want = failKeep(ctx, val ? Object.fromEntries(FURN.map(([k]) => [k, Infinity])) : split.alloc(n));
+    const gaps = FURN.map(([k]) => ({ k, gap: Math.min(want[k] - e.furnNow[k], n - furnTotal) })).filter((x) => x.gap > 0).sort((a, b) => (val ? val[b.k] - val[a.k] : 0) || b.gap - a.gap);
     if (!gaps.length) return null;
     // Planks cap: a switch may not push plank use past what the Sawmills make (a Bookshelf eats more than Frame Timber).
     const headroom = e.planksSupply - e.planksDemand, ftUse = e.wsPlanksH(e.R.ft);
@@ -243,26 +276,34 @@
     if (!pickGap) return { wait: 'switch: planks ' + Math.round(e.planksSupply) + '/h made, ' + Math.round(e.planksDemand) + '/h used: more Sawmills before more furniture' };
     const { k } = pickGap, r = e.R[k], gap = Math.min(pickGap.gap, fits(k));
     const room = Math.min(gap, spare);
-    const fts = e.groupsOf(e.id.ws, e.R.ft).filter((g) => g.count > 0).sort((a, b) => b.count - a.count);
     const whole = fts.filter((g) => g.count <= room).sort((a, b) => b.count - a.count)[0];
     const kit = (cnt) => short(v, e.kitOf(e.id.ws, r).filter((x) => !(v.bld(e.id.ws).build_items ?? []).includes(x)), cnt);
     if (whole) {
       const lack = kit(whole.count);
       if (lack.length) return { wait: 'switch: kit short for ' + whole.count + ' x ' + r.name + ': ' + lack.join(', ') };
-      return { action: recipeAction(v, whole, r, 'switch spare Frame Timber to furniture (' + split.source + ')') };
+      return { action: recipeAction(v, whole, r, 'switch spare Frame Timber to furniture (' + (val ? 'best $ per Workshop-hour' : split.source) + ')') };
     }
-    const g = fts[0];
-    const take = Math.min(room, g.count - (fts.length === 1 ? keep : 0));
+    const g = fts[0], home = homeGroup(e, e.id.ws, r);
+    let take = Math.min(room, g.count - (fts.length === 1 ? keep : 0));
     if (take <= 0) return null;
+    // Power (fix 6): the engine draws by building count for a group with work rows, so moving Workshops from a group that draws nothing
+    // into one that runs adds their draw at once, and the store, powered last, goes dark. Move only what the free power (plus what
+    // Auto utilities can raise now) carries. A whole group's recipe change or a new group starts only once the engine has the power.
+    const perB = v.bld(e.id.ws).draws?.power ?? 0, adds = perB > 0 && home?.work?.length > 0 && !(g.work?.length > 0);
+    if (adds) {
+      const pw = powerRoom(v, ctx);
+      take = Math.min(take, Math.floor(pw / perB + 1e-9));
+      if (take <= 0) return { wait: 'switch: waits for power (' + Math.max(0, Math.floor(pw)) + ' MW free for ' + perB + ' MW a Workshop)' };
+    }
     const lack = kit(take);
     if (lack.length) return { wait: 'switch: kit short for ' + take + ' x ' + r.name + ': ' + lack.join(', ') };
     const c0 = g.count;
     // One action: free the Workshops and put them straight on r, so the pool tidy never has to guess the recipe the switch chose.
-    const home = homeGroup(e, e.id.ws, r), ids = new Set(v.groups.map((x) => x.id));
+    const ids = new Set(v.groups.map((x) => x.id));
     const place = home
       ? { msg: { type: 'AssignBuildings', group: home.id, amount: take }, until: ((h0) => (x) => (groupById(x, home.id)?.count ?? 0) >= h0 + take)(home.count) }
       : { msg: { type: 'CreateGroup', building: e.id.ws, amount: take, name: r.name, region: REGION }, until: (x) => x.groups.some((y) => !ids.has(y.id) && y.building === e.id.ws && y.count >= take) };
-    return { action: track(v, ctx, e.id.ws, { id: 'bo:split:' + g.id, text: 'switch spare Frame Timber to furniture (' + split.source + '): move ' + take + ' Workshop(s) from group ' + g.id + ' to ' + r.name + (home ? ' (group ' + home.id + ')' : ' (new group)'),
+    return { action: track(v, ctx, e.id.ws, { id: 'bo:split:' + g.id, text: 'switch spare Frame Timber to furniture (' + (val ? 'best $ per Workshop-hour' : split.source) + '): move ' + take + ' Workshop(s) from group ' + g.id + ' to ' + r.name + (home ? ' (group ' + home.id + ')' : ' (new group)'),
       steps: [{ msg: { type: 'UnassignBuildings', group: g.id, amount: take }, until: (x) => (groupById(x, g.id)?.count ?? 0) <= c0 - take }, place] }) };
   }
 
@@ -279,7 +320,8 @@
   // UnassignBuildings 1 from the over group with the fewest modules, then into the under recipe's group. The under recipe needs its floor,
   // its kit and the plank headroom for the swap. Never on the retail fail path: its per-good caps rule then.
   function rebalanceStep(v, ctx, e) {
-    const gaps = ctx.retailFail ? null : furnGaps(v, ctx, e);
+    // not on the fail path (its per-good caps rule), nor while the switch targets the best $ per Workshop-hour (it would undo it)
+    const gaps = ctx.retailFail || valueMode(v, ctx, e) ? null : furnGaps(v, ctx, e);
     if (!gaps) return null;
     const keys = FURN.map(([k]) => k).filter((k) => gaps[k]);
     if (!keys.some((k) => gaps[k] > 0) || !keys.some((k) => gaps[k] < 0)) return null;
@@ -357,7 +399,6 @@
     if (!w.farms) return { status: 'conversion done (0 cotton Farms)' };
     if (w.wave >= w.waves) return { status, wait: 'conversion: all ' + w.waves + ' waves done, ' + w.farms + ' Farms left' };
     if (ctx.retailOk === false) return { status, wait: 'retail checkpoint failed: remaining Farms stay on Cotton' };   // plan A2: any fail, measured or not; the capped engine needs no more acres
-    if (ctx.retailFail) return { status, wait: 'retail fail path: Farms stay on Cotton' };   // a pass of the re-run proves only the capped output sells
     const cot = v.idI('Cotton'), eater = v.groups.find((g) => g.count > 0 && (v.C.recipes[g.recipe]?.inputs ?? []).some((i) => i.item === cot));
     if (eater) return { status, wait: 'conversion: group ' + eater.id + ' (' + (eater.name ?? v.C.recipes[eater.recipe].name) + ') eats Cotton: Farms stay' };   // the plan sells Cotton; a group outside it needs the Farms
     if (ctx.boCdBusy) return { status, wait: 'conversion: CD Farm is running' };
@@ -407,7 +448,7 @@
       if (why) { held.push(label + ': ' + why); if (why.startsWith('planks ')) { planksHolds++; planksNeed = Math.max(planksNeed, e.planksDemand + e.benchPlanksH); } }
       else pick = { bn: 'Workshop', r: e.R.bench, label };
     }
-    if (!pick && nx && e.ftNow > tg.ft) held.push('Workshop: switch the spare Frame Timber Workshops first');
+    if (!pick && nx && e.sum(movableFt(ctx, e)) > tg.ft) held.push('Workshop: switch the spare Frame Timber Workshops first');
     else if (!pick && nx) {
       const extra = e.wsPlanksH(nx.r);
       const covered = e.planksSupply >= e.planksDemand + extra;

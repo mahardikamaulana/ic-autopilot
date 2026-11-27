@@ -9,9 +9,11 @@
 //   autoUtil.cfg                                                 // timings; autoUtil.conf: spare per utility, hold minutes
 //
 // What it follows (the game's own page shows the same numbers, except that bought contracts count their capacity less any shortfall; autoUtil._measure is the pure version, used by the tests):
-//   need = load (running groups' building draw + recipe draw) + power sold on contracts (the promised amount) + lines out + what stalled
-//          groups wait for - self-generated (generators, at the day/night rate) - storage that can discharge (at most stored / ticks to
-//          the bill it pays for) - bought on contracts - lines in (transmission lines, power)
+//   need = load (running groups' building draw + recipe draw, plus every unpaused baseload building such as a Retail Store) + power sold
+//          on contracts (the promised amount) + lines out + what stalled groups wait for - self-generated (generators, at the day/night
+//          rate) - storage that can discharge (at most stored / ticks to the bill it pays for) - bought on contracts (one ending within
+//          conf.contractLeadMin, default 30 min, counts as gone) - lines in (transmission lines, power).
+//          The engine powers a Retail Store last: it sells only while the supply left after the groups covers its 2 MW, so it is in the load.
 //   The subscription is set to ceil(need) plus the spare you set (default 0), at most 200 MW / 500 kL, one region at a time.
 // Money rules, from how the game bills (power $10 per MW, water $4 per kL, every 10 minutes):
 //   - raising charges the extra level for the current period up front; lowering refunds nothing. So a raise is made at once (one that
@@ -62,14 +64,15 @@ try {
     const INTANGIBLE = new Set([0, 24, 25, 26, 106, 107, 108, 109, 110, 111]);   // items held in st.items, not in stock
     const MAX_FAILS = 3;
     const cfg = { cycleMs: 2000, confirmMs: 10000, backoffMs: 5000, lowerWindowTicks: 120, raiseHoldTicks: 60 };   // timings; the tests shorten them. raiseHoldTicks: a raise only stalled groups need waits for the bill this close to it
-    const conf = { power: { on: false, spare: 0 }, water: { on: false, spare: 0 }, holdMin: 10 };
+    // contractLeadMin: a bought contract this close to its end counts as gone
+    const conf = { power: { on: false, spare: 0 }, water: { on: false, spare: 0 }, holdMin: 10, contractLeadMin: 30 };
     const REGION_NAMES = ['Heartland', 'Industrial Basin', 'Coastal Cities', 'Frontier'];
     const regionName = (r) => REGION_NAMES[r] ?? 'Region ' + r;
     const usd = (c) => '$' + (c / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     const toInt = (v, lo, hi, dflt) => { const n = Math.round(Number(v)); return Number.isFinite(n) && n >= lo && n <= hi ? n : dflt; };
 
     // ---- saved switches ------------------------------------------------------------------------------------------------
-    const persistable = () => ({ power: { ...conf.power }, water: { ...conf.water }, holdMin: conf.holdMin });
+    const persistable = () => ({ power: { ...conf.power }, water: { ...conf.water }, holdMin: conf.holdMin, contractLeadMin: conf.contractLeadMin });
     function apply(o) {
       const applied = [], skipped = [];
       if (!o || typeof o !== 'object') return { applied, skipped: ['not an object'] };
@@ -81,6 +84,7 @@ try {
         if ('spare' in x) { const n = toInt(x.spare, 0, UTILS[u].max, null); if (n == null) skipped.push(u + '.spare'); else { conf[u].spare = n; applied.push(u + '.spare'); } }
       }
       if ('holdMin' in o) { const n = toInt(o.holdMin, 1, 120, null); if (n == null) skipped.push('holdMin'); else { conf.holdMin = n; applied.push('holdMin'); } }
+      if ('contractLeadMin' in o) { const n = toInt(o.contractLeadMin, 0, 1440, null); if (n == null) skipped.push('contractLeadMin'); else { conf.contractLeadMin = n; applied.push('contractLeadMin'); } }
       return { applied, skipped };
     }
     function save() { try { store?.setItem(KEY, JSON.stringify(persistable())); } catch { } }
@@ -116,10 +120,13 @@ try {
       const have = st.subscriptions?.[R]?.[util] ?? 0;
       const groups = Object.values(st.groups ?? {}).filter((g) => (g.region ?? 0) === region);
       const stockOf = (item) => (INTANGIBLE.has(item) ? (st.items?.[item] ?? 0) : (st.stock?.[R]?.[item] ?? 0));
-      let load = 0, gen = 0;
+      let load = 0, gen = 0, base = 0;
       for (const g of groups) {
-        const work = g.work ?? [];
-        if (work.length) load += (ix.b.get(g.building)?.draws?.[util] ?? 0) * g.count;
+        const work = g.work ?? [], bd = ix.b.get(g.building), draw = (bd?.draws?.[util] ?? 0) * g.count;
+        // A baseload building (Retail Store: no work rows, no machines) draws whenever its group is unpaused; short of it, no store in
+        // the region sells (plan A3).
+        if (bd?.baseload && !g.paused) { load += draw; base += draw; }
+        else if (work.length) load += draw;
         for (const w of work) {
           const rc = ix.r.get(w.recipe);
           if (!rc) continue;
@@ -148,21 +155,26 @@ try {
       const lineOut = lines.filter((f) => f.from === region && f.delivered > 0).reduce((a, f) => a + (Number(f.sent) || 0), 0);
       const corp = st.ssi?.corp_id;
       // What is bought counts its capacity less any shortfall (core.bought); what is promised to others is owed, whatever has got through.
-      const imported = core.bought(util, region, st, contracts);
+      // A contract ending within conf.contractLeadMin counts as gone, so the grid is up before it ends; `ending` is that share
+      // (not urgent: it may wait for the bill).
+      const importedNow = core.bought(util, region, st, contracts);
+      const imported = tick > 0 ? core.bought(util, region, st, contracts, tick + conf.contractLeadMin * 120) : importedNow;
       const sold = (contracts ?? []).filter((c) => c.utility === util && c.region === region && c.state === 'Active' && c.seller === corp).reduce((a, c) => a + (c.amount ?? 0), 0);
-      // A group that could start but whose draw is more than the free capacity is stalled; it starts once that much more is free.
+      // A group that could start but whose draw is more than the free capacity is stalled; the engine starts it once free >= its draw.
       // A group with no machines yet (equipped 0) cannot start whatever the power: the game calls it "unequipped", not stalled.
+      // Baseload groups are in the load already: the store gets power last, so it sells only while what is left covers it.
       const free = Math.max(0, have + gen + discharge + imported + lineIn - load - sold - lineOut);
       let waiting = 0;
       for (const g of groups) {
-        if (g.paused || g.equipped === 0 || (g.work ?? []).length) continue;
+        if (g.paused || g.equipped === 0 || (g.work ?? []).length || ix.b.get(g.building)?.baseload) continue;
         const draw = (ix.b.get(g.building)?.draws?.[util] ?? 0) * g.count;
         if (!(draw > 0) || draw <= free) continue;
         const rc = (g.recipe != null && (st.recipes?.[String(g.recipe)] ?? ix.r.get(g.recipe))) || null;
         if (!rc || !(rc.inputs ?? []).every((i) => stockOf(i.item) >= i.amount)) continue;
         waiting += draw;
       }
-      return { util, region, have, load, sold, gen, discharge, charge, mode, imported, lineIn, lineOut, waiting, need: load + sold + lineOut + waiting + charge - gen - discharge - imported - lineIn };
+      const need = load + sold + lineOut + waiting + charge - gen - discharge - imported - lineIn;
+      return { util, region, have, load, base, free, sold, gen, discharge, charge, mode, imported, ending: importedNow - imported, lineIn, lineOut, waiting, need };
     }
 
     // The plan for a power event (pev: core.powerEvent()) at tick: { mode, end, mult } or null. 'pre': the PRE_EVENT_TICKS before a dear
@@ -220,6 +232,17 @@ try {
         return { kind: 'lower', level: peak };
       }
       return { kind: 'ok' };
+    }
+
+    // MW Auto can add to the subscription of one region now: 0 while it is off, backing off after unconfirmed changes, or when cash cannot
+    // pay a unit (now + the next bill). Other modules size a move that adds draw by it (Core plan's Frame Timber switch).
+    function raiseRoom(util, region, st, now = Date.now()) {
+      if (!conf[util]?.on) return 0;
+      const c = ctl.get(util + ':' + region);
+      if (c && now < c.retryAt) return 0;
+      const mult = core.powerPriceMult?.() ?? 1, rate = UTILS[util].rate * (util === 'power' ? Math.max(1, mult) : 1);
+      const have = st.subscriptions?.[String(region)]?.[util] ?? 0, money = st.items?.[0] ?? 0;
+      return Math.max(0, Math.min(UTILS[util].max - have, Math.floor(Math.max(0, money - billsOf(st, mult)) / (2 * rate))));
     }
 
     // ---- the engine --------------------------------------------------------------------------------------------------------
@@ -282,7 +305,7 @@ try {
       if (c.mode !== m.mode) { c.mode = m.mode; c.samples = []; }      // a new event plan: the old peak does not hold the level
       const evNote = !m.mode ? '' : m.mode === 'pre' ? ' · keeping batteries for NPC power x' + ev.mult : m.mode === 'dear' ? ' · on batteries during NPC power x' + ev.mult : ' · filling batteries at NPC power x' + ev.mult;
       const { want, over } = wantOf(m, conf[util].spare);
-      const urgent = wantOf({ ...m, need: m.need - m.waiting }, conf[util].spare).want;
+      const urgent = wantOf({ ...m, need: m.need - m.waiting - m.ending }, conf[util].spare).want;   // stalled groups and a contract about to end can wait for the bill
       const mult = util === 'power' ? Math.max(1, r.priceMult ?? 1) : 1;
       const holdMs = conf.holdMin * 60000;
       c.samples.push({ t: now, want });
@@ -415,7 +438,7 @@ try {
       get running() { return anyOn(); },
       exportCfg: () => ({ cfg: persistable() }),
       importCfg(o) { const r = apply(o?.cfg ?? o); save(); ensureLoop(); renderAll(); return r; },
-      _measure: measure, _want: wantOf, _decide: decide, _eventPlan: eventPlan, _eventLine: eventLine, _step: step, _info: info,
+      raiseRoom, _measure: measure, _want: wantOf, _decide: decide, _eventPlan: eventPlan, _eventLine: eventLine, _step: step, _info: info,
       _unload() { unloaded = true; loopTimer?.(); loopTimer = null; if (mounted) unmountUi(); },
     };
 

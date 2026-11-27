@@ -125,7 +125,7 @@
   function unlockAction(v, ctx, nx) {
     if (!nx) return { wait: 'all three unlocks are in' };
     const why = 'unlock ' + nx.name;
-    if (nx.name === 'Oil Rig' && ctx.retailOk !== true) return { wait: why + ': waits for the retail checkpoint' + (ctx.retailOk === false ? ' (failed: a new run measures the capped output)' : '') };   // only on a pass, of either run (plan D-2)
+    if (nx.name === 'Oil Rig' && ctx.retailOk !== true) return { wait: why + ': waits for the retail checkpoint' + (ctx.retailOk === false ? (ctx.retailFail ? ' (failed: a new run measures the capped output)' : ' (failed with no unsold stock, so no cap: a new run checks again)') : '') };   // only on a pass, of either run (plan D-2)
     if (ctx.apNextTech) return { wait: why + ': Autopilot still owns "' + ctx.apNextTech.name + '"' };
     if (!nx.prereqsMet) return { wait: why + ': ' + nx.note };
     if (v.research) return { wait: why + ': research slot busy' };

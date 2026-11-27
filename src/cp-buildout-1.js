@@ -5,8 +5,9 @@
 //   - pool tidy: Camps / Sawmills / Workshops it left in the pool (mem poolMine), or any pooled when no group outside the plan uses the
 //     building, go into their group (never cdFarm's units); groups it made or named after a plan recipe get their recipe;
 //   - Kiln stock gate: unpause / switch the Kiln until Glass and Concrete reach their gates, pause again after;
-//   - Wooden Frame gate: pause Frame Timber at the WF keep line (Rivet use for cfg.ftKeepHours), resume below half (plan D-3);
-//   - Stage B-D: spare Frame Timber Workshops switch to furniture (split from the retail board), keeping 1 on Frame Timber;
+//   - Wooden Frame gate: pause at most cfg.keepFrameTimber Frame Timber Workshops at the WF keep line (Rivet use for cfg.ftKeepHours),
+//     resume below half (plan D-3, A2);
+//   - Stage B-D: spare Frame Timber Workshops switch to furniture (the best $ per Workshop-hour on the board), keeping 1 on Frame Timber;
 //   - Stage C-D: Farms go in 4 waves 3 h apart (UnassignBuildings + DemolishBuilding), only when the last wave's acres are built and running
 //     and no group eats Cotton;
 //   - build-out toward core-math landRule: a consumer only when its supplier covers it, each buy gated by acre, kit, wood (R8), bill floor
@@ -44,6 +45,7 @@ try {
     glassGate: 100,              // Kiln: Glass before the store research ends (wiki 4.8 step 6)
     concreteGate: 400,           // Kiln: Concrete by the gate
     ftKeepHours: 2,              // Wooden Frame keep line: this many hours of Rivet use (plan D-3); Frame Timber pauses at it, resumes below half
+    ftBlockedMin: 30,            // Frame Timber above keepFrameTimber pauses when the switch to furniture stays blocked this long (plan A2)
     ftKeepMax: 19,               // ... capped here, so stock settles under 20 and E3 can hold (a Rivet Workshop takes 6 per wave start)
     rebalanceHours: 6,           // a furniture recipe's gap to the board's split must hold this long before a Workshop moves (plan D3)
     benchWorkshops: 1,           // Bench Workshops in Stage D after a checkpoint pass (wiki 4.7 step 2)
@@ -90,6 +92,20 @@ try {
     // Workshops per item for any total n (the Stage B switch has a fixed number of spare Workshops).
     const unitFrac = Object.fromEntries(rows.map((r) => [r.k, shares[r.k] / r.planksPerWs]));
     return { source: fromBoard ? 'board' : 'default 40/30/30', shares, frac, ...counts, total, planksPerWs: perWs, alloc: (n) => allocate(unitFrac, n) };
+  }
+
+  // Dollars a Workshop-hour makes on each furniture good (plan A2): board unit price x units an hour at the floor it runs (quality 0
+  // scales every good alike, so it is left out). null without a readable board. The allocator (plan B1) replaces this.
+  function furnValue(v, ctx, e) {
+    const rows = ctx.retailBoard?.shelves?.[REGION] ?? ctx.retailBoard?.shelves?.[String(REGION)];
+    if (!rows) return null;
+    const val = {};
+    for (const [k, n] of FURN) {
+      const it = itemOf(v.C, n), r = e.R[k], row = it ? rows[it.id] : null;
+      if (!(row?.price > 0) || !(it.base_value > 0)) return null;
+      val[k] = it.base_value * row.price / 10000 * (r.outputs[0]?.amount ?? 1) * runsH(r, Math.max(e.rateNow(r), FLOOR.Workshop));
+    }
+    return val;
   }
 
   // ---- reading the engine from a view ---------------------------------------------------------------------------------------------

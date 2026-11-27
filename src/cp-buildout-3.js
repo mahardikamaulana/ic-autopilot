@@ -82,6 +82,7 @@
       if (fl?.action) return done(fl.action);
       if (fl?.wait) waits.push(fl.wait);
       const sw = switchStep(v, ctx, e, tg);
+      noteBlocked(v, ctx, e, sw);
       if (sw?.action) return done(sw.action);
       if (sw?.wait) waits.push(sw.wait);
       const rb = rebalanceStep(v, ctx, e);

@@ -10,14 +10,15 @@
 //     A shelved good leaves only after cfg.retailShelfDropMin minutes absent, so pauses do not churn the shelf.
 //   - Money gate: floor + store price + bill floor (new MW x $20 + 2 h of bills, plan 8.1); Iron Frames keep cfg.ifReserve back.
 //   - Checkpoint sampler (context): every cfg.retailSampleMin minutes after the shelves are set it records the shelf rows, the rating
-//     and the stock, then judges the four rows of wiki 4.7. Sets ctx.retailOk (true / false / null), ctx.retailCap (furniture blocks the
-//     measured sales can carry, on a fail), ctx.retailE1 (cfg.retailE1Hours in a row against the streak's first appetite).
-//     Samples live in localStorage "corePlan.v1.mem.retail"; removing that key starts the checkpoint over.
-//   - Fail path (plan step 6): furniture Workshops above the cap move to Frame Timber (SetRecipe a whole group, or Unassign and put the
-//     pooled Workshops in a Frame Timber group). Farms are left on Cotton. Once the cap holds, one new checkpoint run starts at the capped
-//     output (old decision kept as prevDecision, its cap in force); a pass of it sets ctx.retailOk = true (plan B3) and opens only the Oil Rig
-//     gate: that pass proves the capped output sells, so the cap stays. ctx.retailFail / retailFailPath tell the other directors a measured
-//     cap is in force (reserve, waves, land rule, ladder).
+//     and the stock, then judges the four rows of wiki 4.7 (appetite fails only on a fall) plus unsold stock. Sets ctx.retailOk (true / false
+//     / null), ctx.retailCap (furniture blocks the measured sales can carry, only on unsold stock: plan R-1), ctx.retailE1 (cfg.retailE1Hours
+//     in a row against the streak's first appetite). Samples live in localStorage "corePlan.v1.mem.retail" (schema 2: an older decision is
+//     dropped on load, plan R-2; an old pass is kept); removing that key starts the checkpoint over. A fail is re-run after cfg.failTtlHours;
+//     a pass turns into a measured fail when stock piles up unsold after it.
+//   - Fail path (plan step 6): on unsold stock, furniture Workshops above the cap move to Frame Timber (SetRecipe a whole group, or Unassign
+//     and put the pooled Workshops in a Frame Timber group). Farms are left on Cotton. Once the cap holds, one new checkpoint run starts at the
+//     capped output (old decision kept as prevDecision, its cap in force); a pass of it sets ctx.retailOk = true (plan B3) and drops the cap.
+//     ctx.retailFail / retailFailPath tell the other directors a measured cap is in force (reserve, waves, land rule, ladder).
 // @@MODULE cp-retail
 try {
 (() => {
@@ -200,7 +201,7 @@ try {
   function salesOver(samples, ids) {
     let sold = 0, model = 0;
     const by = {};
-    for (const id of ids) by[id] = { sold: 0, model: 0, ticks: 0 };
+    for (const id of ids) by[id] = { sold: 0, model: 0, made: 0, ticks: 0 };
     for (let k = 1; k < samples.length; k++) {
       const a = samples[k - 1], b = samples[k], ticks = (b.t - a.t) / 1000 * TPS;
       for (const id of ids) {
@@ -209,7 +210,7 @@ try {
         const made = ga.out * ticks;
         const s = Math.max(0, made - (gb.s - ga.s));
         const m = Math.min(ga.a / 240 * (a.share ?? 1) * ticks, made + Math.max(0, ga.s));
-        by[id].sold += s; by[id].model += m; by[id].ticks += ticks; sold += s; model += m;
+        by[id].sold += s; by[id].model += m; by[id].made += made; by[id].ticks += ticks; sold += s; model += m;
       }
     }
     return { sold, model, by };
@@ -219,15 +220,20 @@ try {
   function rowsOf(samples, mem, c, now, e1 = false, base = null, live = null, demandOn = false) {
     const s0 = samples[0], sN = samples[samples.length - 1], ids = Object.keys(s0?.g ?? {});
     const out = [];
-    // 1. appetite steady within +-tol of the baseline (a fixed one, so a slow slide adds up instead of hiding in a rolling window)
-    let worst = 0, worstName = '';
+    // 1. appetite no more than tol below the baseline (a fixed one, so a slow slide adds up instead of hiding in a rolling window).
+    // A rise passes (plan A1): more demand is good news, not drift.
+    let worst = 0, worstName = '', grew = 0;
     for (const id of ids) {
       const a0 = base?.[id] ?? s0.g[id].a;
-      for (const s of samples) { const d = a0 && s.g[id] ? Math.abs(s.g[id].a / a0 - 1) : 0; if (d > worst) { worst = d; worstName = s0.g[id].n; } }
+      for (const s of samples) {
+        const d = a0 && s.g[id] ? 1 - s.g[id].a / a0 : 0;
+        if (d > worst) { worst = d; worstName = s0.g[id].n; }
+        if (-d > grew) grew = -d;
+      }
     }
     const held0 = ids.reduce((a, id) => a + (s0.g[id].h ?? 0), 0), heldN = ids.reduce((a, id) => a + (sN.g[id]?.h ?? 0), 0);
     const steady = worst <= c.retailAppetiteTol / 100;
-    out.push({ id: 'appetite', ok: samples.length < 2 || (!steady && demandOn) ? null : steady, why: 'max drift ' + pct(worst) + (worstName ? ' (' + worstName + ')' : '') + ', limit ' + c.retailAppetiteTol + '%' + (!steady && demandOn ? ' (a demand world event runs: unknown)' : '') + '; held ' + held0 + ' -> ' + heldN });
+    out.push({ id: 'appetite', ok: samples.length < 2 || (!steady && demandOn) ? null : steady, why: 'max fall ' + pct(worst) + (worstName ? ' (' + worstName + ')' : '') + ', limit ' + c.retailAppetiteTol + '%' + (grew > 0 ? ', demand grew ' + pct(grew) : '') + (!steady && demandOn ? ' (a demand world event runs: unknown)' : '') + '; held ' + held0 + ' -> ' + heldN });
     // 2. sales >= pass% of the model
     // per good (wiki E1): every shelved good with a model must pass, so one dead good cannot hide behind the others; the worst is named
     const sv = salesOver(samples, ids);
@@ -262,23 +268,50 @@ try {
         : ratingTxt + ', needs ' + c.retailRating + ' within ' + c.retailRatingMin + ' min (a rival store is on the board)' + (hit ? ' (reached at ' + Math.round((hit.t - mem.shelvedAt) / 60000) + ' min)' : '') });
     return { rows: out, sales: sv };
   }
-  // Blocks the measured sales can carry: per good min(sold per hour over the last hour, latest demand per hour) / block units per hour.
-  function capOf(samples, blockH) {
-    const lastT = samples[samples.length - 1].t;
-    const win = samples.filter((s) => s.t >= lastT - 3600000);
-    const w = win.length >= 2 ? win : samples.slice(-2);
-    const sN = samples[samples.length - 1];
-    const sv = salesOver(w, Object.keys(sN.g));
-    let blocks = 0;
-    const by = {};
-    for (const [id, x] of Object.entries(sv.by)) {
-      const soldH = x.ticks ? x.sold / x.ticks * TICKS_H : 0;
-      const demandH = sN.g[id].a / 240 * (sN.share ?? 1) * TICKS_H;
-      const rateH = Math.min(soldH, demandH), bh = blockH[id] || 0;
-      const b = bh ? rateH / bh : 0;
-      by[sN.g[id].n] = +b.toFixed(2); blocks += b;
+  // Unsold stock (plan R-1), the only thing that sets a furniture cap: a shelved good whose stock grew over the last cfg.capStockHours
+  // while more than (100 - retailSamplePassPct)% of its output went unsold. Low sales because output is low never counts.
+  // Its cap: blocks its measured sales over the last hour carry (sold per hour / block units per hour). A sample interval with no sale at
+  // all is left out (the store was dark, e.g. no power left for it, or a bad read: no demand figure). null: nothing unsold, the window is
+  // not covered yet, or no interval sold.
+  // Per good over the sample intervals that sold something: sold, made, stock change (also per half of the window: h[0] up to mid, h[1]
+  // after, null for a half with no such interval), ticks.
+  function liveSales(win, ids, mid = Infinity) {
+    const by = Object.fromEntries(ids.map((id) => [id, { sold: 0, made: 0, grew: 0, ticks: 0, h: [null, null] }]));
+    let n = 0;
+    for (let k = 1; k < win.length; k++) {
+      const sv = salesOver([win[k - 1], win[k]], ids);
+      if (!(sv.sold > 0)) continue;
+      n++;
+      for (const id of ids) {
+        const a = win[k - 1].g[id], b = win[k].g[id], x = sv.by[id];
+        if (!a || !b) continue;
+        by[id].sold += x.sold; by[id].made += x.made; by[id].ticks += x.ticks; by[id].grew += b.s - a.s;
+        const j = win[k].t <= mid ? 0 : 1; by[id].h[j] = (by[id].h[j] ?? 0) + b.s - a.s;
+      }
     }
-    return { cap: Math.floor(blocks), by };
+    return n ? by : null;
+  }
+  function capOf(samples, blockH, c = cfg()) {
+    const sN = samples[samples.length - 1], ids = Object.keys(sN.g), from = sN.t - c.capStockHours * 3600000;
+    const w = samples.filter((s) => s.t >= from);
+    if (w.length < 2 || w[0].t > from + c.retailSampleMin * 60000) return null;
+    const sv = liveSales(w, ids, from + c.capStockHours * 1800000);
+    if (!sv) return null;
+    const rv = liveSales(samples.filter((s) => s.t >= sN.t - 3600000), ids) ?? sv;   // the last hour; the whole window when it all was dark
+    let blocks = 0;
+    const by = {}, why = [];
+    for (const id of ids) {
+      const x = sv[id], grew = x.grew;
+      if (!w[0].g[id] || !(x.made > 0)) continue;
+      // growing for the whole window: up in each half that has a sale (a glut younger than the window is not one yet)
+      if (!(grew > 0) || x.h.some((g) => g != null && !(g > 0)) || x.sold >= x.made * c.retailSamplePassPct / 100) continue;
+      const r = rv[id], soldH = r.ticks ? r.sold / r.ticks * TICKS_H : 0, bh = blockH[id] || 0;
+      if (!(soldH > 0) || !(bh > 0)) continue;   // never a cap of 0 Workshops from an hour with no sales figure
+      const b = soldH / bh;
+      by[sN.g[id].n] = +b.toFixed(2); blocks += b;
+      why.push(sN.g[id].n + ' stock +' + Math.round(grew) + ' in ' + c.capStockHours + ' h, sold ' + Math.round(x.sold) + ' of ' + Math.round(x.made) + ' made');
+    }
+    return why.length ? { cap: Math.floor(blocks), by, why: why.join(', ') } : null;
   }
   // Last 3 samples within +-5% of their mean: demand found a level (saturating); else it is still falling (decaying).
   function shapeOf(samples) {
@@ -288,9 +321,17 @@ try {
   }
 
   const appetites = (smp) => Object.fromEntries(Object.entries(smp.g).map(([id, x]) => [id, x.a]));
+  const SCHEMA = 2, RESET = { shelvedAt: null, samples: [], decision: null, prevDecision: null, streakStart: null, e1Base: null, e1: false };
   function sampler(v, ctx, f) {
     const c = cfg(), m = ctx.mem('retail');
     let mem = m.get();
+    // Schema 2 (plan R-2): a fail saved by an older version (no schema) was judged by the old rules, so the checkpoint starts over.
+    // An old pass stays: wiping it would close the Oil Rig gate and hold CD cycling for another checkpoint.
+    if (mem.schema !== SCHEMA) mem = m.set({ schema: SCHEMA, ...(mem.decision?.ok === false || mem.prevDecision ? RESET : {}) });
+    // A fail is re-judged after cfg.failTtlHours (plan A1): the decision starts over; a re-run's old fail just drops.
+    const stale = (d) => !!d && !d.ok && ctx.now - (d.at ?? 0) >= c.failTtlHours * 3600000;
+    if (stale(mem.decision)) mem = m.set(RESET);
+    else if (stale(mem.prevDecision)) mem = m.set({ prevDecision: null });
     if (!f.storeGroup) {
       // Start over only when the store is really gone: none owned in a non-empty state, for cfg.retailGoneMin minutes.
       // One bad frame (empty groups, reconnect) or a store waiting in the pool keeps the samples.
@@ -298,7 +339,7 @@ try {
       else if (v.groups.length && mem.shelvedAt) {
         if (mem.goneSince == null) mem = m.set({ goneSince: ctx.now });
         else if (ctx.now - mem.goneSince >= c.retailGoneMin * 60000)
-          mem = m.set({ shelvedAt: null, samples: [], decision: null, prevDecision: null, streakStart: null, e1Base: null, e1: false, goneSince: null });
+          mem = m.set({ ...RESET, goneSince: null });
       }
       return { mem, n: 0 };
     }
@@ -336,15 +377,21 @@ try {
     const age = ctx.now - mem.shelvedAt;
     if (!mem.decision && age >= c.retailCheckHours * 3600000) {
       const bad = ev.rows.filter((r) => r.ok === false), open = ev.rows.filter((r) => r.ok === null);
+      const un = samples.length >= 2 ? capOf(samples, blockH, c) : null;   // unsold stock: a fail of its own, and the only cap
       let d = null;
-      if (!bad.length && !open.length) d = { ok: true, kind: 'pass', at: ctx.now };
-      else if (bad.length || age >= c.retailMaxHours * 3600000) {
-        const kind = bad.some((r) => r.id === 'appetite') ? shapeOf(samples) : bad.length ? bad.map((r) => r.id).join('+') : 'undecided';
-        const cp = samples.length >= 2 ? capOf(samples, blockH) : { cap: 0, by: {} };
-        // measured: the cap comes from sales, so the fail path may act on it (an undecided run has no sales figure to trust)
-        d = { ok: false, kind, cap: cp.cap, capBy: cp.by, measured: samples.length >= 2 && kind !== 'undecided', at: ctx.now, why: (bad.length ? bad : open).map((r) => r.id + ': ' + r.why).join('; ') };
+      if (!bad.length && !open.length && !un) d = { ok: true, kind: 'pass', at: ctx.now };
+      else if (bad.length || un || age >= c.retailMaxHours * 3600000) {
+        const kind = bad.some((r) => r.id === 'appetite') ? shapeOf(samples) : bad.length ? bad.map((r) => r.id).join('+') : un ? 'unsold' : 'undecided';
+        // measured: unsold stock gives a sales figure, so the fail path may act on it; any other fail moves no Workshop (plan R-1)
+        const why = [...(bad.length ? bad : un ? [] : open).map((r) => r.id + ': ' + r.why), ...(un ? ['unsold: ' + un.why] : [])].join('; ');
+        d = { ok: false, kind, cap: un?.cap ?? 0, capBy: un?.by ?? {}, measured: !!un, at: ctx.now, why };
       }
       if (d) mem = m.set({ decision: d });
+      res.mem = mem;
+    } else if (mem.decision?.ok && samples.length >= 2) {
+      // A pass is not for good: stock piling up unsold for cfg.capStockHours after it is a new (measured) fail with its cap.
+      const un = capOf(samples, blockH, c);
+      if (un) mem = m.set({ decision: { ok: false, kind: 'unsold', cap: un.cap, capBy: un.by, measured: true, at: ctx.now, why: 'after the pass, unsold: ' + un.why }, streakStart: ctx.now, e1: false });
       res.mem = mem;
     }
     // E1: rows (appetite vs the streak's first appetite, sales, price; rating once reached) passing for cfg.retailE1Hours in a row.
@@ -368,9 +415,8 @@ try {
     // a re-run (B3) keeps the old fail in force until it decides: retailOk false, its cap, its fail path
     const prev = s.mem.prevDecision ?? null, d = s.mem.decision ?? prev;
     f.decision = d;
-    // The measured fail whose cap is in force: the decision itself, or the fail before a re-run's pass. That pass proves only that the
-    // capped output sells, so it opens the Oil Rig gate (retailOk) and nothing else: cap, land rule, Farms on Cotton and the ladder waiver stay.
-    const capD = d && !d.ok && d.measured ? d : d?.ok && prev && !prev.ok && prev.measured ? prev : null;   // an undecided fail has no sales figure to cap at
+    // The measured fail whose cap is in force: the decision itself, or the fail a re-run is checking. A pass of the re-run drops the cap (plan A1).
+    const capD = d && !d.ok && d.measured ? d : null;   // a fail without unsold stock has no sales figure to cap at
     f.capDecision = capD;
     ctx.retailOk = f.storeGroup ? (d ? d.ok : null) : null;
     ctx.retailCap = capD ? capD.cap : null;
@@ -384,15 +430,16 @@ try {
   // ---- what to send ----------------------------------------------------------------------------------------------------------------
   function readoutOf(f) {
     if (!f || f.err) return { error: f?.err ?? 'no facts' };
-    const s = f.sampler ?? {}, d = s.mem?.decision, p = s.mem?.prevDecision, capP = d?.ok && f.capDecision === p;
+    const s = f.sampler ?? {}, d = s.mem?.decision, p = s.mem?.prevDecision;
     return {
       board: f.badBoard ? 'BAD: ' + f.badBoard : 'ok', share: f.share, rating: f.rating,
       shelf: (f.chosen ?? []).map((g) => g.name + ' appetite ' + g.appetite + '/2min, ' + usd(g.unit) + ', stock ' + Math.floor(g.stock) + (g.made ? ', ' + (g.outTick * TICKS_H).toFixed(1) + '/h made' : '')),
       samples: s.n ?? 0, shelvedAt: s.mem?.shelvedAt ?? null,
       rows: (s.rows ?? []).map((r) => r.id + ' ' + (r.ok === null ? '?' : r.ok ? 'pass' : 'FAIL') + ': ' + r.why),
-      decision: d ? (d.ok ? (capP ? 'PASS at the capped output: Oil Rig opens; the cap of ' + p.cap + ' furniture blocks stays, Farms stay on Cotton' : 'PASS (scale to the land rule)') : 'FAIL ' + d.kind + ': cap ' + d.cap + ' furniture blocks ' + JSON.stringify(d.capBy) + ', excess Workshops to Frame Timber, Farms stay on Cotton (' + d.why + ')')
-        : p ? 're-checkpoint at the capped output: sampling (the earlier FAIL holds meanwhile)' : f.storeGroup ? 'sampling' : 'store not built',
-      prevDecision: p ? 'FAIL ' + p.kind + ': cap ' + p.cap + ' furniture blocks (' + p.why + ')' : null,
+      decision: d ? (d.ok ? (p?.measured ? 'PASS at the capped output: the earlier cap drops (scale to the land rule)' : 'PASS (scale to the land rule)')
+        : 'FAIL ' + d.kind + (d.measured ? ': cap ' + d.cap + ' furniture blocks ' + JSON.stringify(d.capBy) + ', excess Workshops to Frame Timber' : ': no unsold stock, so no cap and no Workshop moves') + ', Farms stay on Cotton (' + d.why + ')')
+        : p ? (p.measured ? 're-checkpoint at the capped output: sampling (the earlier FAIL and its cap hold meanwhile)' : 're-checkpoint: sampling (the earlier FAIL had no unsold stock, so no cap; retailOk stays false meanwhile)') : f.storeGroup ? 'sampling' : 'store not built',
+      prevDecision: p ? 'FAIL ' + p.kind + (p.measured ? ': cap ' + p.cap + ' furniture blocks' : ': no unsold stock, no cap') + ' (' + p.why + ')' : null,
       e1: !!s.mem?.e1,
     };
   }
@@ -481,7 +528,7 @@ try {
       return { action: { id: 'retail:shelf:' + want.join(','), text: 'shelves: ' + f.chosen.map((x) => x.name).join(', '),
         steps: [{ msg: { type: 'SetAssortment', group: g.id, items: want }, until: (x) => sameSet(x.groups.find((y) => y.id === g.id)?.assortment ?? [], want) }] }, readout };
     }
-    const d = f.capDecision;   // a re-run, and its pass, keep cutting to the earlier fail's cap
+    const d = f.capDecision;   // a re-run keeps cutting to the earlier fail's cap until it decides
     if (d) {
       const fa = failAction(v, f, d);
       if (fa) return { ...fa, readout };
@@ -496,7 +543,9 @@ try {
       retailSampleMin: 10,         // minutes between checkpoint samples
       retailCheckHours: 2,         // decide the checkpoint after this many hours
       retailMaxHours: 4,           // give up (fail) when a row still has no data by then
-      retailAppetiteTol: 15,       // % appetite may move while the store sells
+      retailAppetiteTol: 15,       // % appetite may fall while the store sells (a rise passes)
+      capStockHours: 2,            // a furniture cap needs this many hours of a shelved good's stock growing while sales fall short of output
+      failTtlHours: 12,            // a failed checkpoint is re-run after this many hours
       retailSamplePassPct: 70,     // % of the modelled sales that must sell
       retailRating: 9000,          // rating the store must reach ...
       retailRatingMin: 90,         // ... within this many minutes of the build (75 at +1 per tick, plus slack)

@@ -76,11 +76,13 @@ function powerEvent(engine = walk().engine, tick = nowTick(), ahead = 86400) {
 // Power or water this Corporation buys on contracts in one region (a power-market buy is one): each Active contract's capacity, less the
 // part of what the buyer draws (up to the contract) that the seller is not delivering; in a shortfall the grid covers that gap during the
 // grace period. contracts: walk().contracts (null before the board was first seen: nothing bought counts).
-function bought(util, region, st, contracts) {
+// endBy: a game tick; a contract that ends by then (started_at + duration) counts as gone already (0 / omitted: no end rule).
+function bought(util, region, st, contracts, endBy = 0) {
   const corp = st?.ssi?.corp_id;
   let n = 0;
   for (const c of contracts ?? []) {
     if (c.utility !== util || c.region !== region || c.state !== 'Active' || c.buyer !== corp) continue;
+    if (endBy > 0 && c.started_at != null && c.duration != null && c.started_at + c.duration <= endBy) continue;
     n += (c.amount ?? 0) - Math.max(0, Math.min(Math.max(c.drawn ?? 0, 0), c.amount ?? 0) - Math.max(c.delivered ?? 0, 0));
   }
   return n;

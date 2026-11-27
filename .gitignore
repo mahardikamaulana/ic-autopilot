@@ -5,3 +5,5 @@ node_modules/
 src/.built-sha
 # test result cache (run-all.js)
 test/.cache.json
+# real engine wasm fetched by test/engine.js
+test/.cache/

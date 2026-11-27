@@ -318,32 +318,81 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
     assert.strictEqual(at.ctx.retail.sampler.mem.shelvedAt, 1.8e12 + 60 * MIN);
   });
 
-  await t('saturating board: FAIL saturating with a block cap at the measured sales', () => {
+  // Output far above demand from empty stock: every shelved good piles up unsold, so a fail is measured (plan R-1).
+  const BIG = { 3: 300, 8: 200, 11: 300 };
+  // Blocks the whole board carries at 100% appetite: Chair 302 x 30 / 37.5 + Table 182 + Bookshelf 150.
+  const FULL = 302 * 30 / 37.5 + 182 + 150;
+
+  await t('saturating board: FAIL saturating with a block cap at the measured sales (stock piling up unsold)', () => {
     const f = (m) => 0.35 + 0.65 * Math.exp(-m / 15);
-    const { last } = simulate(f);
+    const { last } = simulate(f, { stock: 0, counts: BIG });
     assert.strictEqual(last.ok, false);
     const d = last.ctx.retail.sampler.mem.decision;
     assert.strictEqual(d.kind, 'saturating', JSON.stringify(d));
-    // demand left at 35%: Chair 302 x .35 x 30 / 37.5 + Table 182 x .35 x 30 / 30 + Bookshelf 150 x .35 x 30 / 30 ~ 200 blocks
-    const want = (302 * 30 / 37.5 + 182 + 150) * 0.35;
-    assert.ok(Math.abs(last.cap - want) <= 3, 'cap ' + last.cap + ' vs ' + want.toFixed(1));
+    assert.strictEqual(d.measured, true);
+    // sales over the last hour, demand about 35%: ~200 blocks
+    const want = FULL * 0.35;
+    assert.ok(last.cap >= want - 1 && last.cap <= want * 1.03, 'cap ' + last.cap + ' vs ' + want.toFixed(1));
+    assert.deepStrictEqual(Object.keys(d.capBy).sort(), ['Bookshelf', 'Chair', 'Table']);
     assert.strictEqual(last.e1, false);
     assert.ok(/FAIL saturating: cap/.test(last.out.readouts.retail.decision));
     assert.ok(last.out.readouts.retail.rows.some((r) => /^appetite FAIL/.test(r)));
+    // the same falling board with the stock draining (output below demand): a fail, but nothing unsold, so no cap
+    const drain = simulate(f).last;
+    assert.strictEqual(drain.ok, false);
+    assert.strictEqual(drain.cap, null);
+    assert.strictEqual(drain.ctx.retail.sampler.mem.decision.measured, false);
   });
 
-  await t('decaying board: FAIL decaying, cap from the latest (lower) demand', () => {
-    const { last } = simulate((m) => Math.max(0.05, 1 - m / 150));
+  await t('decaying board: FAIL decaying, cap at the last hour of measured sales', () => {
+    const { last } = simulate((m) => Math.max(0.05, 1 - m / 150), { stock: 0, counts: BIG });
     assert.strictEqual(last.ok, false);
     const d = last.ctx.retail.sampler.mem.decision;
     assert.strictEqual(d.kind, 'decaying', JSON.stringify(d));
-    const sat = (302 * 30 / 37.5 + 182 + 150) * 0.35;
-    assert.ok(last.cap < sat, 'decaying cap ' + last.cap + ' below the saturating one');
+    // the last hour sold at appetite 60% -> 27%: the cap is its sales, between those two levels
+    assert.ok(last.cap > FULL * 0.27 && last.cap < FULL * 0.6, 'decaying cap ' + last.cap);
+  });
+
+  await t('A1: output-limited store (stock 0, sells all it makes) with appetite +65% over 2 h: PASS, no cap, nothing moved', () => {
+    const { log, last } = simulate((m) => 1 + 0.65 * m / 120, { stock: 0, minutes: 130 });
+    const at2 = log.find((x) => x.m === 120);
+    assert.strictEqual(at2.ok, true, JSON.stringify(at2.out.readouts.retail.rows, null, 1));
+    assert.strictEqual(at2.cap, null);
+    assert.ok(at2.out.readouts.retail.rows.some((r) => /^appetite pass: max fall 0%.*demand grew 6\d%/.test(r)), at2.out.readouts.retail.rows.join('\n'));
+    assert.ok(log.every((x) => !x.ctx.retailFail && !x.out.actions.some((a) => a.director === 'retail' && /^retail:ft:/.test(a.id))));
+    assert.strictEqual(last.ok, true);
+  });
+
+  await t('A1: stock growing 2 h with sales below output: FAIL unsold, cap = the measured sales rate (only the good that piles up)', () => {
+    // steady board; Bookshelf 300 Workshops make 9,000/h against 4,500/h demand; Table and Chair sell over 70% of what they make
+    const { log } = simulate(() => 1, { stock: 0, counts: BIG });
+    const at2 = log.find((x) => x.m === 120), d = at2.ctx.retail.sampler.mem.decision;
+    assert.strictEqual(at2.ok, false);
+    assert.strictEqual(d.kind, 'unsold', JSON.stringify(d));
+    assert.strictEqual(d.measured, true);
+    assert.deepStrictEqual(d.capBy, { Bookshelf: 150 }, 'sales 150 / 240 x 7,200 = 4,500 per hour / 30 per Workshop');
+    assert.strictEqual(at2.cap, 150);
+    assert.match(d.why, /^unsold: Bookshelf stock \+\d+ in 2 h, sold 9000 of 18000 made/);
+    // the same store before 2 h of samples: no cap yet (the window is not covered)
+    assert.ok(log.filter((x) => x.m < 120).every((x) => x.cap === null));
+  });
+
+  await t('A1: capOf: wave jitter with sales about equal to output is not unsold; a dark store (nothing sold) is not a demand figure', () => {
+    const { cp: c } = F.load(['cp-retail']);
+    const t0 = 1.8e12, out = 1000 / 1200;   // 1,000 made per 10 min
+    const run = (stockAt) => Array.from({ length: 13 }, (_, k) => ({ t: t0 + k * 600000, r: 0, share: 1, g: { 1: { n: 'Bookshelf', a: 240, h: 0, p: 16000, s: stockAt(k), out } } }));
+    // stock jumps +-300 at wave ends and ends 300 up: sold ~97% of what was made
+    assert.strictEqual(c._retail.capOf(run((k) => (k % 2 ? 400 : 100)), { 1: 30 }, c.cfg), null);
+    assert.strictEqual(c._retail.capOf(run((k) => 1000 * k), { 1: 30 }, c.cfg), null, 'all output piles up: nothing sold, store dark');
+    assert.strictEqual(c._retail.capOf(run((k) => (k <= 6 ? 0 : 1000 * (k - 6))), { 1: 30 }, c.cfg), null, 'sold all for 1 h, then dark for 1 h: no cap (not 0 Workshops)');
+    const cp = c._retail.capOf(run((k) => 500 * k), { 1: 30 }, c.cfg);
+    assert.deepStrictEqual([cp.cap, cp.by], [100, { Bookshelf: 100 }], 'half unsold: cap at 3,000 sold per hour / 30');
+    assert.strictEqual(c._retail.capOf(run((k) => 500 * k).slice(6), { 1: 30 }, c.cfg), null, 'only 1 h of samples');
   });
 
   await t('fail path: Workshops above the cap move to Frame Timber, one action per step, then nothing more', () => {
     const f = (m) => 0.35 + 0.65 * Math.exp(-m / 15);
-    const { last, c, mem, st } = simulate(f, { counts: { 3: 300, 8: 200, 11: 100 } });
+    const { last, c, mem, st } = simulate(f, { stock: 0, counts: BIG });
     const d = last.ctx.retail.sampler.mem.decision;
     assert.strictEqual(d.ok, false); assert.strictEqual(d.measured, true);
     const w = F.world(st, F.stageB.deals, { catalog: cat, retail: board() });
@@ -362,11 +411,11 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
     const ws = Object.values(st.groups).filter((g) => g.building === B('Workshop'));
     const on = (r) => ws.filter((g) => g.recipe === Rc(r)).reduce((a, g) => a + g.count, 0);
     for (const [n, r] of [['Bookshelf', 'Make Bookshelf'], ['Table', 'Make Table'], ['Chair', 'Make Chair']]) assert.ok(on(r) <= Math.ceil(d.capBy[n]), n + ' ' + on(r) + ' vs cap ' + d.capBy[n]);
-    assert.strictEqual(on('Assemble Wooden Frame'), 600 - on('Make Bookshelf') - on('Make Table') - on('Make Chair'));
+    assert.strictEqual(on('Assemble Wooden Frame'), 800 - on('Make Bookshelf') - on('Make Table') - on('Make Chair'));
     assert.strictEqual(st.building_pool[0][B('Workshop')] ?? 0, 0);
     assert.ok(Object.values(st.groups).some((g) => g.name === 'Frame Timber' && g.recipe === Rc('Assemble Wooden Frame')));
     // an undecided fail (no measured sales) never moves Workshops
-    mem('retail').set({ decision: { ok: false, kind: 'undecided', cap: 0, capBy: {}, measured: false } });
+    mem('retail').set({ decision: { ok: false, kind: 'undecided', cap: 0, capBy: {}, measured: false, at: now } });
     st.groups[3].count += 50;
     const out = c._decide(c._view(st, cat, []), F.ctxOf({ retailBoard: board(), mem, now }));
     assert.strictEqual(out.actions.filter((x) => x.director === 'retail').length, 0);
@@ -439,7 +488,7 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
     st.retail_ratings = { 0: 10000 };
     return st;
   }
-  const memWith = (decision, now = 1.8e12) => { const m = memFn(); m('retail').set({ shelvedAt: now - 3 * 3600000, samples: [], decision }); return m; };
+  const memWith = (decision, now = 1.8e12) => { const m = memFn(); m('retail').set({ schema: 2, shelvedAt: now - 3 * 3600000, samples: [], decision }); return m; };
 
   await t('fail path (A2): Farm waves wait, the land rule caps Camps and the last acre, the reserve keeps Wooden Frames to the keep line and frees Planks', async () => {
     const { cp: c } = F.load(['cp-buildout', 'cp-retail']);
@@ -453,19 +502,19 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
     assert.ok(dF.rule.lastAcre < dP.rule.lastAcre, 'last acre ' + dF.rule.lastAcre + ' vs ' + dP.rule.lastAcre);
     assert.match(c._buildout.waveStep(v, ctxF, dF.rule, 'D').wait, /retail checkpoint failed: remaining Farms stay on Cotton/);
     assert.ok(!/retail checkpoint failed/.test(c._buildout.waveStep(v, ctxP, dP.rule, 'D').wait ?? ''));
-    // C-fix: a pass of the re-run after the measured fail opens only the Oil Rig gate; the cap, the capped land rule and the Farms stay
+    // A1: a pass of the re-run after the measured fail drops the cap: the land rule and the waves follow the pass
     const memRP = memWith({ ok: true, kind: 'pass', at: 1.8e12 }); memRP('retail').set({ prevDecision: FAIL3 });
     const ctxRP = F.ctxOf({ retailBoard: board(), mem: memRP }), dRP = c._decide(v, ctxRP);
-    assert.strictEqual(ctxRP.retailOk, true); assert.strictEqual(ctxRP.retailCap, 3);
-    assert.strictEqual(ctxRP.retailFail, true); assert.strictEqual(ctxRP.retailFailPath, true);
-    assert.deepStrictEqual([dRP.rule.camps, dRP.rule.sawmills, dRP.rule.lastAcre], [dF.rule.camps, dF.rule.sawmills, dF.rule.lastAcre]);
-    assert.strictEqual(c._buildout.waveStep(v, ctxRP, dRP.rule, 'D').wait, 'retail fail path: Farms stay on Cotton');
-    assert.match(dRP.readouts.retail.decision, /^PASS at the capped output: Oil Rig opens; the cap of 3 furniture blocks stays/);
+    assert.strictEqual(ctxRP.retailOk, true); assert.strictEqual(ctxRP.retailCap, null);
+    assert.strictEqual(ctxRP.retailFail, false); assert.strictEqual(ctxRP.retailFailPath, false);
+    assert.deepStrictEqual([dRP.rule.camps, dRP.rule.sawmills, dRP.rule.lastAcre], [dP.rule.camps, dP.rule.sawmills, dP.rule.lastAcre]);
+    assert.ok(!/retail (fail path|checkpoint failed)/.test(c._buildout.waveStep(v, ctxRP, dRP.rule, 'D').wait ?? ''));
+    assert.match(dRP.readouts.retail.decision, /^PASS at the capped output: the earlier cap drops/);
     // the reserve CD Farm reads (runner): fail -> Wooden Frames = keep line (2 Rivet x 24 WF/h x 2 h = 96, capped at cfg.ftKeepMax 19), no Planks; pass -> both held
     const keep = c._buildout.wfKeep(v, ctxF);
     assert.strictEqual(keep, 19);
     for (const [decision, want] of [[FAIL3, { [I('Wooden Frame')]: 19 }], [{ ok: true, kind: 'pass', at: 1 }, { [I('Wooden Frame')]: Infinity, [I('Planks')]: Infinity }]]) {
-      globalThis.localStorage = F.mem({ 'corePlan.v1.mem.retail': JSON.stringify({ shelvedAt: Date.now() - 3 * 3600000, samples: [], decision }) });
+      globalThis.localStorage = F.mem({ 'corePlan.v1.mem.retail': JSON.stringify({ schema: 2, shelvedAt: Date.now() - 3 * 3600000, samples: [], decision }) });
       const { cp: r, core } = F.boot(failSt(), { modules: ['cp-buildout', 'cp-retail'], catalog: cat, deals: [], retail: board() });
       r.start();
       await waitFor(() => !r.active); await r._step();
@@ -564,6 +613,70 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
     assert.match(c._buildout.waveStep(v, ctxU, dU.rule, 'D').wait, /retail checkpoint failed: remaining Farms stay on Cotton/);
   });
 
+  await t('R-2: a v1 mem (no schema) with a fail is discarded on load; a schema 2 fail stays', () => {
+    const { cp: c } = F.load(['cp-retail']);
+    const st = failSt(), m = memFn();
+    m('retail').set({ shelvedAt: 1.8e12 - 3 * 3600000, samples: [], decision: FAIL3 });
+    const ctx = F.ctxOf({ retailBoard: board(), mem: m });
+    const out = c._decide(c._view(st, cat, []), ctx);
+    assert.strictEqual(out.actions.filter((a) => a.director === 'retail').length, 0);
+    assert.strictEqual(ctx.retailFail, false); assert.strictEqual(ctx.retailCap, null);
+    const r = m('retail').get();
+    assert.strictEqual(r.schema, 2); assert.strictEqual(r.decision, null); assert.strictEqual(r.prevDecision, null);
+    assert.strictEqual(r.shelvedAt, 1.8e12, 'the checkpoint starts over now');
+    const ctx2 = F.ctxOf({ retailBoard: board(), mem: memWith(FAIL3) });
+    c._decide(c._view(failSt(), cat, []), ctx2);
+    assert.strictEqual(ctx2.retailFail, true);
+  });
+
+  await t('A1: a fail older than cfg.failTtlHours (12 h) is re-run; a re-run\'s old fail just drops', () => {
+    const { cp: c } = F.load(['cp-retail']);
+    assert.strictEqual(c.cfg.failTtlHours, 12);
+    const run = (mem, now) => { const ctx = F.ctxOf({ retailBoard: board(), mem, now }); c._decide(c._view(failSt(), cat, []), ctx); return ctx; };
+    const m = memWith(FAIL3);
+    assert.strictEqual(run(m, 1.8e12 + 11.9 * 3600000).retailFail, true, 'in force before the TTL');
+    const ctx = run(m, 1.8e12 + 12 * 3600000);
+    assert.strictEqual(ctx.retailFail, false); assert.strictEqual(ctx.retailOk, null);
+    assert.strictEqual(m('retail').get().decision, null);
+    assert.strictEqual(m('retail').get().shelvedAt, 1.8e12 + 12 * 3600000, 'a new run starts');
+    const m2 = memWith(null); m2('retail').set({ prevDecision: FAIL3 });
+    assert.strictEqual(run(m2, 1.8e12).retailFail, true, 're-run sampling: the old fail holds');
+    run(m2, 1.8e12 + 12 * 3600000);
+    assert.strictEqual(m2('retail').get().prevDecision, null);
+    assert.ok(m2('retail').get().shelvedAt, 'the re-run itself goes on');
+  });
+
+  await t('R-2: a v1 pass is kept (schema stamped): the Oil Rig gate and CD cycling stay open', () => {
+    const { cp: c } = F.load(['cp-retail']);
+    const m = memFn();
+    m('retail').set({ shelvedAt: 1.8e12 - 3 * 3600000, samples: [], decision: { ok: true, kind: 'pass', at: 1.8e12 - 3600000 } });
+    const ctx = F.ctxOf({ retailBoard: board(), mem: m });
+    c._decide(c._view(failSt(), cat, []), ctx);
+    assert.strictEqual(ctx.retailOk, true);
+    assert.deepStrictEqual([m('retail').get().schema, m('retail').get().decision.kind], [2, 'pass']);
+  });
+
+  await t('A1: a pass is not for good: stock piling up unsold after it is a new measured fail with a cap', () => {
+    // output-limited store passes at 2 h; at 130 min demand drops to 0.5%: Bookshelf (120/h made) and Table (60/h) pile up
+    const { log } = simulate((m) => (m < 130 ? 1 : 0.005), { stock: 0, minutes: 260 });
+    assert.strictEqual(log.find((x) => x.m === 120).ok, true);
+    assert.ok(log.filter((x) => x.m >= 120 && x.m <= 180).every((x) => x.ok === true && !x.ctx.retailFail), 'the pass holds while the glut is young');
+    const f = log.find((x) => x.ok === false);
+    assert.ok(f && f.m > 180 && f.m <= 250, 'new fail at ' + f?.m);
+    const d = f.ctx.retail.sampler.mem.decision;
+    assert.deepStrictEqual([d.kind, d.measured, f.ctx.retailFail], ['unsold', true, true], JSON.stringify(d));
+    assert.ok(d.capBy.Bookshelf > 0 && d.capBy.Bookshelf < 2 && !('Chair' in d.capBy), JSON.stringify(d.capBy));
+    assert.match(d.why, /^after the pass, unsold: Bookshelf/);
+  });
+
+  await t('A1: capOf leaves out only the intervals with no sale: an unsold first hour then a dark hour still caps at the live sales', () => {
+    const { cp: c } = F.load(['cp-retail']);
+    const t0 = 1.8e12, out = 1000 / 1200;
+    const run = (stockAt) => Array.from({ length: 13 }, (_, k) => ({ t: t0 + k * 600000, r: 0, share: 1, g: { 1: { n: 'Bookshelf', a: 240, h: 0, p: 16000, s: stockAt(k), out } } }));
+    const cp = c._retail.capOf(run((k) => (k <= 6 ? 500 * k : 3000 + 1000 * (k - 6))), { 1: 30 }, c.cfg);
+    assert.deepStrictEqual([cp.cap, cp.by], [100, { Bookshelf: 100 }], 'sold 3,000 an hour while lit: 100 blocks');
+  });
+
   await t('board check: held is optional (appetite and price only)', () => {
     const b = board(), rows = b.shelves[0] ?? b.shelves['0'];
     for (const r of Object.values(rows)) delete r.held;
@@ -576,7 +689,7 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
     assert.match(ap.why, /held 0 -> 0/);
   });
 
-  await t('re-checkpoint (B3): a fail at the cap starts a new run; its pass sets retailOk and lets the Oil Rig start; a fail above the cap never does', () => {
+  await t('re-checkpoint (B3): a fail with nothing to cut starts a new run; its pass sets retailOk, lets the Oil Rig start and leaves no cap; a measured fail above the cap never re-runs', () => {
     const f = (m) => 0.35 + 0.65 * Math.exp(-m / 15);
     const oil = (x) => x.out.actions.some((a) => a.id === 'tech:' + B('Oil Rig'));
     const { log } = simulate(f, { minutes: 260, cd: 20000 });
@@ -586,17 +699,19 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
     // furniture already under the cap: the next look starts the new run, the old fail stays in force meanwhile
     const r = at(130).ctx.retail.sampler.mem;
     assert.strictEqual(r.decision, null); assert.strictEqual(r.prevDecision.kind, 'saturating'); assert.strictEqual(r.shelvedAt, 1.8e12 + 130 * MIN);
-    assert.ok(log.filter((x) => x.m >= 130 && x.m < 250).every((x) => x.ok === false && x.ctx.retailFail && !oil(x)), 'fail holds during the new run');
-    assert.match(at(130).out.readouts.retail.decision, /re-checkpoint at the capped output/);
+    // the stock drained (output below demand): nothing unsold, so the fail has no cap (plan R-1), but it holds retailOk false
+    assert.ok(log.filter((x) => x.m >= 130 && x.m < 250).every((x) => x.ok === false && !x.ctx.retailFail && !oil(x)), 'fail holds during the new run');
+    assert.match(at(130).out.readouts.retail.decision, /^re-checkpoint: sampling \(the earlier FAIL had no unsold stock, so no cap/);
+    assert.match(at(130).out.waits.join(' | '), /unlock Oil Rig: waits for the retail checkpoint \(failed with no unsold stock, so no cap/);
     assert.strictEqual(at(250).ok, true, JSON.stringify(at(250).out.readouts.retail.rows));
     assert.ok(oil(at(250)), at(250).out.waits.join(' | '));
     assert.match(at(250).out.readouts.retail.prevDecision, /^FAIL saturating/);
-    assert.strictEqual(at(250).ctx.retailFailPath, true, 'pass after a measured fail: CD from Wooden Frames');
-    assert.strictEqual(at(250).ctx.retailCap, at(250).ctx.retail.sampler.mem.prevDecision.cap, 'C-fix: the cap stays after the pass');
-    assert.strictEqual(at(250).ctx.retailFail, true);
-    // 600 furniture Workshops and nothing cutting them (no server): the cap is never reached, no new run, no Oil Rig
-    const big = simulate(f, { minutes: 260, cd: 20000, counts: { 3: 300, 8: 200, 11: 100 } });
-    assert.ok(big.log.filter((x) => x.m >= 120).every((x) => x.ok === false && !oil(x)));
+    assert.strictEqual(at(250).ctx.retailFailPath, false, 'a pass leaves no fail path');
+    assert.strictEqual(at(250).ctx.retailCap, null);
+    assert.strictEqual(at(250).ctx.retailFail, false);
+    // 800 furniture Workshops piling up stock and nothing cutting them (no server): the cap is never reached, no new run, no Oil Rig
+    const big = simulate(f, { minutes: 260, cd: 20000, stock: 0, counts: BIG });
+    assert.ok(big.log.filter((x) => x.m >= 120).every((x) => x.ok === false && x.ctx.retailFail && !oil(x)));
     assert.strictEqual(big.last.ctx.retail.sampler.mem.prevDecision, undefined);
     // the new run fails too (demand still sliding): once its cap holds, another run starts with that fail as prevDecision
     const slide = simulate((m) => Math.max(0.05, 1 - m / 150), { minutes: 260 });

@@ -34,6 +34,7 @@ add('core-math', ['bun', T('core-math-test.js')], ['src/core-math.js', T('core-m
 add('autopilot-anycorp', ['bun', T('autopilot-anycorp-test.js')], [BUILT, T('autopilot-anycorp-test.js'), ...BOARD], 2);
 add('planner', ['bun', T('planner-test.js')], ['src/core-1.js', 'src/core-2.js', 'src/core-form.js', 'src/core-3.js', 'src/planner.js', T('planner-test.js'), ...BOARD], 1);
 add('keep-online', ['bun', T('keep-online-test.js')], [BUILT, T('keep-online-test.js')], 1);
+add('engine-power', ['bun', T('engine-power-test.js')], [BUILT, T('engine-power-test.js'), T('engine.js'), T('cp-fixtures.js'), T('live-2026-11-28.json')], 6);   // real engine wasm; skips offline
 add('module-watch', ['bun', T('module-watch-test.js')], [BUILT, T('module-watch-test.js')], 1);
 const argv = process.argv.slice(2);
 const flag = (n) => argv.includes('--' + n);

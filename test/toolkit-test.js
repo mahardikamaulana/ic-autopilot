@@ -1462,7 +1462,7 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       assert.strictEqual(m().need, 6);
       // Stalled: idle, not paused, inputs in stock, and its draw is more than the free capacity.
       delete st.groups[3];
-      st.groups[4] = run(SMELTER, 3, smelt.id, 0);                                  // wants 6 MW; free is 12 - 6 = 6: it can start
+      st.groups[4] = run(SMELTER, 3, smelt.id, 0);                                  // wants 6 MW; free is 12 - 6 = 6: the engine starts it at free >= draw
       st.stock = { 0: Object.fromEntries(smelt.inputs.map((i) => [i.item, i.amount * 5])) };
       assert.strictEqual(m().waiting, 0);
       st.subscriptions[0].power = 8;                                                // free is now 2: stalled
@@ -1539,6 +1539,50 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
       st.subscriptions[2] = { power: 1 };
       assert.deepStrictEqual([ut._measure('power', 2, st, cat, 100, []).load, ut._measure('power', 2, st, cat, 100, []).have], [5, 1]);
       assert.strictEqual(ut._measure('power', 0, st, cat, 100, []).load, 10, 'Heartland does not see the region 2 group');
+    } finally { unloadUt(); }
+  });
+
+  await t('Auto utilities (plan A3): store baseload counts with no work rows, an idle group stalls while its draw is above the free power, a contract about to end counts as gone (not urgent)', () => {
+    const { ut } = loadUt();
+    try {
+      const cat = board.catalog, STORE = 38, chair = recOf(WORKSHOP).id, shelf = board.catalog.recipes.find((r) => r.name === 'Make Bookshelf');
+      assert.strictEqual(cat.buildings.find((b) => b.id === STORE).baseload, true, 'the catalog marks the Retail Store as baseload');
+      const st = baseState();
+      st.subscriptions = { 0: { power: 5 } };
+      st.stock = { 0: Object.fromEntries(shelf.inputs.map((i) => [i.item, i.amount * 100])) };   // Planks for the Bookshelves
+      // store x1 (work [], no machines), Bookshelf x5 equipped but idle, 19 MW of running Workshops; 5 MW grid + 19 MW contract
+      st.groups = { 16: { building: STORE, count: 1, recipe: null, equipped: 0, work: [] }, 15: { building: WORKSHOP, count: 5, recipe: shelf.id, equipped: 5, work: [] }, 1: run(WORKSHOP, 19, chair) };
+      const contract = (extra) => ({ utility: 'power', region: 0, state: 'Active', seller: 7, buyer: 1, amount: 19, drawn: 19, delivered: 19, started_at: 0, duration: 1e6, ...extra });
+      const m = (c = [contract()], tick = 100) => ut._measure('power', 0, st, cat, tick, c);
+      const a = m();
+      assert.deepStrictEqual([a.load, a.base, a.imported, a.free], [21, 2, 19, 3], 'the store draws its 2 MW with no work rows');
+      assert.deepStrictEqual([a.waiting, a.need, ut._want(a).want], [5, 7, 7], 'the 5 Bookshelf Workshops need 5 > 3 free: stalled, the grid goes to 7');
+      // at 7 MW the engine starts them (free 5 >= draw 5); once they run they are load and the level holds
+      st.subscriptions[0].power = 7;
+      assert.deepStrictEqual([m().free, m().waiting], [5, 0], 'free == draw: the engine starts the group, it is not stalled');
+      st.groups[15].work = [{ recipe: shelf.id, runs: 25, remaining: 100 }];
+      assert.deepStrictEqual([m().load, m().need, ut._want(m()).want], [26, 7, 7]);
+      assert.strictEqual(ut._decide({ util: 'power', have: 7, want: 7, peak: 7, observedMs: 3600000, holdMs: 600000, money: 1e7, ticksToBill: 60 }).kind, 'ok');
+      // contracts carry everything: no grid floor (the engine powers the store last, so a grid floor would protect nothing)
+      st.groups = { 16: st.groups[16], 1: run(WORKSHOP, 4, chair) };
+      assert.deepStrictEqual([m().need, ut._want(m()).want], [6 - 19, 0]);
+      st.groups[16].paused = true;
+      assert.deepStrictEqual([m().base, m().load], [0, 4], 'a paused store draws nothing');
+      st.groups[16].paused = false;
+      // a bought contract ending within conf.contractLeadMin (30 min = 3,600 ticks) counts as gone, so the grid is up before it ends;
+      // that share is not urgent, so it may wait out the last minute before a bill
+      st.groups = { 16: st.groups[16], 1: run(WORKSHOP, 19, chair) };
+      const end = m([contract({ duration: 3700 })]);
+      assert.deepStrictEqual([end.imported, end.ending], [0, 19], 'ends at 3,700, now 100 + 3,600: gone');
+      assert.strictEqual(m([contract({ duration: 3701 })]).imported, 19);
+      assert.strictEqual(m([contract({ duration: 3700 })], 0).imported, 19, 'tick unknown: no end rule');
+      assert.strictEqual(ut._want(end).want, 21, 'raised to carry what the contract carried: the whole 21 MW on the grid');
+      assert.strictEqual(ut._decide({ util: 'power', have: 7, want: 21, peak: 21, urgent: ut._want({ ...end, need: end.need - end.waiting - end.ending }).want, observedMs: 3600000, holdMs: 600000, money: 1e7, ticksToBill: 30 }).kind, 'hold', '30 ticks before a bill: the contract share waits for it');
+      // the live corp (2026-11-28): 5 MW grid, 11 + 8 MW contracts, a store and 5 idle Bookshelf Workshops: exactly 7 MW grid
+      // (engine-checked in engine-power-test: below 7 the Bookshelf x5 stays idle, at 7 it starts)
+      const live = require('./live-2026-11-28.json'), ls = live.snap, tick = ls.ssi.last_user_mutation_tick;
+      const lm = ut._measure('power', 0, ls, cat, tick, live.contracts);
+      assert.deepStrictEqual([lm.base, lm.imported, lm.free, lm.waiting, ut._want(lm).want], [2, 19, 3, 5, 7], JSON.stringify(lm));
     } finally { unloadUt(); }
   });
 

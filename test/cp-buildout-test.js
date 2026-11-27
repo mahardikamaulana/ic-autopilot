@@ -707,7 +707,7 @@ const wsGroups = (st) => Object.values(st.groups).filter((g) => g.building === B
     F.unload();
   });
 
-  await F.t('Wooden Frame gate (B6): pause Frame Timber at the keep line, resume below half, leave a group the user resumed; none on the fail path after a pass', () => {
+  await F.t('Wooden Frame gate (B6): pause Frame Timber at the keep line, resume below half, leave a group the user resumed; also on the fail path and after a pass', () => {
     const { cp } = F.load(['cp-buildout']);
     const st = switched(liveReady()), mem = sharedMem(), WF = I('Wooden Frame');
     const pause = (o = {}) => { const a = bo(decideOn(cp, st, { mem, ...o })); return a?.id?.startsWith('bo:pause:3:') ? a : null; };
@@ -743,15 +743,113 @@ const wsGroups = (st) => Object.values(st.groups).filter((g) => g.building === B
     // retail fail before a pass: no CD need, so the gate still bounds the frames
     const fail = { retailOk: false, retailFail: true, retailFailPath: true };
     assert.deepStrictEqual(bo(decideOn(cp, st, { mem: sharedMem(), ...fail })).steps[0].msg, { type: 'SetPaused', group: 3, paused: true });
-    // fail path after a pass with no CD need (Refinery started, or the ladder not loaded) or CD Farm not on Auto: the gate still pauses
+    // a pass with a CD need and CD Farm on Auto: the gate still pauses (a pass drops the cap, so there is no fail path to burn frames on)
     const auto = (o = {}) => ({ cdFarm: { cfg: { building: 'auto', autoStart: true, ...o } } }), need = { name: 'Oil Rig', cd: 20000 };
-    for (const o of [{ ladderNeed: false, mods: auto() }, { mods: auto() }, { ladderNeed: need, mods: auto({ autoStart: false }) }, { ladderNeed: need, mods: auto({ building: 'Farm' }) }, { ladderNeed: need }])
-      assert.deepStrictEqual(bo(decideOn(cp, st, { mem: sharedMem(), retailOk: true, retailFailPath: true, ...o }))?.steps[0].msg, { type: 'SetPaused', group: 3, paused: true }, JSON.stringify(o));
-    // fail path after a pass, a CD need and Auto on: CD Farm burns the frames above the line, so nothing is paused and a group paused here comes back
-    const mem2 = sharedMem(), burn = { retailOk: true, retailFailPath: true, ladderNeed: need, mods: auto() };
-    assert.strictEqual(bo(decideOn(cp, st, { mem: mem2, ...burn }))?.id?.startsWith('bo:pause:3:') ?? false, false);
-    mem2('buildout').set({ ftMine: [3] }); st.groups[3].paused = true;
-    assert.deepStrictEqual(bo(decideOn(cp, st, { mem: mem2, ...burn })).steps[0].msg, { type: 'SetPaused', group: 3, paused: false });
+    for (const o of [{ ladderNeed: false, mods: auto() }, { ladderNeed: need, mods: auto() }, { ladderNeed: need }])
+      assert.deepStrictEqual(bo(decideOn(cp, st, { mem: sharedMem(), retailOk: true, ...o }))?.steps[0].msg, { type: 'SetPaused', group: 3, paused: true }, JSON.stringify(o));
+    F.unload();
+  });
+
+  await F.t('A2: 11 Frame Timber Workshops + the kept one, Wooden Frames 6,588 over the line: the 11 go to Make Bookshelf, the kept one pauses, nothing flips back in 2 h', () => {
+    for (const pausedByGate of [false, true]) {
+      const { cp } = F.load(['cp-buildout']);
+      cp.cfg.landPaybackAB = 0;
+      const st = liveReady(), mem = sharedMem(), FT = Rc('Assemble Wooden Frame');
+      st.groups[2].count = 200;                                   // plank headroom for Bookshelves
+      st.groups[3].count = 11;                                    // the live corp's 11 (paused by the WF gate in the second run)
+      st.groups[8].count = 1;                                     // the kept Frame Timber Workshop
+      st.groups[20] = { building: B('Workshop'), region: 0, count: 5, recipe: Rc('Make Bookshelf'), modules: {} };
+      st.groups[21] = { building: B('Workshop'), region: 0, count: 3, recipe: FT, paused: true, modules: {} };   // paused by the user: never touched
+      st.next_group_id = 30;
+      st.stock[0][I('Wooden Frame')] = 6588;
+      st.stock[0][I('Iron Ore')] = 1000;                          // the Bookshelf kit for 11
+      if (pausedByGate) { st.groups[3].paused = true; mem('buildout').set({ ftMine: [3] }); }
+      const w = F.world(st, deals, { catalog: cat, retail }), ids = [], sent = [];
+      for (let k = 0; k <= 24; k++) {                            // a step every 5 min for 2 h
+        const a = bo(decideOn(cp, st, { mem, now: 1.8e12 + k * 5 * 60000 }));
+        if (a) { ids.push(a.id); for (const s of a.steps) { sent.push(s.msg); w.ws.send(JSON.stringify(s.msg)); assert.ok(s.until(cp._view(st, cat, deals)), a.id + ' confirmed'); } }
+        const ftPaused = wsGroups(st).filter((g) => g.recipe === FT && g.paused && g.count > 0 && g !== st.groups[21]);
+        assert.ok(ftPaused.every((g) => g.count <= cp.cfg.keepFrameTimber), 'step ' + k + ': paused Frame Timber ' + JSON.stringify(ftPaused.map((g) => g.count)));
+      }
+      const tag = pausedByGate ? ' (11 paused by the gate)' : '';
+      assert.strictEqual(st.groups[3].recipe, Rc('Make Bookshelf'), ids.join(', ') + tag);
+      assert.strictEqual(!!st.groups[3].paused, false, 'the 11 run' + tag);
+      assert.deepStrictEqual([st.groups[8].recipe, st.groups[8].paused], [FT, true], 'the kept one pauses' + tag);
+      assert.deepStrictEqual([st.groups[21].recipe, st.groups[21].paused, st.groups[21].count], [FT, true, 3], 'user-paused group untouched' + tag);
+      assert.ok(!sent.some((m) => m.type === 'SetRecipe' && m.recipe === FT), 'nothing back to Frame Timber' + tag);
+      assert.ok(!sent.some((m) => m.group === 3 && m.type === 'SetPaused' && m.paused), 'the 11 are never paused' + tag);
+      assert.ok(!sent.some((m) => m.group === 21), 'no message for the user-paused group' + tag);
+      assert.deepStrictEqual(ids.filter((x) => /^bo:(recipe|pause|split):/.test(x)), pausedByGate ? ['bo:recipe:3:' + Rc('Make Bookshelf'), 'bo:pause:3:false', 'bo:pause:8:true'] : ['bo:pause:8:true', 'bo:recipe:3:' + Rc('Make Bookshelf')], ids.join(', '));
+      assert.deepStrictEqual(mem('buildout').get().ftMine, [8], 'the 11 left ftMine once moved off Frame Timber' + tag);
+      assert.ok(!/switch the spare Frame Timber Workshops first/.test(boWait(decideOn(cp, st, { mem, now: 1.8e12 + 3 * HOUR }))), 'the user-paused group holds no furniture buy' + tag);
+      F.unload();
+    }
+  });
+
+  // The A2 corp: 11 Frame Timber Workshops (group 3), the kept one (group 8), Bookshelf x5 (group 20), frames far over the line.
+  function a2St() {
+    const st = liveReady();
+    st.groups[2].count = 200; st.groups[3].count = 11; st.groups[8].count = 1;
+    st.groups[20] = { building: B('Workshop'), region: 0, count: 5, recipe: Rc('Make Bookshelf'), modules: {} };
+    st.next_group_id = 30;
+    st.stock[0][I('Wooden Frame')] = 6588;
+    return st;
+  }
+
+  await F.t('A2 fix 5: the switch blocked (kit short) for cfg.ftBlockedMin (30) min: the extra Frame Timber pauses too; once the kit is in it moves and resumes', () => {
+    const { cp } = F.load(['cp-buildout']);
+    cp.cfg.landPaybackAB = 0;
+    assert.strictEqual(cp.cfg.ftBlockedMin, 30);
+    const st = a2St(), mem = sharedMem(), FT = Rc('Assemble Wooden Frame');   // no extra Iron Ore: the Bookshelf kit for 11 is short
+    const w = F.world(st, deals, { catalog: cat, retail }), log = [];
+    const at = (min) => { const d = decideOn(cp, st, { mem, now: 1.8e12 + min * 60000 }); const a = bo(d); if (a) { log.push(min + ' ' + a.id); for (const s of a.steps) { w.ws.send(JSON.stringify(s.msg)); assert.ok(s.until(cp._view(st, cat, deals))); } } return { a, d }; };
+    assert.strictEqual(at(0).a.id, 'bo:pause:8:true', 'the kept one pauses');
+    assert.match(boWait(at(1).d), /switch: kit short for 11 x Make Bookshelf/);
+    for (const min of [10, 20, 30]) assert.ok(!at(min).a, 'blocked for less than 30 min: the 11 run (' + min + ')');
+    assert.strictEqual(at(31).a.id, 'bo:pause:3:true', log.join(', '));
+    assert.deepStrictEqual([...mem('buildout').get().ftMine].sort(), [3, 8]);
+    st.stock[0][I('Iron Ore')] = 1000;
+    assert.strictEqual(at(32).a.id, 'bo:recipe:3:' + Rc('Make Bookshelf'), log.join(', '));
+    assert.strictEqual(at(33).a.id, 'bo:pause:3:false');
+    at(34);
+    assert.strictEqual(mem('buildout').get().ftBlockedSince, null);
+    assert.deepStrictEqual([st.groups[3].recipe, !!st.groups[3].paused, st.groups[8].recipe, st.groups[8].paused], [Rc('Make Bookshelf'), false, FT, true]);
+    F.unload();
+  });
+
+  await F.t('A2 fix 4: while the switch targets the best $ per Workshop-hour (frames over the line, or the kept one paused) the board rebalance stands down', () => {
+    const { cp } = F.load(['cp-buildout']);
+    const st = switched(liveReady());
+    st.groups[2].count = 200;
+    st.groups[20] = { building: B('Workshop'), region: 0, count: 6, recipe: Rc('Make Bookshelf'), modules: {} };   // far over the board split
+    st.next_group_id = 30;
+    const mem = sharedMem(), old = 1.8e12 - 7 * HOUR;
+    mem('buildout').set({ rebal: { bookshelf: { dir: 'over', at: old }, table: { dir: 'under', at: old }, chair: { dir: 'under', at: old } } });
+    const rb = () => cp._buildout.rebalanceStep(cp._view(st, cat, deals), F.ctxOf({ retailBoard: retail, mem }));
+    assert.ok(rb()?.action || rb()?.wait, 'frames under the line: the rebalance runs');
+    st.stock[0][I('Wooden Frame')] = 6588;
+    assert.strictEqual(rb(), null, 'frames over the line: no rebalance');
+    st.stock[0][I('Wooden Frame')] = 12; st.groups[3].paused = true; mem('buildout').set({ ftMine: [3] });
+    assert.strictEqual(rb(), null, 'the gate still holds the kept one paused: no rebalance');
+    F.unload();
+  });
+
+  await F.t('A2 fix 6: a move into a running group adds its draw at once: only what the free power (plus what Auto can raise) carries', () => {
+    const { cp } = F.load(['cp-buildout']);
+    cp.cfg.landPaybackAB = 0;
+    const st = a2St(), mem = sharedMem();
+    delete st.groups[8];                                          // the 11 alone: the switch takes from them (Unassign + Assign)
+    st.groups[3].paused = true; st.groups[3].work = []; mem('buildout').set({ ftMine: [3] });   // paused with no work rows: draws nothing
+    st.groups[20].work = [{ recipe: Rc('Make Bookshelf'), runs: 25, buildings: 5, remaining: 100 }];   // the Bookshelf group runs
+    st.stock[0][I('Iron Ore')] = 1000;
+    const furn = 5;                                               // furniture now: the 5 Bookshelf Workshops
+    const sw = (free, raise) => bo(decideOn(cp, st, { mem, retailCap: furn + 4, mods: { autoUtil: { _measure: () => ({ free }), raiseRoom: () => raise } } }));
+    assert.deepStrictEqual(sw(Infinity, 0).steps.map((s) => s.msg), [{ type: 'UnassignBuildings', group: 3, amount: 4 }, { type: 'AssignBuildings', group: 20, amount: 4 }], 'the cap leaves room for 4');
+    assert.strictEqual(sw(2, 0).steps[0].msg.amount, 2, '2 MW free: 2 Workshops');
+    assert.strictEqual(sw(2, 1).steps[0].msg.amount, 3, '+1 MW Auto can raise now');
+    const d = decideOn(cp, st, { mem, retailCap: furn + 4, mods: { autoUtil: { _measure: () => ({ free: 0 }), raiseRoom: () => 0 } } });
+    assert.ok(!bo(d), JSON.stringify(bo(d)?.steps));
+    assert.match(boWait(d), /switch: waits for power \(0 MW free for 1 MW a Workshop\)/);
     F.unload();
   });
 
