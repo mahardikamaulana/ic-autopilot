@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IC Autopilot
 // @namespace    idlecorp-toolkit
-// @version      2.8.21
+// @version      2.8.22
 // @author       XPARAD0X
 // @description  Early-game Autopilot, CD Farm (Construction Data by building and demolishing buildings; Auto picks the cheapest source itself), Lab runner (keeps the Manufacturing Labs researching), Auto ship (an "Auto ship" button on every distributor bid), Auto utilities (an "Auto" switch that keeps the power and water subscriptions at what the groups need), Core plan and Keep online (keeps the socket alive while the tab is hidden) for IdleCorp, each with a panel, menu or switch in the game UI. Everything runs live by default.
 // @homepageURL  https://github.com/mahardikamaulana/ic-autopilot
@@ -6780,7 +6780,7 @@ try {
   const STORE = 'Retail Store', GROUP_NAME = 'Retail', WORKSHOP = 'Workshop', FT = 'Assemble Wooden Frame', FT_GROUP = 'Frame Timber';
   const RATES = { power: 1000, water: 400, bandwidth: 1500 };   // cents per unit per 10-min bill (same as autoUtil billsOf)
   // shortcut: the corp state carries no stock quality, so the price uses quality 0; read it once the protocol shows one.
-  const Q0 = 0.952;                    // quality factor at quality 0 (wiki retail.md, Price)
+  const Q0 = 0.95;                     // quality factor at quality 0 (wiki retail.md, Price; engine BhehihUq)
   const cfg = () => W.corePlan.cfg;
   const usd = (c) => '$' + (c / 100).toLocaleString('en-US', { maximumFractionDigits: 0 });
   const pct = (x) => (x * 100).toFixed(0) + '%';
@@ -6817,6 +6817,7 @@ try {
   }
   function ratingOf(st) {
     const r = st.retail_ratings?.[REGION] ?? st.retail_ratings?.[String(REGION)];
+    if (r == null) return 0;   // the engine deletes the key (or the whole map) when the rating reaches 0
     if (num(r)) return r;
     if (r && typeof r === 'object') { const x = r[st.ssi?.corp_id]; return num(x) ? x : null; }
     return null;
@@ -6995,15 +6996,20 @@ try {
       if (d > pw || !pName) { pw = d; pName = x.n + ' ' + (want / 10000 * Q0).toFixed(2) + 'x base'; }
     }
     out.push({ id: 'price', ok: bad || !pName ? null : true, why: bad ? 'a shelf row has no board price' : 'live board: ' + (pName || '-') + (pw > 0 ? ', board moved up to ' + pct(pw) + ' during the run' : '') });
-    // 4. rating >= target within cfg.retailRatingMin minutes of the shelves being set (+1 per tick from 0 gives 9,000 in 75 min)
+    // 4. rating >= target within cfg.retailRatingMin minutes of the shelves being set, checked only while a rival store is on the board.
+    // The rating is scored per shelf (+1 per shelf that sold, -2 per shelf with a customer but no stock; wiki retail.md), so an
+    // output-limited store sits near 0; alone, share is 100% at any rating, so the rating is no test of the store.
+    const rival = samples.some((s) => num(s.share) && s.share < 1);
     const rated = samples.filter((s) => num(s.r));
     const dl = mem.shelvedAt + c.retailRatingMin * 60000;
     const hit = rated.find((s) => s.r >= c.retailRating && s.t <= dl + c.retailSampleMin * 60000);
     const rate = rated.length >= 2 ? (rated[rated.length - 1].r - rated[0].r) / ((rated[rated.length - 1].t - rated[0].t) / 1000 * TPS) : null;
     // E1 run (after the checkpoint): the rating stays at the target at every sample of the run, not only the last one
-    const okR = !rated.length ? null : e1 ? rated.every((s) => s.r >= c.retailRating) : hit ? true : now > dl + c.retailSampleMin * 60000 ? false : null;
+    const okR = !rival ? (samples.length ? true : null) : !rated.length ? null : e1 ? rated.every((s) => s.r >= c.retailRating) : hit ? true : now > dl + c.retailSampleMin * 60000 ? false : null;
+    const ratingTxt = rated.length ? 'rating ' + rated[rated.length - 1].r + (rate != null ? ', ' + rate.toFixed(2) + ' per tick' : '') : 'no rating in st.retail_ratings';
     out.push({ id: 'rating', ok: okR,
-      why: !rated.length ? 'no rating in st.retail_ratings' : 'rating ' + rated[rated.length - 1].r + (rate != null ? ', ' + rate.toFixed(2) + ' per tick' : '') + ', needs ' + c.retailRating + ' within ' + c.retailRatingMin + ' min' + (hit ? ' (reached at ' + Math.round((hit.t - mem.shelvedAt) / 60000) + ' min)' : '') });
+      why: !rival ? ratingTxt + '; no rival store on the board, so the rating is not checked (share 100%)'
+        : ratingTxt + ', needs ' + c.retailRating + ' within ' + c.retailRatingMin + ' min (a rival store is on the board)' + (hit ? ' (reached at ' + Math.round((hit.t - mem.shelvedAt) / 60000) + ' min)' : '') });
     return { rows: out, sales: sv };
   }
   // Blocks the measured sales can carry: per good min(sold per hour over the last hour, latest demand per hour) / block units per hour.

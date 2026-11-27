@@ -229,10 +229,12 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
   });
 
   // ---- checkpoint over simulated time --------------------------------------------------------------------------------------------
-  // Each 10 min: Workshops add their waves, the store sells min(stock, appetite / 240 x ticks), the rating moves +1 per selling tick
-  // (-2 when nothing sells), then the board for that minute is read and corePlan decides.
-  // shelfAt: minute the shelves are set (before it the store cannot sell); counts: furniture group sizes; cd: CD in hand (Oil Rig).
-  function simulate(appetiteAt, { minutes = 120, stock = 50000, shelfAt = 0, counts = {}, cd = null } = {}) {
+  // Each 10 min: Workshops add their waves, the store sells min(stock, appetite / 240 x ticks), the rating moves per shelf (wiki
+  // retail.md: +1 per tick for a shelf that sold and kept stock, -2 per tick for a shelf that ran dry with demand left), then the board
+  // for that minute is read and corePlan decides.
+  // shelfAt: minute the shelves are set (before it the store cannot sell); counts: furniture group sizes; cd: CD in hand (Oil Rig);
+  // rival: a rival store on the board (rating 0), so the rating row is checked.
+  function simulate(appetiteAt, { minutes = 120, stock = 50000, shelfAt = 0, counts = {}, cd = null, rival = false } = {}) {
     const { cp: c } = F.load(['cp-retail']);
     const st = liveC({ stock, counts });
     if (cd != null) st.items[F.CD] = cd;
@@ -242,22 +244,24 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
     const rate = (n) => { const g = Object.values(st.groups).find((x) => x.recipe === Rc('Make ' + n)); return g.work[0].runs / cat.recipes.find((r) => r.id === Rc('Make ' + n)).ticks; };
     const log = [];
     let b = board();
+    if (rival) b.ratings = { 0: { 777: 0 } };
     for (let m = 0; m <= minutes; m += 10) {
       if (m >= shelfAt && !st.groups[90].assortment.length) st.groups[90].assortment = shelfIds();
       if (m > shelfAt) {
         const ticks = 10 * 60 * 2;
-        let selling = false;
+        let delta = 0;
         for (const n of ['Bookshelf', 'Table', 'Chair']) {
           const id = I(n), made = rate(n) * ticks, want = b.shelves[0][id].appetite / 240 * ticks;
           const sold = Math.min(st.stock[0][id] + made, want);
-          if (sold > 0) selling = true;
           st.stock[0][id] += made - sold;
           b.shelves[0][id].held += Math.round(sold);
+          delta += sold < want ? -2 * ticks : sold > 0 ? ticks : 0;
         }
-        st.retail_ratings[0] = Math.max(0, Math.min(10000, st.retail_ratings[0] + (selling ? ticks : -2 * ticks)));
+        const r = Math.max(0, Math.min(10000, (st.retail_ratings?.[0] ?? 0) + delta));
+        if (r > 0) (st.retail_ratings ??= {})[0] = r; else delete st.retail_ratings?.[0];   // the engine deletes the key at 0
       }
       const nb = clone(b);
-      for (const n of ['Bookshelf', 'Table', 'Chair']) nb.shelves[0][I(n)].appetite = Math.round(b0.shelves[0][I(n)].appetite * appetiteAt(m));
+      for (const n of ['Bookshelf', 'Table', 'Chair']) nb.shelves[0][I(n)].appetite = Math.round(b0.shelves[0][I(n)].appetite * appetiteAt(m) * (rival ? 2 : 1));
       b = nb;
       const ctx = F.ctxOf({ retailBoard: b, mem, now: t0 + m * MIN });
       const out = c._decide(c._view(st, cat, []), ctx);
@@ -266,8 +270,25 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
     return { log, last: log[log.length - 1], c, mem, st };
   }
 
-  await t('steady board: undecided before 2 h, PASS at 2 h, E1 after 6 h with the rating at 9,000 at every sample', () => {
-    const { log, last } = simulate((m) => 1 + 0.04 * Math.sin(m / 17), { minutes: 500, stock: 200000 });
+  await t('steady board, alone in the region: PASS at 2 h, E1 at 6 h; the rating is not checked', () => {
+    const { log } = simulate((m) => 1 + 0.04 * Math.sin(m / 17), { minutes: 380, stock: 200000 });
+    assert.ok(log.filter((x) => x.m < 120).every((x) => x.ok === null), 'undecided early');
+    const at2 = log.find((x) => x.m === 120);
+    assert.strictEqual(at2.ok, true, JSON.stringify(at2.out.readouts.retail, null, 1));
+    assert.ok(at2.out.readouts.retail.rows.some((r) => /^rating pass: .*no rival store/.test(r)), at2.out.readouts.retail.rows.join('\n'));
+    assert.ok(log.filter((x) => x.m < 360).every((x) => x.e1 === false), 'E1 at ' + log.find((x) => x.e1)?.m);
+    assert.strictEqual(log.find((x) => x.m === 360).e1, true);
+  });
+
+  await t('alone, output-limited store with its rating stuck at 0 (key deleted): still PASS', () => {
+    const { log, st } = simulate(() => 1, { stock: 30 });
+    assert.strictEqual(st.retail_ratings?.[0], undefined, 'output-limited: rating at 0');
+    const at2 = log.find((x) => x.m === 120);
+    assert.strictEqual(at2.ok, true, JSON.stringify(at2.out.readouts.retail.rows, null, 1));
+  });
+
+  await t('steady board with a rival: undecided before 2 h, PASS at 2 h, E1 after 6 h with the rating at 9,000 at every sample', () => {
+    const { log, last } = simulate((m) => 1 + 0.04 * Math.sin(m / 17), { minutes: 500, stock: 200000, rival: true });
     assert.ok(log.filter((x) => x.m < 120).every((x) => x.ok === null), 'undecided early');
     const at2 = log.find((x) => x.m === 120);
     assert.strictEqual(at2.ok, true, JSON.stringify(at2.out.readouts.retail, null, 1));
@@ -375,14 +396,15 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
     assert.ok(rows.some((r) => /^sales pass/.test(r)), rows.join('\n'));
   });
 
-  await t('rating stuck (store keeps running dry): FAIL on the rating row', () => {
+  await t('rating stuck with a rival on the board: FAIL on the rating row', () => {
     const { cp: c } = F.load(['cp-retail']);
     const st = liveC({ stock: 50000 });
     st.groups[90] = { building: B('Retail Store'), region: 0, count: 1, recipe: null, name: 'Retail', modules: {}, assortment: shelfIds() };
     st.retail_ratings = { 0: 0 };
     const mem = memFn();
+    const rb = () => { const b = board(); b.ratings = { 0: { 777: 0 } }; return b; };
     let ctx;
-    for (let m = 0; m <= 120; m += 10) { st.retail_ratings[0] = m * 30; ctx = F.ctxOf({ retailBoard: board(), mem, now: 1.8e12 + m * MIN }); c._decide(c._view(st, cat, []), ctx); }
+    for (let m = 0; m <= 120; m += 10) { st.retail_ratings[0] = m * 30; ctx = F.ctxOf({ retailBoard: rb(), mem, now: 1.8e12 + m * MIN }); c._decide(c._view(st, cat, []), ctx); }
     assert.strictEqual(ctx.retailOk, false);
     assert.ok(/rating/.test(ctx.retail.sampler.mem.decision.kind), ctx.retail.sampler.mem.decision.kind);
   });
@@ -596,12 +618,13 @@ const memFn = () => { const m = {}; return (n) => ({ get: () => m[n] ?? {}, set:
     assert.strictEqual(run(1e4 - 720).ok, true);
   });
 
-  await t('E1 rating (C2): 9,000 at every sample of the run, not only the last one', () => {
+  await t('E1 rating (C2): with a rival, 9,000 at every sample of the run, not only the last one; alone, not checked', () => {
     const { cp: c } = F.load(['cp-retail']);
     const t0 = 1.8e12, g = { 1: { n: 'Bookshelf', a: 240, h: 0, p: 16000, s: 1e6, out: 0 } };
-    const rows = (rs) => c._retail.rowsOf(rs.map((r, k) => ({ t: t0 + k * 600000, r, share: 1, g })), { shelvedAt: t0 }, c.cfg, t0 + rs.length * 600000, true).rows.find((x) => x.id === 'rating');
+    const rows = (rs, share = 0.6) => c._retail.rowsOf(rs.map((r, k) => ({ t: t0 + k * 600000, r, share, g })), { shelvedAt: t0 }, c.cfg, t0 + rs.length * 600000, true).rows.find((x) => x.id === 'rating');
     assert.strictEqual(rows([9500, 8000, 9500]).ok, false, 'a dip in the run fails it');
     assert.strictEqual(rows([9000, 9500, 10000]).ok, true);
+    assert.strictEqual(rows([0, 0, 0], 1).ok, true, 'alone: rating 0 passes');
   });
 
   await t('price row: the expected price comes from the live board (a steady 150% board passes; an unreadable price is unknown)', () => {
