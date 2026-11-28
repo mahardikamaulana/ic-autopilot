@@ -66,6 +66,8 @@ function bind(bytes) {
     tick(msgs = []) { const [p, l] = put(JSON.stringify(msgs)); const r = me.localengine_tick(this.p, p, l); if (r[3]) throw err(r[2]); return JSON.parse(ret(r)); }
     worldEventAt(t) { return JSON.parse(ret(me.localengine_worldEventAt(this.p, t))); }
     hash() { return ret(me.localengine_stateHash(this.p)); }
+    // the client's B_: the combined effect of a module layout on a group of this building (same call as engine.moduleReport in the page)
+    moduleReport(building, json) { const [p, l] = put(json); return ret(me.localengine_moduleReport(this.p, building, p, l)); }
   }
   return { Engine, catalog: () => JSON.parse(ret(me.catalog_json())) };
 }

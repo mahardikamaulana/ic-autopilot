@@ -29,6 +29,10 @@ From the console: `autoUtil.set('power', true)`, `autoUtil.status()`, `autoUtil.
 
 On the Module Exchange page a **Watch** button opens a list of filters in the game's own words (`overclock`, `refiner`, `mythic`, `twinned >= 10`, `price <= 500`). A listing that matches a filter alerts you once: a toast while the tab is visible, a desktop notification while it is hidden, and a tab-title badge until you open the Module Exchange. It never buys. With the page closed, it asks the server for the watched listings itself, one filter at a time. Watches are saved in this browser: `moduleWatch.add('overclock mythic price <= 500')`, `moduleWatch.status()`.
 
+## Auto modules
+
+On the Modules page an **Auto modules** switch (on by default) arranges your modules, free and installed, over the group sockets for the most value per hour: the best set on each group, in the best socket order, the strongest modules where they are worth the most. It scores each layout with the game engine's own module report (every quirk, neighbor bonus and coupling included) at catalog prices, and only changes the setup when that adds at least 2%. Each move is one Remove then one Install, confirmed in the game state before the next. Efficiency counts the power and water it saves (Auto utilities lowers the subscription to match), Calibrator the retail price its quality adds, and Instrumented (Manufacturing Data) and Insightful (Lab success, so less MD per result) count in MD, which only breaks ties: dollars always win. Only modules of an unknown kind stay put; fleet sockets and paused groups are left alone. From the console: `autoModules.status()`, `autoModules.plan()`, `autoModules.set(false)`.
+
 ## Develop
 
 Needs [bun](https://bun.sh).

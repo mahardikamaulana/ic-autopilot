@@ -861,6 +861,46 @@ async function sectionUtilities(page, { q, attr, count, visible, ui }) {
   }
 }
 
+async function sectionModules(page) {
+  // Auto modules: the switch sits in the heading of the Modules page, on by default; it installs a free module; Off is saved
+  const setPage = (html) => page.evaluate((x) => { document.querySelector('main > div:last-child').innerHTML = x; }, html);
+  const count = (sel) => page.$$eval(sel, (e) => e.length);
+  const modulesPage = '<section class="panel"><div class="panel-head"><h2>Modules</h2></div><div>module list</div></section>';
+  await page.evaluate(() => {
+    const st = window.__st;
+    st.groups = { 1: { building: 0, count: 10, recipe: 0, work: [], modules: {} } };   // 10 Lumber Camps on Fell Wood
+    st.module_defs = { 0: { id: 0, kind: 61, name: 'Overclock Module Mk1', ticks_bonus: 0, inputs_bonus: 0, neighbor_pct: 0, quirks: [] } };
+    st.fleet_modules = [];
+    // stand-in for the game engine: +15 speed per module
+    window.__fiber.memoizedProps.engine = { evaluateLayout() { }, moduleReport: (b, j) => JSON.stringify({ speed: 15 * Object.keys(JSON.parse(j)).length, inputs_pct: 100, outputs_pct: 100, draws_pct: 100, quality: 0, strength: {} }) };
+    window.__sent = [];
+    window.__ws.send = (m) => {
+      const o = JSON.parse(m); window.__sent.push(o);
+      if (o.type === 'InstallModule') st.groups[o.group].modules[o.cell] = o.module;
+      if (o.type === 'RemoveModule') delete st.groups[o.group].modules[o.cell];
+      st.ssi.last_user_mutation_tick += 4;
+    };
+  });
+  await setPage(modulesPage);
+  await page.waitForSelector('[data-am="box"]', { timeout: 5000 });
+  ok(await count('[data-am="box"]') === 1 && await page.$eval('section.panel > .panel-head + [data-am="box"]', () => true), 'Auto modules: one box under the Modules heading');
+  ok(await page.$eval('[data-am="box"] input[role="switch"]', (e) => e.checked) && await page.evaluate(() => window.autoModules.conf.on === true), 'Auto modules: on by default');
+  await page.evaluate(() => window.autoModules._step());
+  await page.waitForFunction(() => window.__sent.some((m) => m.type === 'InstallModule'), null, { timeout: 8000 });
+  const sentM = await page.evaluate(() => window.__sent);
+  ok(JSON.stringify(sentM) === JSON.stringify([{ type: 'InstallModule', group: 1, cell: '0,-1', module: 0 }]), 'Auto modules: it installs the free Overclock on the running group', JSON.stringify(sentM));
+  await page.waitForFunction(() => /install Overclock Module Mk1/.test(document.querySelector('[data-am="log"]')?.textContent ?? ''), null, { timeout: 5000 });
+  ok(true, 'Auto modules: the log says what it did');
+  await page.click('[data-am="box"] .am-sw');
+  ok(await page.evaluate(() => window.autoModules.conf.on === false && JSON.parse(localStorage.getItem('autoModules.v1')).on === false), 'Auto modules: clicking the switch turns it off, saved in this browser');
+  await setPage(modulesPage);
+  await page.waitForFunction(() => document.querySelectorAll('[data-am="box"]').length === 1 && !document.querySelector('[data-am="box"] input').checked, null, { timeout: 5000 });
+  ok(true, 'Auto modules: after the page is drawn again the box is back, once, and off');
+  await setPage('<div>Game content</div>');
+  await page.waitForFunction(() => !document.querySelector('[data-am="box"]'), null, { timeout: 5000 });
+  ok(true, 'Auto modules: leaving the Modules page removes the box');
+}
+
 async function sectionUnload(page, { q, attr, count, visible, ui }) {
   // unload leaves nothing behind
   await page.evaluate(() => { window.earlyGame._unload(); window.cdFarm._unload(); window.labRunner._unload(); window.autoUtil._unload(); window.idleCore._unload(); });
@@ -1023,6 +1063,7 @@ const SHARDS = {
   cdfarm: { main: [sectionCdFarm] },
   lab: { main: [sectionLab] },
   utilities: { main: [sectionUtilities, sectionUnload] },
+  modules: { main: [sectionModules] },
   narrow: { own: sectionNarrow },
   handoff: { own: sectionHandoff },
   docked: { own: sectionDocked },

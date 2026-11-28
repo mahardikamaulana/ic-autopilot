@@ -8,10 +8,7 @@
 //   2. Lab preset: while Core plan is live, a dry-run or reloaded Lab runner is started live with the Tier I list from wiki 10
 //      step 1 (Bookshelf / Table / Chair on Quality engineering, Planks on Process study), or on your own setting once you have
 //      changed it. A live Lab runner is never touched. A dry-run or stopped Lab runner is an alert, never silent.
-//   3. Modules: each free module (in no group, not in the fleet) goes by the install table: Overclock (kind 61) -> Fell Wood,
-//      Refiner (kind 62) -> furniture Workshops (never an Overclock on a Workshop: it raises plank use), Insightful quirk -> Lab.
-//      A quirk that names a cell (e.g. CornerTuned "1,-1") is installed only in that cell. Stacking is unverified (risk R2), so
-//      after the first module of a kind on a group no second one goes there until cfg.modulesStackOk is true.
+//   3. Modules: Auto modules (src/auto-modules.js) arranges every socket; this director only shows its readout.
 //   2b. The preset list follows the retail allocator (plan D1): Quality engineering on the top planned good by $/h, then Planks Process study.
 //   4. Adopt: a Lab result strictly better than a running furniture group's recipe: its floor copied (EditLayout), then SetRecipe (plan D1).
 // Manual only (spends money on the market, or not clearly better): Module Exchange, other Process results.
@@ -20,77 +17,15 @@ try {
 (() => {
   const W = typeof window !== 'undefined' ? window : globalThis;
   if (!W.corePlan?.addDirector) throw new Error('Core plan did not load');
-  const REGION = 0, SOCKETS = 6, ACRE_CAP = 360;
-  const CELLS = ['0,-1', '1,-1', '-1,0', '1,0', '-1,1', '0,1'];
-  const OVERCLOCK = 61, REFINER = 62;
-  const KIND_NAME = { [OVERCLOCK]: 'Overclock', [REFINER]: 'Refiner' };
+  const REGION = 0, ACRE_CAP = 360;
   const FURNITURE = ['Make Bookshelf', 'Make Table', 'Make Chair', 'Make Bench'];
   // wiki 10 step 1: product name, focus (0 Process study, 2 Quality engineering), Tier I pinned.
   const PRESET = [['Bookshelf', 2], ['Planks', 0], ['Table', 2], ['Chair', 2]];
   const PRESET_BACKOFF = 10 * 60000;   // after a failed preset, leave the Lab runner alone this long (so modules still get their turn)
   const LAB = 'lab';
 
-  // A socket holds a module id (a number, possibly 0) or an object with an id.
-  const modId = (m) => (m != null && typeof m === 'object' ? m.id : m);
-  const same = (a, b) => a != null && b != null && String(a) === String(b);
-  const fleetIds = (st) => {
-    const f = st.fleet_modules;
-    if (f == null) return [];
-    const vals = Array.isArray(f) ? f : Object.values(f);
-    return vals.map(modId).filter((x) => x != null);
-  };
-  const usedCells = (g) => Object.entries(g.modules ?? {}).filter(([, m]) => modId(m) != null);
-  const defOf = (v, id) => v.st.module_defs?.[id] ?? Object.values(v.st.module_defs ?? {}).find((d) => same(d.id, id)) ?? null;
-  const modName = (d) => d.name ?? (KIND_NAME[d.kind] ?? 'kind ' + d.kind) + ' module #' + d.id;
-
-  // Free modules: defined, in no group's sockets (any region) and not in a fleet socket.
-  function freeModules(v) {
-    const used = new Set(fleetIds(v.st).map(String));
-    for (const g of Object.values(v.st.groups ?? {})) for (const [, m] of usedCells(g)) used.add(String(modId(m)));
-    return Object.values(v.st.module_defs ?? {}).filter((d) => d?.id != null && !used.has(String(d.id))).sort((a, b) => a.id - b.id);
-  }
+  const freeModules = (v) => W.idleCore.modules.freeModules(v.st);
   const groupLabel = (v, g) => 'group ' + g.id + ' (' + (g.name || v.bld(g.building).name) + ')';
-
-  // The groups a module may go to, by the install table, and the reason when none qualifies.
-  function targetsFor(v, d) {
-    const lab = v.idB('Manufacturing Lab'), ws = v.idB('Workshop'), camp = v.idB('Lumber Camp'), fell = v.idR('Fell Wood');
-    const furn = FURNITURE.map((n) => v.idR(n)).filter((x) => x != null);
-    if ((d.quirks ?? []).some((q) => q?.kind === 'Insightful')) return { kind: 'Lab', groups: v.groups.filter((g) => g.building === lab && lab != null) };
-    if (d.kind === OVERCLOCK) return { kind: 'Fell Wood', groups: v.groups.filter((g) => g.building === camp && g.recipe === fell && camp != null && fell != null) };
-    if (d.kind === REFINER) return { kind: 'furniture Workshop', groups: v.groups.filter((g) => g.building === ws && ws != null && furn.includes(g.recipe)) };
-    return null;
-  }
-
-  // The next install, or the reasons nothing can be installed. Pure.
-  function planInstall(v, cfg) {
-    const ws = v.idB('Workshop');
-    const notes = [];
-    for (const d of freeModules(v)) {
-      const t = targetsFor(v, d);
-      const name = modName(d);
-      if (!t) { notes.push('manual: ' + name + ' (kind ' + d.kind + ') has no rule in the install table, install it by hand'); continue; }
-      const cellQ = (d.quirks ?? []).find((q) => q && typeof q.cell === 'string' && CELLS.includes(q.cell));
-      const why = [];
-      const ok = [];
-      for (const g of t.groups) {
-        if (!(g.count > 0)) continue;
-        if (d.kind === OVERCLOCK && g.building === ws) continue;   // never: an Overclock on a Workshop raises plank use
-        const cells = usedCells(g);
-        if (cells.length >= SOCKETS) { why.push(groupLabel(v, g) + ' has all ' + SOCKETS + ' sockets full'); continue; }
-        const stacked = cells.some(([, m]) => defOf(v, modId(m))?.kind === d.kind);
-        if (stacked && !cfg.modulesStackOk) { why.push(groupLabel(v, g) + ' already has a ' + (KIND_NAME[d.kind] ?? 'kind ' + d.kind) + ': stacking is unverified, read its speed, then corePlan.importCfg({ modulesStackOk: true })'); continue; }
-        const taken = new Set(cells.map(([c]) => c));
-        const cell = cellQ ? (taken.has(cellQ.cell) ? null : cellQ.cell) : CELLS.find((c) => !taken.has(c));
-        if (cell == null) { why.push(groupLabel(v, g) + ': cell ' + cellQ.cell + ' (' + cellQ.kind + ') is taken'); continue; }
-        ok.push({ g, cell });
-      }
-      if (!ok.length) { notes.push(name + ': ' + (why.length ? why.join('; ') : 'no ' + t.kind + ' group yet')); continue; }
-      ok.sort((a, b) => b.g.count - a.g.count || a.g.id - b.g.id);   // a module is worth more on a bigger group
-      const { g, cell } = ok[0];
-      return { install: { d, g, cell, name, text: 'install ' + name + ' in ' + groupLabel(v, g) + ' cell ' + cell + (cellQ ? ' (' + cellQ.kind + ')' : '') }, notes };
-    }
-    return { install: null, notes };
-  }
 
   // The list with ids by name; null when a name is missing (the preset is then off, with a readout).
   // With the retail allocator's plan (plan D1): Quality engineering on the planned good with the most $/h first, then a Planks process study,
@@ -234,27 +169,15 @@ try {
 
   W.corePlan.addDirector({
     name: LAB, order: 55,
-    defaults: { labPreset: true, labGroup: true, labModules: true, modulesStackOk: false, labTarget: 2,
+    defaults: { labPreset: true, labGroup: true, labTarget: 2,
       mdRich: 1000000,        // Manufacturing Data above this (and RD >= 5): the preset's Quality engineering runs at Tier II (plan D1)
       labAdopt: true },       // adopt a Lab process that is strictly better than a furniture group's recipe (plan D1)
     // E5: the second Lab is an investment still to make while it is wanted and not bought.
     pendingInvest,
-    // Records every installed module once (group, kind, cell, first seen) for the readout. Stacking (R2) is not measured here:
-    // what group.work fields mean is unverified, so you read the group's speed and set modulesStackOk.
     context(v, ctx) {
       // A refusal mark lasts while the runner stays a dry run; once it stops or goes live, the preset may try again.
       const lr = ctx.mods?.labRunner;
       if (lr && marks.get(lr)?.refused && !(lr.running && lr.cfg?.dryRun)) mark(lr, { refused: false });
-      const mem = ctx.mem?.(LAB);
-      if (!mem) return;
-      const seen = mem.get().installs ?? [];
-      const add = [];
-      for (const g of v.groups) for (const [cell, m] of usedCells(g)) {
-        const id = modId(m);
-        if (seen.some((x) => same(x.module, id) && x.group === g.id)) continue;
-        add.push({ module: id, group: g.id, kind: defOf(v, id)?.kind ?? null, cell, at: ctx.now });
-      }
-      if (add.length) mem.set({ installs: [...seen, ...add] });
     },
     decide(v, ctx, out) {
       const cfg = W.corePlan.cfg;
@@ -287,22 +210,8 @@ try {
       if (p.alert) { readout.alert = p.alert; waits.push(p.alert); }
       if (p.action) actions.push(p.action);
 
-      // 3. Modules.
-      if (cfg.labModules) {
-        const { install, notes } = planInstall(v, cfg);
-        readout.modules = notes;
-        if (install) {
-          const { d, g, cell } = install;
-          actions.push({ id: 'lab:module:' + d.id, text: install.text,
-            steps: [{ msg: { type: 'InstallModule', group: g.id, cell, module: d.id }, until: (x) => same(modId(x.groups.find((y) => y.id === g.id)?.modules?.[cell]), d.id) }] });
-        } else if (notes.length) waits.push('modules: ' + notes[0]);
-        readout.installs = (ctx.mem?.(LAB)?.get?.().installs ?? []).map((x) => {
-          const d = defOf(v, x.module);
-          // formulas.md: Overclock speed +25% - ticks_bonus, Refiner -10% - ticks_bonus (raw ticks_bonus shown: its unit is unverified).
-          const exp = d?.kind === OVERCLOCK ? ' (expected speed +25% - ticks_bonus ' + d.ticks_bonus + ')' : d?.kind === REFINER ? ' (expected speed -10% - ticks_bonus ' + d.ticks_bonus + ')' : '';
-          return (KIND_NAME[x.kind] ?? 'kind ' + x.kind) + ' #' + x.module + ' on group ' + x.group + ' cell ' + x.cell + exp;
-        });
-      } else readout.modules = ['module installer off (cfg.labModules)'];
+      // 3. Modules: Auto modules owns every socket (src/auto-modules.js), so the two never fight over a module.
+      readout.modules = [W.autoModules ? 'Auto modules ' + W.autoModules.status() : 'Auto modules not loaded'];
 
       // 4. Adopt Lab results that are strictly better (plan D1).
       if (cfg.labAdopt) {
@@ -327,11 +236,10 @@ try {
     },
     duties: () => [
       { duty: 'Lab: Tier I list re-armed live after each reload', owner: 'Core plan', done: true },
-      { duty: 'modules: install free modules by the wiki 10 table', owner: 'Core plan', done: true },
-      { duty: 'confirm module stacking (R2): read the group speed after the first Overclock, then corePlan.importCfg({ modulesStackOk: true })', owner: 'you', done: false },
+      { duty: 'modules: arranged over the group sockets for the most value', owner: 'Auto modules', done: true },
     ],
   });
-  W.corePlan._lab = { freeModules, planInstall, presetList, adoptStep, CELLS, timing, labBuy, pendingInvest };
+  W.corePlan._lab = { freeModules, presetList, adoptStep, timing, labBuy, pendingInvest };
 })();
 } catch (e) { console.error('[IdleCorp] cp-lab failed to load:', e); }
 // @@END cp-lab

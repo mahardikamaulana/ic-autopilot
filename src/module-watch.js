@@ -312,6 +312,7 @@ try {
         }
         return { applied, skipped };
       },
+      kinds: KINDS, name: moduleName,   // shared with Auto modules
       _parse: parse, _matches: matches, _serverFilter: serverFilter, _tick: tick, _name: moduleName,
       _unload() {
         unloaded = true;

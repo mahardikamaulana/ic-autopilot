@@ -334,6 +334,7 @@ try {
       try { if (W.labRunner?.running) { W.labRunner.stop(); live.push('Lab'); } } catch (e) { console.error(e); }
       try { if (W.autoSell?.running) { W.autoSell.stop(); live.push('Auto ship'); } } catch (e) { console.error(e); }
       try { if (W.autoUtil?.running) { W.autoUtil.stop(); live.push('Auto utilities'); } } catch (e) { console.error(e); }
+      try { if (W.autoModules?.running) { W.autoModules.stop(); live.push('Auto modules'); } } catch (e) { console.error(e); }
       ledgerApi.add('--', 'info', 'stop all (' + why + '): ' + (live.join(' + ') || 'nothing was running'));
       toast(live.length ? 'Stopped ' + live.join(' + ') + ' (' + why + ')' : 'Nothing was running');
       return live;
@@ -345,7 +346,7 @@ try {
     // Each module offers exportCfg() / importCfg(obj); Infinity travels as the string "Infinity".
     const rep = (_k, v) => (v === Infinity ? 'Infinity' : v);
     const rev = (_k, v) => (v === 'Infinity' ? Infinity : v);
-    const MODS = ['earlyGame', 'cdFarm', 'labRunner', 'autoUtil', 'corePlan', 'keepOnline', 'moduleWatch'];
+    const MODS = ['earlyGame', 'cdFarm', 'labRunner', 'autoUtil', 'corePlan', 'keepOnline', 'moduleWatch', 'autoModules'];
     function exportConfig() {
       const out = { app: 'idlecorp-toolkit', format: 1, exportedAt: new Date().toISOString() };
       for (const m of MODS) out[m] = W[m]?.exportCfg?.() ?? null;

@@ -1749,6 +1749,42 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     } finally { unloadUt(); }
   });
 
+  await t('Auto utilities: a contract bought inside the hold window lowers the grid at the next bill (Grid = Load - Self-generated - Bought in)', async () => {
+    fresh();
+    globalThis.localStorage = { getItem: () => null, setItem: () => { } };
+    const st = baseState();
+    st.items = { 0: 1000000, 24: 0, 111: 0 };
+    st.groups = { 1: run(WORKSHOP, 4, recOf(WORKSHOP).id), 2: run(SMELTER, 1, recOf(SMELTER).id) };   // 6 MW
+    st.subscriptions = { 0: { power: 6 } };
+    const sent = [];
+    class FakeWS {
+      constructor() { this.readyState = 1; this.ls = []; }
+      addEventListener(_t, f) { this.ls.push(f); } removeEventListener() { }
+      send(m) {
+        const msg = JSON.parse(m); sent.push(msg);
+        const tick = (st.ssi.last_user_mutation_tick += 4);
+        st.subscriptions[msg.region] = { ...st.subscriptions[msg.region], [msg.utility]: msg.level };
+        setTimeout(() => { for (const f of this.ls) f({ data: JSON.stringify({ kind: 'Diff', tick: tick + 1, diff: { tick: tick + 1, ssi: { last_user_mutation_tick: tick } } }) }); }, 10);
+      }
+    }
+    const { props } = labPage(st, FakeWS);
+    props.contracts = [];
+    (0, eval)(coreSrc + '\n' + utSrc());
+    const ut = globalThis.autoUtil, core = globalThis.idleCore;
+    Object.assign(ut.cfg, { confirmMs: 3000, backoffMs: 0, cycleMs: 1e9 });
+    const T0 = 1e12, MIN = 60000;
+    try {
+      ut.set('power', true);
+      await ut._step(T0);
+      assert.strictEqual(sent.length, 0, 'at the level');
+      await ut._step(T0 + 5 * MIN);                                       // 6 MW needed inside the window, before the contract
+      props.contracts.push({ utility: 'power', region: 0, state: 'Active', buyer: st.ssi.corp_id, seller: -1, amount: 4, drawn: 0, delivered: 0 });
+      core.seeTick(1200 * 100 - 60);                                      // 30 s before a bill, 1 min after the contract
+      await ut._step(T0 + 11 * MIN);
+      assert.deepStrictEqual(sent.map((x) => x.level), [2], 'the 4 MW bought in comes off the grid at once: ' + ut.status());
+    } finally { unloadUt(); }
+  });
+
   await t('Auto utilities: lines in/out, a raise only stalled groups need waits for the bill, NPC power price raises the cost', () => {
     const { ut } = loadUt();
     try {

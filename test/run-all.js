@@ -22,8 +22,8 @@ const BROWSER_CAP = 4;                      // Chrome pages compete for CPU: mor
 // est = seconds on an 8-core laptop (longest first keeps the critical path short).
 const J = [];
 const add = (name, cmd, inputs, est, heavy = false) => J.push({ name, cmd, inputs, est, heavy });
-const SH = ['chrome', 'cdfarm', 'lab', 'utilities', 'narrow', 'docked', 'motion', 'handoff', 'auto-a', 'auto-b', 'auto-c'];
-const UI_EST = { chrome: 8, cdfarm: 10, lab: 8, utilities: 4, narrow: 2, docked: 3, motion: 2, handoff: 45, 'auto-a': 7, 'auto-b': 10, 'auto-c': 7 };
+const SH = ['chrome', 'cdfarm', 'lab', 'utilities', 'modules', 'narrow', 'docked', 'motion', 'handoff', 'auto-a', 'auto-b', 'auto-c'];
+const UI_EST = { chrome: 8, cdfarm: 10, lab: 8, utilities: 4, modules: 4, narrow: 2, docked: 3, motion: 2, handoff: 45, 'auto-a': 7, 'auto-b': 10, 'auto-c': 7 };
 for (const s of SH) add('ui:' + s, ['bun', T('ui-harness.js'), 'check', s], [BUILT, T('ui-harness.js'), ...BOARD, T('live-stageB.json')], UI_EST[s], true);
 for (let k = 0; k < 3; k++) add('toolkit:' + k, ['bun', T('toolkit-test.js'), '--shard=' + k + '/3'], [BUILT, T('toolkit-test.js'), ...BOARD], 4);
 for (const s of ['rich', 'live', 'chaos', 'nobooster', 'cdfarm']) add('sim:' + s, ['bun', T('early-game-sim.js'), s, '44'], [BUILT, T('early-game-sim.js'), ...BOARD], 2);
@@ -41,6 +41,7 @@ add('cp-expand', ['bun', T('cp-expand-test.js')], [BUILT, path.join('src', 'cp-e
 add('engine-expand', ['bun', T('engine-expand-test.js')], [BUILT, path.join('src', 'cp-expand.js'), T('engine-expand-test.js'), T('engine.js'), T('cp-fixtures.js'), T('live-2026-11-28.json')], 15);   // real engine wasm; skips offline
 add('retail-alloc', ['bun', T('retail-alloc-test.js')], ['src/core-retail-alloc.js', T('retail-alloc-test.js')], 1);
 add('module-watch', ['bun', T('module-watch-test.js')], [BUILT, T('module-watch-test.js')], 1);
+add('auto-modules', ['bun', T('auto-modules-test.js')], [BUILT, T('auto-modules-test.js'), T('engine.js'), T('cp-fixtures.js'), T('live-2026-11-28.json')], 2);   // real engine wasm; skips offline
 const argv = process.argv.slice(2);
 const flag = (n) => argv.includes('--' + n);
 const val = (n) => (argv.find((a) => a.startsWith('--' + n + '=')) || '').slice(n.length + 3);

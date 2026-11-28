@@ -107,8 +107,10 @@ function powerMeasure(util, region, st, catalog, tick, contracts, flows = [], ev
   const stockOf = (item) => (INTANGIBLE_ITEMS.has(item) ? (st.items?.[item] ?? 0) : (st.stock?.[R]?.[item] ?? 0));
   const diurnal = (p) => (((tick % POWER_DAY) + POWER_DAY) % POWER_DAY < POWER_DAYLIGHT ? p : Math.floor(p * POWER_NIGHT_PCT / 100));
   let load = 0, gen = 0, base = 0;
+  // an Efficiency module cuts the building draw by its layout's draws_pct (engine-measured; Auto modules reads it from the engine)
+  const dp = (g) => (W.autoModules?.drawsPct?.(g) ?? 100) / 100;
   for (const g of groups) {
-    const work = g.work ?? [], bd = bOf.get(g.building), draw = (bd?.draws?.[util] ?? 0) * g.count;
+    const work = g.work ?? [], bd = bOf.get(g.building), draw = (bd?.draws?.[util] ?? 0) * g.count * dp(g);
     // A baseload building (Retail Store: no work rows, no machines) draws whenever its group is unpaused; short of it, no store in
     // the region sells (plan A3).
     if (bd?.baseload && !g.paused) { load += draw; base += draw; }
@@ -151,7 +153,7 @@ function powerMeasure(util, region, st, catalog, tick, contracts, flows = [], ev
   let waiting = 0;
   for (const g of groups) {
     if (noRows || g.paused || g.equipped === 0 || (g.work ?? []).length || bOf.get(g.building)?.baseload) continue;
-    const draw = (bOf.get(g.building)?.draws?.[util] ?? 0) * g.count;
+    const draw = (bOf.get(g.building)?.draws?.[util] ?? 0) * g.count * dp(g);
     if (!(draw > 0) || draw <= free) continue;
     const rc = (g.recipe != null && (st.recipes?.[String(g.recipe)] ?? rOf.get(g.recipe))) || null;
     if (!rc || !(rc.inputs ?? []).every((i) => stockOf(i.item) >= i.amount)) continue;
@@ -159,6 +161,17 @@ function powerMeasure(util, region, st, catalog, tick, contracts, flows = [], ev
   }
   const need = load + sold + lineOut + waiting + charge - gen - discharge - imported - lineIn;
   return { util, region, have, load, base, free, sold, gen, discharge, charge, mode, imported, ending: importedNow - imported, lineIn, lineOut, waiting, need };
+}
+
+// Module sockets, shared by Auto modules and Core plan. A socket holds a module id (a number, possibly 0) or an object with an id.
+const modId = (m) => (m != null && typeof m === 'object' ? m.id : m);
+const usedCells = (g) => Object.entries(g?.modules ?? {}).filter(([, m]) => modId(m) != null);
+// Free modules: defined, in no group's sockets (any region) and not in a fleet socket.
+function freeModules(st) {
+  const f = st.fleet_modules;
+  const used = new Set((f == null ? [] : Array.isArray(f) ? f : Object.values(f)).map(modId).filter((x) => x != null).map(String));
+  for (const g of Object.values(st.groups ?? {})) for (const [, m] of usedCells(g)) used.add(String(modId(m)));
+  return Object.values(st.module_defs ?? {}).filter((d) => d?.id != null && !used.has(String(d.id))).sort((a, b) => a.id - b.id);
 }
 
 const titleTimer = HAS_DOM ? setInterval(applyTitle, 2000) : 0;
@@ -169,7 +182,7 @@ W.idleCore = {
   walk, sleep, every, sleepWake, waitConfirm, tune, markSend, lastRtt, nowTick, seeTick, sock, orderBook, sendBoardFilter, onFrame, link, realHidden,
   h, makeDraggable, toast, ledger: ledgerApi, ui,
   setBadge, notify, askNotify, notifyPerm, stopAll, reserves, floorDesigns, courierCU, powerPriceMult, powerEvent, bought, powerMeasure,
-  exportConfig, importConfig, exportFile, importFile, missingFields,
+  exportConfig, importConfig, exportFile, importFile, missingFields, modules: { modId, usedCells, freeModules },
   _unload() {
     orderBook.release();
     frameSubs.clear();

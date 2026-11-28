@@ -247,9 +247,12 @@ try {
       const urgent = wantOf({ ...m, need: m.need - m.waiting - m.ending }, conf[util].spare).want;   // stalled groups and a contract about to end can wait for the bill
       const mult = util === 'power' ? Math.max(1, r.priceMult ?? 1) : 1;
       const holdMs = conf.holdMin * 60000;
-      c.samples.push({ t: now, want });
+      // The hold keeps the peak of the gross demand (want + bought in), less what is bought now: a contract bought inside the window
+      // (Grid = Load - Self-generated - Bought in) lowers the level at the next bill instead of being paid for twice.
+      const boughtIn = m.imported ?? 0;
+      c.samples.push({ t: now, gross: want + boughtIn });
       while (c.samples.length > 1 && c.samples[0].t < now - holdMs) c.samples.shift();
-      const peak = Math.max(...c.samples.map((s) => s.want));
+      const peak = Math.min(u.max, Math.max(0, Math.max(...c.samples.map((s) => s.gross)) - boughtIn));
       const money = r.st.items?.[0] ?? 0, bills = billsOf(r.st, r.priceMult ?? 1);
       const ticksToBill = r.tick > 0 ? BILL_TICKS - (r.tick % BILL_TICKS) : null;
       const d = decide({ util, have: m.have, want, peak, observedMs: now - c.first, holdMs, money, bills, ticksToBill, canLower: Array.isArray(r.contracts), urgent, mult, keepWhy: m.mode === 'pre' ? 'keeping spare for the batteries before NPC power x' + ev.mult : null });

@@ -1,4 +1,4 @@
-// Tests for the Core plan "lab" director (src/cp-lab.js): Lab group, Tier I Lab preset through the Lab runner's API, module installer.
+// Tests for the Core plan "lab" director (src/cp-lab.js): Lab group, Tier I Lab preset through the Lab runner's API (modules: test/auto-modules-test.js).
 //   CP_FROM_SRC=1 bun test/cp-lab-test.js
 const assert = require('assert');
 const F = require('./cp-fixtures');
@@ -17,7 +17,6 @@ function withModules(defs, extraGroups = {}) {
 }
 const OC = (id, quirks = []) => ({ id, kind: 61, name: 'Overclock #' + id, ticks_bonus: 5, inputs_bonus: 1, neighbor_pct: 0, quirks });
 const RF = (id, quirks = []) => ({ id, kind: 62, name: 'Refiner #' + id, ticks_bonus: -4, inputs_bonus: -1, neighbor_pct: 1, quirks });
-const CORNER = [{ kind: 'CornerTuned', cell: '1,-1', elsewhere_pct: 48 }];
 const labOf = (d) => d.actions.filter((a) => a.director === 'lab');
 const decideA = (cp, st, ctx = F.ctxOf()) => cp._decide(cp._view(st, F.board.catalog, F.cottonBidDeals()), ctx);
 const inB = (st) => { st.research = { building: B('Assembly Plant') }; return st; };   // Stage B: the Assembly Plant research is running
@@ -44,51 +43,7 @@ function fakeLab({ running = true, dryRun = true, mode = 'process', list = [], s
   await t('the director loads from src and adds its settings', () => {
     const { cp } = F.load(['cp-lab']);
     assert.ok(cp.directors().includes('lab'), 'lab director registered');
-    for (const k of ['labPreset', 'labGroup', 'labModules', 'modulesStackOk']) assert.ok(k in cp.cfg, k);
-    assert.strictEqual(cp.cfg.modulesStackOk, false);
-    F.unload();
-  });
-
-  await t('install table: Overclock to Fell Wood, Refiner to the bigger furniture Workshop, Insightful to the Lab, unknown kinds manual', () => {
-    const { cp } = F.load(['cp-lab']);
-    const st = withModules([OC(0), RF(1), OC(2, [{ kind: 'Insightful', pct: 5 }]), { id: 3, kind: 99, name: 'Odd', quirks: [] }]);
-    const L = cp._lab;
-    const v = cp._view(st, F.board.catalog, []);
-    assert.deepStrictEqual(L.freeModules(v).map((d) => d.id), [0, 1, 2, 3], 'module id 0 counts as a module');
-    const p = L.planInstall(v, cp.cfg);
-    assert.strictEqual(p.install.d.id, 0); assert.strictEqual(p.install.g.id, 5); assert.strictEqual(p.install.cell, '0,-1');
-    // Walk the whole table by installing each pick in turn.
-    const placed = {};
-    for (let k = 0; k < 4; k++) {
-      const q = L.planInstall(cp._view(st, F.board.catalog, []), cp.cfg);
-      if (!q.install) { assert.match(q.notes.join(' '), /Odd .*kind 99.*by hand/); break; }
-      st.groups[q.install.g.id].modules = { ...(st.groups[q.install.g.id].modules ?? {}), [q.install.cell]: q.install.d.id };
-      placed[q.install.d.id] = q.install.g.id;
-    }
-    assert.deepStrictEqual(placed, { 0: 5, 1: 11, 2: 9 });
-    F.unload();
-  });
-
-  await t('an Overclock never lands on a Workshop, whatever the groups', () => {
-    const { cp } = F.load(['cp-lab']);
-    const st = withModules([OC(0), OC(1), OC(4)]);
-    delete st.groups[5];   // no Fell Wood group: only Workshops (furniture, Rivet, Frame Timber) are left
-    st.groups[13] = { building: B('Workshop'), region: 0, count: 50, recipe: Rc('Fell Wood'), modules: {} };   // even a Workshop on a Fell Wood id
-    const d = decideA(cp, st);
-    assert.deepStrictEqual(installs(d), []);
-    assert.match(cp._decide(cp._view(st, F.board.catalog, F.cottonBidDeals()), F.ctxOf()).readouts.lab.modules.join(' '), /no Fell Wood group yet/);
-    F.unload();
-  });
-
-  await t('no install past 6 sockets, even with stacking confirmed', () => {
-    const { cp } = F.load(['cp-lab']);
-    const others = [10, 11, 12, 13, 14, 15].map((id) => ({ id, kind: 70, name: 'Other ' + id, quirks: [] }));
-    const st = withModules([OC(0), ...others]);
-    st.groups[5].modules = Object.fromEntries(cp._lab.CELLS.map((c, i) => [c, 10 + i]));
-    cp.cfg.modulesStackOk = true;
-    const d = decideA(cp, st);
-    assert.deepStrictEqual(installs(d), []);
-    assert.match(d.readouts.lab.modules.join(' '), /all 6 sockets full/);
+    for (const k of ['labPreset', 'labGroup']) assert.ok(k in cp.cfg, k);
     F.unload();
   });
 
@@ -98,7 +53,6 @@ function fakeLab({ running = true, dryRun = true, mode = 'process', list = [], s
     st.groups[5].modules = { '0,1': { id: 0 } };   // installed, object form
     st.fleet_modules = { 0: 1 };                     // in a fleet socket
     st.groups[11].modules = { '-1,0': 2 };
-    cp.cfg.modulesStackOk = true;
     assert.deepStrictEqual(cp._lab.freeModules(cp._view(st, F.board.catalog, [])).map((d) => d.id), []);
     assert.deepStrictEqual(installs(decideA(cp, st)), []);
     st.fleet_modules = [1];
@@ -106,37 +60,7 @@ function fakeLab({ running = true, dryRun = true, mode = 'process', list = [], s
     F.unload();
   });
 
-  await t('a quirk cell is respected: CornerTuned goes into "1,-1", the next group when taken, nowhere when all are taken', () => {
-    const { cp } = F.load(['cp-lab']);
-    const st = withModules([RF(0, CORNER), { id: 9, kind: 70, name: 'Other', quirks: [] }]);
-    let m = installs(decideA(cp, st));
-    assert.deepStrictEqual(m, [{ type: 'InstallModule', group: 11, cell: '1,-1', module: 0 }]);
-    st.groups[11].modules = { '1,-1': 9 };
-    m = installs(decideA(cp, st));
-    assert.deepStrictEqual(m, [{ type: 'InstallModule', group: 12, cell: '1,-1', module: 0 }], 'never another cell of the big group');
-    st.groups[12].modules = { '1,-1': 9 };
-    const d = decideA(cp, st);
-    assert.deepStrictEqual(installs(d), []);
-    assert.match(d.readouts.lab.modules.join(' '), /cell 1,-1 \(CornerTuned\) is taken/);
-    F.unload();
-  });
-
-  await t('stacking pause (R2): no second Overclock on a group until modulesStackOk; installs are recorded in mem', () => {
-    const { cp } = F.load(['cp-lab']);
-    const st = withModules([OC(0), OC(1)]);
-    st.groups[5].modules = { '0,-1': 0 };
-    const ctx = F.ctxOf();
-    const d = decideA(cp, st, ctx);
-    assert.deepStrictEqual(installs(d), []);
-    assert.match(d.readouts.lab.modules.join(' '), /already has a Overclock: stacking is unverified.*modulesStackOk/);
-    assert.ok(d.waits.some((w) => /^lab: modules: .*stacking/.test(w)), 'the pause is a wait, not silent');
-    assert.deepStrictEqual(ctx.mem('lab').get().installs, [{ module: 0, group: 5, kind: 61, cell: '0,-1', at: ctx.now }]);
-    cp.cfg.modulesStackOk = true;
-    assert.deepStrictEqual(installs(decideA(cp, st, ctx)), [{ type: 'InstallModule', group: 5, cell: '1,-1', module: 1 }]);
-    F.unload();
-  });
-
-  await t('live Stage B snapshot: CreateGroup for the pooled Lab; the Refiner waits (no furniture Workshop), never on Frame Timber', () => {
+  await t('live Stage B snapshot: CreateGroup for the pooled Lab; modules belong to Auto modules (never an install from here)', () => {
     const { cp } = F.load(['cp-lab']);
     cp.cfg.labTarget = 1;   // the second Lab (which may buy its acres) is D2's test
     const st = F.liveB();
@@ -146,31 +70,16 @@ function fakeLab({ running = true, dryRun = true, mode = 'process', list = [], s
     assert.strictEqual(mine.length, 1, 'one action per step');
     assert.deepStrictEqual(mine[0].steps[0].msg, { type: 'CreateGroup', building: B('Manufacturing Lab', SB), amount: 1, name: 'Manufacturing Lab', region: 0 });
     assert.ok(!d.actions.some((a) => a.steps?.some((s) => s.msg.type === 'InstallModule')));
-    assert.match(d.readouts.lab.modules.join(' '), /Refiner Module Mk1: no furniture Workshop group yet/);
+    assert.match(d.readouts.lab.modules.join(' '), /^Auto modules not loaded$/);
     assert.match(d.readouts.lab.manual.join(' '), /adopt by hand/);
     assert.match(d.readouts.lab.manual.join(' '), /Module Exchange/);
     // With a Lab group already there, nothing is created again.
     st.groups[13] = { building: B('Manufacturing Lab', SB), region: 0, count: 1, recipe: null, modules: {} }; st.building_pool[0][B('Manufacturing Lab', SB)] = 0;
     assert.strictEqual(labOf(cp._decide(cp._view(st, SB, F.stageB.deals), F.ctxOf())).length, 0);
-    // A Refiner with its quirk cell goes to a furniture Workshop once one exists, never to the Frame Timber ones (3, 8).
+    // Free modules and furniture Workshops: still no InstallModule from this director (Auto modules owns the sockets).
     st.groups[14] = { building: B('Workshop', SB), region: 0, count: 2, recipe: Rc('Make Chair', SB), modules: {} };
-    const m = labOf(cp._decide(cp._view(st, SB, F.stageB.deals), F.ctxOf()))[0].steps[0].msg;
-    assert.deepStrictEqual(m, { type: 'InstallModule', group: 14, cell: '1,-1', module: 0 });
+    assert.ok(!cp._decide(cp._view(st, SB, F.stageB.deals), F.ctxOf()).actions.some((a) => a.steps?.some((s) => /Module$/.test(s.msg.type))));
     F.unload();
-  });
-
-  await t('runner: InstallModule is sent once and the fake server puts it in group.modules', async () => {
-    const st = withModules([OC(0)]);
-    st.items[F.MONEY] = 1;   // no land money
-    const { cp, w } = F.boot(st, { modules: ['cp-lab'] });
-    cp.cfg.land = false; cp.cfg.unlocks = false;
-    cp.start({ dryRun: false });
-    await F.waitFor(() => w.ws.sent.some((m) => m.type === 'InstallModule'));
-    await F.waitFor(() => !cp.active);
-    assert.deepStrictEqual(st.groups[5].modules, { '0,-1': 0 });
-    await cp._step(); await cp._step();
-    assert.strictEqual(w.ws.sent.filter((m) => m.type === 'InstallModule').length, 1, 'not sent twice');
-    cp.stop(); F.unload();
   });
 
   await t('runner on the live snapshot: CreateGroup applied, then nothing more to send for the Lab group', async () => {
@@ -186,19 +95,6 @@ function fakeLab({ running = true, dryRun = true, mode = 'process', list = [], s
     assert.strictEqual(w.ws.sent.filter((m) => m.type === 'CreateGroup').length, 1);
     assert.strictEqual(w.ws.sent.filter((m) => m.type === 'InstallModule').length, 0);
     cp.stop(); F.unload();
-  });
-
-  await t('chaos: an InstallModule the server ignores is never counted as done, and three in a row stop Core plan', async () => {
-    const st = withModules([OC(0)]);
-    st.items[F.MONEY] = 1;
-    const { core, cp, w } = F.boot(st, { modules: ['cp-lab'], ignore: ['InstallModule'] });
-    cp.cfg.land = false; cp.cfg.unlocks = false; cp.cfg.confirmMs = 150; cp.cfg.intervalMs = 20;
-    cp.start({ dryRun: false });
-    await F.waitFor(() => !cp.running, 6000);
-    assert.strictEqual(w.ws.sent.filter((m) => m.type === 'InstallModule').length, 3);
-    assert.deepStrictEqual(st.groups[5].modules ?? {}, {});
-    assert.match(core.ledger.text(), /not confirmed: install Overclock #0/);
-    F.unload();
   });
 
   await t('Lab preset: dry-run Lab runner while Core plan is live -> restart live on the Tier I list through its API', async () => {
@@ -344,17 +240,6 @@ function fakeLab({ running = true, dryRun = true, mode = 'process', list = [], s
     assert.ok(cp.running, 'Core plan still running');
     assert.strictEqual(lr.calls.filter((c) => c[0] === 'start').length, 1, 'tried once');
     cp.stop(); F.unload();
-  });
-
-  await t('stacking (R2) is a manual duty, and the installs readout shows the expected effect', () => {
-    const { cp } = F.load(['cp-lab']);
-    const st = withModules([OC(0)]);
-    st.groups[5].modules = { '0,-1': 0 };
-    const d = decideA(cp, st);
-    assert.match(d.readouts.lab.installs.join(' '), /Overclock #0 on group 5 cell 0,-1 \(expected speed \+25% - ticks_bonus 5\)/);
-    const mine = globalThis.corePlan.duties().flat(Infinity).find((x) => /stacking/.test(x?.duty ?? ''));
-    assert.ok(mine && mine.owner === 'you' && mine.done === false, 'manual stacking duty');
-    F.unload();
   });
 
   await t('D2: second Lab: bought with 1 Lab, the unlocks\' frames + 4, 2 free acres above the buffer and the cash; each gate says why', () => {
