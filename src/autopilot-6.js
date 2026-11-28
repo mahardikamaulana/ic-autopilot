@@ -50,7 +50,8 @@ if (HAS_DOM) (async () => {
       if (unloaded || running) return;
     }
     let live = false;
-    if (cfg.liveResume && liveFlag) { live = await liveCountdown(); if (unloaded || running) return; }
+    // Dry run is experimental: with its switch off a resume is always Live (60 s cancel); Cancel leaves it stopped.
+    if (!ui.dryRunSwitch || (cfg.liveResume && liveFlag)) { live = await liveCountdown(); if (unloaded || running) return; if (!live && !ui.dryRunSwitch) return; }
     cfg.dryRun = !live;
     console.log(live ? '[earlyGame] resuming the run from before the reload, LIVE (liveResume)'
       : '[earlyGame] resuming the run from before the reload (as a DRY RUN: switch to Live in the panel to send again)');

@@ -972,10 +972,10 @@ async function sectionHandoff() {
     } finally { await browser.close(); }
   }
   {
-    // Reload mid-transition: the plan is already done and Autopilot was running. It resumes (as a dry run) and Core plan starts at once.
+    // Reload mid-transition: the plan is already done and Autopilot was running. With the Dry run switch on it resumes as a dry run and Core plan starts at once.
     const { browser, page, errors } = await open(1280, 800);
     try {
-      await useStageB(page, true, { 'earlyGame.v2': { running: true }, 'earlyGame.ui': { open: true } });
+      await useStageB(page, true, { 'earlyGame.v2': { running: true }, 'earlyGame.ui': { open: true, dryRunSwitch: true } });
       await load(page);
       await until(page, () => window.corePlan.running, null, 15000);
       const t = await apText(page);
@@ -1004,7 +1004,7 @@ async function sectionHandoff() {
     } finally { await browser.close(); }
   }
   {
-    // Reload with both Live (Autopilot with liveResume, Core plan) before the hand-off: one Cancel cancels both countdowns.
+    // Reload with both Live (Autopilot with liveResume, Core plan) before the hand-off: one Cancel cancels both countdowns (Autopilot stays stopped: dry run is off).
     const { browser, page, errors } = await open(1280, 800);
     try {
       await useStageB(page, true, { 'earlyGame.v2': { running: true, cfg: { liveResume: true } }, 'earlyGame.ui': { open: true } });
@@ -1012,8 +1012,8 @@ async function sectionHandoff() {
       await load(page);
       await until(page, () => /Resuming Live after the reload/.test(document.querySelector('.egp-panel .idc-note:not([hidden])')?.textContent ?? '') && window.corePlan.status().resumeIn > 0, null, 10000);
       await page.click('.egp-panel .idc-note:not([hidden]) button');
-      await until(page, () => window.earlyGame.running, null, 8000);
-      ok(await page.evaluate(() => window.corePlan.status().resumeIn === 0 && window.earlyGame.cfg.dryRun), 'hand-off reload: one Cancel cancels both Live countdowns');
+      await page.waitForTimeout(1300);
+      ok(await page.evaluate(() => window.corePlan.status().resumeIn === 0 && !window.earlyGame.running), 'hand-off reload: one Cancel cancels both Live countdowns');
       await page.evaluate(() => { window.earlyGame.stop(); window.corePlan.stop(); });
       ok(errors.length === 0, 'no console / page errors (handoff two countdowns)', JSON.stringify(errors));
     } finally { await browser.close(); }

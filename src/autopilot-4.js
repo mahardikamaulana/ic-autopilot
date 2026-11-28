@@ -304,7 +304,7 @@
   async function liveCountdown() {
     liveCountdownUntil = Date.now() + 60000;
     panel(true);
-    core.notify('AP', 'Autopilot resumes LIVE in 60 s', 'Open the Autopilot panel and press Cancel to resume as a dry run instead.');
+    core.notify('AP', 'Autopilot resumes LIVE in 60 s', ui.dryRunSwitch ? 'Open the Autopilot panel and press Cancel to resume as a dry run instead.' : 'Open the Autopilot panel and press Cancel to stay stopped.');
     while (liveCountdownUntil && Date.now() < liveCountdownUntil) {
       if (unloaded) return false;
       render();

@@ -277,7 +277,7 @@ function renderPanel(s, ph, cp, t) {
   // Recent lines: Core plan's once it has taken over, Autopilot's before
   const recent = cv ? core.ledger.list().filter((e) => e.mod === 'CP').slice(-6).reverse().map((e) => new Date(e.t).toLocaleTimeString() + ' ' + e.text) : log;
   refs.log.replaceChildren(...recent.map((l) => mk('div', {}, l)));
-  refs.live.set(liveCountdownUntil ? `Resuming Live after the reload in ${Math.max(0, Math.ceil((liveCountdownUntil - Date.now()) / 1000))} s. Cancel to resume as a dry run instead.`
+  refs.live.set(liveCountdownUntil ? `Resuming Live after the reload in ${Math.max(0, Math.ceil((liveCountdownUntil - Date.now()) / 1000))} s. ${ui.dryRunSwitch ? 'Cancel to resume as a dry run instead.' : 'Cancel to stay stopped.'}`
     : cp?.resumeIn ? `Core plan resumes Live after the reload in ${cp.resumeIn} s. Cancel to keep it a dry run.` : '');
   refs.stall.set(stalled ? `Looks stalled: ${stalled}. Autopilot keeps running; check the log below.` : '');
   K.syncLog(P, ui, refs.logv);

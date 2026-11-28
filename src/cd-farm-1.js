@@ -50,7 +50,7 @@ try {
       batch: 10,             // max buildings per cycle
       fullBatch: false,      // true: only build when all `batch` camps fit (land + money); never a smaller batch
       cycles: Infinity,      // stop after this many cycles
-      reserveAcres: 10,      // free acres never used by the farm (always kept spare)
+      reserveAcres: 0,       // free acres never used by the farm (always kept spare)
       minMoney: 30000,       // cash reserve ($): never spend below this
       // 'reserve': floor is minMoney; stops when the next batch would go below it.
       // 'floor':   floor is minMoney; waits for income instead of stopping (also waits to start if money is below it).
@@ -64,7 +64,7 @@ try {
       pace: 'balanced',      // Auto: 'thrifty' | 'balanced' | 'fast' (how much waiting for CD costs)
       land: 'plan',          // Auto: 'off' | 'plan' (acres only inside Autopilot's own land plan) | max $ per acre
       autoStart: true,       // Auto: start by itself when the engine needs CD (switched off when you press Stop)
-      solo: false,           // Auto: with Autopilot and Core plan off and no Target CD, farm for the cheapest tech that can start next
+      solo: true,            // Auto: with Autopilot and Core plan off and no Target CD, farm for the cheapest tech that can start next
       autoFloor: 0,          // Auto: money floor ($) on top of Autopilot's power-bill floor
       maxTypes: 2,           // Auto: building types per cycle (each adds a Buy and a Demolish round trip)
       cmdsPerMin: 20,        // command budget per rolling minute (shared pacer)

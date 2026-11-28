@@ -195,11 +195,13 @@
     refs.auto = K.toggleField('Resume after reload', 'Continues an interrupted run when the page loads again.', { get: () => cfg.autoResume, set: (v) => { cfg.autoResume = v; save(); render(); }, def: DEFAULTS.autoResume });
     refs.full = K.toggleField('Full batches only', '', { get: () => cfg.fullBatch, set: (v) => setCfg('fullBatch', v), def: DEFAULTS.fullBatch });
     refs.landMsg = h('div', { class: 'idc-msg', hidden: true });
+    refs.dryRunSwitch = K.toggleField('Dry run', 'Auto works out what it would build and writes it to the log, but sends nothing. Off: runs Live.', { get: () => !!ui.dryRunSwitch, set: (v) => { ui.dryRunSwitch = v; saveUi(); if (!running && !active) { cfg.dryRun = v; save(); } render(); }, def: false });
     refs.grpAuto = K.group('Auto', refs.autoOn.el, refs.solo.el, refs.pace.el, refs.land.el, refs.autoFloor.el);
     refs.grpBudget = K.group('Budget', refs.budget.el, refs.minMoney.el);
     refs.grpBatches = K.group('Batches', refs.full.el, refs.landMsg);
     const settings = K.settingsTab({
       lockText: 'Stop the farm to change settings.',
+      tail: [K.group('Experimental', refs.dryRunSwitch.el)],
       groups: [K.group('Building', refs.building.el), refs.grpAuto, refs.grpBudget, K.group('Goal', refs.targetCd.el), refs.grpBatches],
       advanced: K.disclosure('Advanced', [K.group(null, refs.region.el, h('div', { class: 'idc-two' }, refs.batch.el, refs.reserveAcres.el), refs.maxSpendPerMin.el, refs.auto.el)],
         { open: !!ui.advOpen, onToggle: (o) => { ui.advOpen = o; saveUi(); } }),
@@ -230,6 +232,7 @@
     const busy = running || active;
     const auto = isAuto();
     refs.settings.sync(busy);
+    refs.dryRunSwitch.input.disabled = busy;
     refs.grpAuto.hidden = !auto; refs.grpBudget.hidden = auto; refs.grpBatches.hidden = auto; refs.maxSpendPerMin.el.hidden = auto;
     const bldText = auto ? AUTO_BLD : r ? `${bld().name}: $${fmt(bld().base)} base, 1 CD and 1 acre each. You own ${r.ownedCamps}, so the next one costs $${fmt(campCost(r.ownedCamps, 1))} and each one you own adds $${fmt(bld().base / 20)}. Pick the one you own fewer of.` : undefined;
 
@@ -317,6 +320,7 @@
       onToggle: () => K.togglePanel(P, ui, panel),
       chipInsert: (tools, el) => tools.insertBefore(el, tools.querySelector('.tip-anchor') || null),
     });
+    if (!ui.dryRunSwitch && !running && !active) cfg.dryRun = false;   // Dry run is experimental: off by default, so runs start Live unless the switch is on.
     chrome.mount();
     timer = setInterval(render, 1000);
     if (ui.open) panel(true); else render();

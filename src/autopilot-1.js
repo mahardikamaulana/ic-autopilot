@@ -150,7 +150,7 @@ try {
       ironMines: 1, coalMines: 1, // at least; more as the Smelters' Iron Ore / Coal use needs at the current floor rates (4 / 2 at equal rates)
       quarries: 1, smelters: 1, kilns: 1, labs: 1,
       goldMines: Infinity,     // leftover frames → Gold Mines (+8 CD each; the CD source for Smelter and Phase 5). Infinity = auto: up to GOLD_AUTO while a plan unlock is open
-      dispatchOffice: false,   // Phase 5 optional unlock
+      dispatchOffice: true,    // Phase 5 optional unlock
       workshopPlanks: 205,     // planks before unlocking the Workshop (100 prototype + 100 build + 5 kit)
       landPaybackHours: 2,     // camps/farms/Gold Mines: land is also bought, above the walls below, while (acres + building) pay back from
       // the building's own live income within this many hours (payback alone ignores the CD they bring: slower in the sim)

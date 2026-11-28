@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IC Autopilot
 // @namespace    idlecorp-toolkit
-// @version      2.9.2
+// @version      2.9.3
 // @author       XPARAD0X
 // @description  Early-game Autopilot, CD Farm (Construction Data by building and demolishing buildings; Auto picks the cheapest source itself), Lab runner (keeps the Manufacturing Labs researching), Auto ship (an "Auto ship" button on every distributor bid), Auto utilities (an "Auto" switch that keeps the power and water subscriptions at what the groups need), Core plan, Keep online (keeps the socket alive while the tab is hidden), Module watch (alerts when a listed module matches a saved filter; never buys) and Auto modules (arranges the modules over the group sockets for the most value) for IdleCorp, each with a panel, menu or switch in the game UI. Everything runs live by default.
 // @homepageURL  https://github.com/mahardikamaulana/ic-autopilot
@@ -2238,7 +2238,7 @@ try {
       batch: 10,             // max buildings per cycle
       fullBatch: false,      // true: only build when all `batch` camps fit (land + money); never a smaller batch
       cycles: Infinity,      // stop after this many cycles
-      reserveAcres: 10,      // free acres never used by the farm (always kept spare)
+      reserveAcres: 0,       // free acres never used by the farm (always kept spare)
       minMoney: 30000,       // cash reserve ($): never spend below this
       // 'reserve': floor is minMoney; stops when the next batch would go below it.
       // 'floor':   floor is minMoney; waits for income instead of stopping (also waits to start if money is below it).
@@ -2252,7 +2252,7 @@ try {
       pace: 'balanced',      // Auto: 'thrifty' | 'balanced' | 'fast' (how much waiting for CD costs)
       land: 'plan',          // Auto: 'off' | 'plan' (acres only inside Autopilot's own land plan) | max $ per acre
       autoStart: true,       // Auto: start by itself when the engine needs CD (switched off when you press Stop)
-      solo: false,           // Auto: with Autopilot and Core plan off and no Target CD, farm for the cheapest tech that can start next
+      solo: true,            // Auto: with Autopilot and Core plan off and no Target CD, farm for the cheapest tech that can start next
       autoFloor: 0,          // Auto: money floor ($) on top of Autopilot's power-bill floor
       maxTypes: 2,           // Auto: building types per cycle (each adds a Buy and a Demolish round trip)
       cmdsPerMin: 20,        // command budget per rolling minute (shared pacer)
@@ -3485,11 +3485,13 @@ function status() {
     refs.auto = K.toggleField('Resume after reload', 'Continues an interrupted run when the page loads again.', { get: () => cfg.autoResume, set: (v) => { cfg.autoResume = v; save(); render(); }, def: DEFAULTS.autoResume });
     refs.full = K.toggleField('Full batches only', '', { get: () => cfg.fullBatch, set: (v) => setCfg('fullBatch', v), def: DEFAULTS.fullBatch });
     refs.landMsg = h('div', { class: 'idc-msg', hidden: true });
+    refs.dryRunSwitch = K.toggleField('Dry run', 'Auto works out what it would build and writes it to the log, but sends nothing. Off: runs Live.', { get: () => !!ui.dryRunSwitch, set: (v) => { ui.dryRunSwitch = v; saveUi(); if (!running && !active) { cfg.dryRun = v; save(); } render(); }, def: false });
     refs.grpAuto = K.group('Auto', refs.autoOn.el, refs.solo.el, refs.pace.el, refs.land.el, refs.autoFloor.el);
     refs.grpBudget = K.group('Budget', refs.budget.el, refs.minMoney.el);
     refs.grpBatches = K.group('Batches', refs.full.el, refs.landMsg);
     const settings = K.settingsTab({
       lockText: 'Stop the farm to change settings.',
+      tail: [K.group('Experimental', refs.dryRunSwitch.el)],
       groups: [K.group('Building', refs.building.el), refs.grpAuto, refs.grpBudget, K.group('Goal', refs.targetCd.el), refs.grpBatches],
       advanced: K.disclosure('Advanced', [K.group(null, refs.region.el, h('div', { class: 'idc-two' }, refs.batch.el, refs.reserveAcres.el), refs.maxSpendPerMin.el, refs.auto.el)],
         { open: !!ui.advOpen, onToggle: (o) => { ui.advOpen = o; saveUi(); } }),
@@ -3520,6 +3522,7 @@ function status() {
     const busy = running || active;
     const auto = isAuto();
     refs.settings.sync(busy);
+    refs.dryRunSwitch.input.disabled = busy;
     refs.grpAuto.hidden = !auto; refs.grpBudget.hidden = auto; refs.grpBatches.hidden = auto; refs.maxSpendPerMin.el.hidden = auto;
     const bldText = auto ? AUTO_BLD : r ? `${bld().name}: $${fmt(bld().base)} base, 1 CD and 1 acre each. You own ${r.ownedCamps}, so the next one costs $${fmt(campCost(r.ownedCamps, 1))} and each one you own adds $${fmt(bld().base / 20)}. Pick the one you own fewer of.` : undefined;
 
@@ -3607,6 +3610,7 @@ function status() {
       onToggle: () => K.togglePanel(P, ui, panel),
       chipInsert: (tools, el) => tools.insertBefore(el, tools.querySelector('.tip-anchor') || null),
     });
+    if (!ui.dryRunSwitch && !running && !active) cfg.dryRun = false;   // Dry run is experimental: off by default, so runs start Live unless the switch is on.
     chrome.mount();
     timer = setInterval(render, 1000);
     if (ui.open) panel(true); else render();
@@ -10627,7 +10631,7 @@ try {
       ironMines: 1, coalMines: 1, // at least; more as the Smelters' Iron Ore / Coal use needs at the current floor rates (4 / 2 at equal rates)
       quarries: 1, smelters: 1, kilns: 1, labs: 1,
       goldMines: Infinity,     // leftover frames → Gold Mines (+8 CD each; the CD source for Smelter and Phase 5). Infinity = auto: up to GOLD_AUTO while a plan unlock is open
-      dispatchOffice: false,   // Phase 5 optional unlock
+      dispatchOffice: true,    // Phase 5 optional unlock
       workshopPlanks: 205,     // planks before unlocking the Workshop (100 prototype + 100 build + 5 kit)
       landPaybackHours: 2,     // camps/farms/Gold Mines: land is also bought, above the walls below, while (acres + building) pay back from
       // the building's own live income within this many hours (payback alone ignores the CD they bring: slower in the sim)
@@ -12076,7 +12080,7 @@ try {
   async function liveCountdown() {
     liveCountdownUntil = Date.now() + 60000;
     panel(true);
-    core.notify('AP', 'Autopilot resumes LIVE in 60 s', 'Open the Autopilot panel and press Cancel to resume as a dry run instead.');
+    core.notify('AP', 'Autopilot resumes LIVE in 60 s', ui.dryRunSwitch ? 'Open the Autopilot panel and press Cancel to resume as a dry run instead.' : 'Open the Autopilot panel and press Cancel to stay stopped.');
     while (liveCountdownUntil && Date.now() < liveCountdownUntil) {
       if (unloaded) return false;
       render();
@@ -12481,7 +12485,7 @@ function renderPanel(s, ph, cp, t) {
   // Recent lines: Core plan's once it has taken over, Autopilot's before
   const recent = cv ? core.ledger.list().filter((e) => e.mod === 'CP').slice(-6).reverse().map((e) => new Date(e.t).toLocaleTimeString() + ' ' + e.text) : log;
   refs.log.replaceChildren(...recent.map((l) => mk('div', {}, l)));
-  refs.live.set(liveCountdownUntil ? `Resuming Live after the reload in ${Math.max(0, Math.ceil((liveCountdownUntil - Date.now()) / 1000))} s. Cancel to resume as a dry run instead.`
+  refs.live.set(liveCountdownUntil ? `Resuming Live after the reload in ${Math.max(0, Math.ceil((liveCountdownUntil - Date.now()) / 1000))} s. ${ui.dryRunSwitch ? 'Cancel to resume as a dry run instead.' : 'Cancel to stay stopped.'}`
     : cp?.resumeIn ? `Core plan resumes Live after the reload in ${cp.resumeIn} s. Cancel to keep it a dry run.` : '');
   refs.stall.set(stalled ? `Looks stalled: ${stalled}. Autopilot keeps running; check the log below.` : '');
   K.syncLog(P, ui, refs.logv);
@@ -12607,7 +12611,8 @@ if (HAS_DOM) (async () => {
       if (unloaded || running) return;
     }
     let live = false;
-    if (cfg.liveResume && liveFlag) { live = await liveCountdown(); if (unloaded || running) return; }
+    // Dry run is experimental: with its switch off a resume is always Live (60 s cancel); Cancel leaves it stopped.
+    if (!ui.dryRunSwitch || (cfg.liveResume && liveFlag)) { live = await liveCountdown(); if (unloaded || running) return; if (!live && !ui.dryRunSwitch) return; }
     cfg.dryRun = !live;
     console.log(live ? '[earlyGame] resuming the run from before the reload, LIVE (liveResume)'
       : '[earlyGame] resuming the run from before the reload (as a DRY RUN: switch to Live in the panel to send again)');
