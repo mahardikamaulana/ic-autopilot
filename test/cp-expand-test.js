@@ -47,6 +47,7 @@ function apply(st, m, drop = []) {
     case 'AssignBuildings': { const g = st.groups[m.group]; st.building_pool[g.region ?? 0][g.building] -= m.amount; g.count += m.amount; g.equipped = g.count; break; }
     case 'SetSubscription': ((st.subscriptions ??= {})[r] ??= {})[m.utility] = m.level; break;
     case 'SetAssortment': st.groups[m.group].assortment = [...m.items]; break;
+    case 'SetPaused': st.groups[m.group].paused = m.paused; break;
     default: throw new Error('unexpected message ' + m.type);
   }
 }
@@ -56,7 +57,7 @@ function drive(cp, st, { n = 60, ctx = {}, drop = [], stopAt = null } = {}) {
   const sent = [];
   for (let k = 0; k < n; k++) {
     const out = cp._decide(cp._view(st, cat, []), ctxFor(ctx));
-    const a = out.actions.find((x) => x.director === 'expand');
+    const a = out.actions.find((x) => x.director === 'expand' || /^retail:shelf:\d+:/.test(x.id));   // a region's shelves: cp-retail's region pass
     if (!a) {
       const w = out.waits.find((x) => /^expand:/.test(x)) ?? '';
       if (/in transit/.test(w)) { arrive(st); continue; }
@@ -75,12 +76,16 @@ const fresh = () => { for (const k of Object.keys(disk._disk)) delete disk._disk
   let cp = loadExpand();
   cp.cfg.expand = 'auto';
 
-  await F.t('trigger: Heartland below its 360 acres -> no offer, the wait says so', () => {
+  await F.t('trigger (M-5): Heartland at 215 of 360 acres, none free -> no offer: its next acres cost less than the region; at 325 -> the region opens', () => {
     fresh();
-    const st = corp(); st.land_bought[0] = 300;
-    const r = drive(cp, st);
+    let st = corp(); st.land_bought[0] = 190;
+    let r = drive(cp, st);
     assert.strictEqual(r.sent.length, 0);
-    assert.ok(/Heartland has 325 of 360 acres/.test(r.wait), r.wait);
+    assert.ok(/Heartland has 215 of 360 acres: its next 58 cost \$[\d,]+, less than Industrial Basin's \$1,0\d\d,\d\d\d \(charter, land, courier\)/.test(r.wait), r.wait);
+    fresh();
+    st = corp(); st.land_bought[0] = 300;
+    r = drive(cp, st, { n: 1 });
+    assert.deepStrictEqual(r.sent.map((m) => m.type), ['BuyCharter'], r.wait);
   });
 
   await F.t('trigger: a demand-bound allocator (not Planks or land) -> no offer', () => {
@@ -237,7 +242,8 @@ const fresh = () => { for (const k of Object.keys(disk._disk)) delete disk._disk
       'BuyBuilding:Retail Store', 'CreateGroup:Retail Store', 'SetAssortment'], r.wait);
     assert.strictEqual(held, 60, 'Industrial Basin acres held from BuyLand');
     assert.strictEqual(picked, 0, 'CD Farm Auto region skips the held region');
-    assert.deepStrictEqual(kept, { [I('Iron Frame')]: 6, [I('Concrete')]: 20, [I('Glass')]: 20 }, 'store materials kept in Heartland');
+    assert.deepStrictEqual([I('Iron Frame'), I('Concrete'), I('Glass')].map((i) => kept?.[i]), [6, 20, 20], 'store materials kept in Heartland');
+    assert.ok(Object.keys(kept).length > 3, 'and the shipment not sent yet (phase 2 fix): ' + JSON.stringify(kept));
     assert.strictEqual(r.sent.find((m) => m.type === 'SetSubscription').level, 5);
     assert.ok(r.sent.filter((m) => m.type === 'TransferStock').every((m) => m.from === 0 && m.to === 1 && m.courier === true));
     const mm = memOf('expand').get();
@@ -356,6 +362,79 @@ const fresh = () => { for (const k of Object.keys(disk._disk)) delete disk._disk
     assert.strictEqual(P.pickRegion({ st, catalog: cat, choice: 1 }), 1);
     globalThis.idleCore.acreHolds = {};
     assert.strictEqual(P.pickRegion({ st, catalog: cat }), 1);
+  });
+
+  // Lever 6 (scripts/multi-region-plan.md M-3, M-4): Industrial Basin opened by hand with a chain and no store (as the user's corp)
+  const ibChain = (st, { store = false } = {}) => {
+    st.charters = { 1: 1 }; st.land_bought[1] = 55 - globalThis.idleCore.planner.starterAcres(1);   // the chain's 55 acres, none free
+    const add = (b, rc, n, extra = {}) => { st.groups[st.next_group_id++] = { building: B(b), region: 1, count: n, recipe: rc == null ? null : Rc(rc), name: rc ?? 'Retail', equipped: n, work: [], modules: {}, ...extra }; };
+    add('Workshop', 'Make Bookshelf', 3); add('Lumber Camp', 'Fell Wood', 26); add('Sawmill', 'Saw Planks', 23);
+    if (store) add('Retail Store', null, 1, { assortment: [I('Bookshelf')] });
+    return st;
+  };
+  await F.t('adopt (lever 6): a hand-opened region with a chain and no store gets a store-only run in ask without a Go: 3 acres, store materials, store, Retail group, shelves; nothing else bought', () => {
+    fresh();
+    cp.cfg.expand = 'ask';
+    const toasts = [];
+    globalThis.idleCore.toast = (t, o) => toasts.push([t, o]);
+    const st = ibChain(corp());
+    const r = drive(cp, st, { n: 80 });
+    assert.deepStrictEqual(types(r.sent), ['BuyLand', 'TransferStock', 'TransferStock', 'TransferStock', 'BuyBuilding:Retail Store', 'SetSubscription', 'CreateGroup:Retail Store', 'SetAssortment'], JSON.stringify(r.sent) + ' ' + r.wait);
+    assert.strictEqual(r.sent[0].amount, 3, 'only the 3 acres the store lacks');
+    assert.strictEqual(toasts.length, 0, 'no Go asked for a store under $1M');
+    assert.ok(memOf('expand').get().regions[1] && !memOf('expand').get().run, JSON.stringify(memOf('expand').get()));
+    cp.cfg.expand = 'auto';
+  });
+  await F.t('adopt (lever 6): with its store already there the region is registered with no action; unseeded (live stock) nothing is bought and the wait names what is short', () => {
+    fresh();
+    let r = drive(cp, ibChain(corp(), { store: true }), { n: 3 });
+    assert.ok(!r.sent.some((m) => m.region === 1), JSON.stringify(r.sent));
+    assert.ok(memOf('expand').get().regions?.[1]?.adopted, JSON.stringify(memOf('expand').get()));
+    fresh();
+    r = drive(cp, ibChain(F.clone(FX.snap)));
+    assert.strictEqual(r.sent.length, 0);
+    assert.ok(/Industrial Basin \(not opened by Core plan\).*Heartland needs 20 Concrete \(have 18\), 20 Glass \(have 2\), 6 Iron Frame \(have 2\)/.test(r.wait), r.wait);
+  });
+  await F.t('adopt (lever 6): a hand-opened region whose store would not pay (no Sawmills on Saw Planks) does not block the other offers: Coastal Cities is offered', () => {
+    fresh();
+    const st = ibChain(corp());
+    for (const g of Object.values(st.groups)) if (g.region === 1 && g.building === B('Sawmill')) g.count = 0;
+    const v = cp._view(st, cat, []), ctx = ctxFor();
+    cp._decide(v, ctx);
+    const t = cp._expand.trigger(v, ctx, {});
+    assert.strictEqual(t.offer?.r, 2, t.why);
+  });
+  await F.t('region shelves (lever 4): cp-retail shelves an adopted region from its own board; with a rival there, an unstocked good stays off until it holds rivalStockHours', () => {
+    const shelfOf = (st, board) => { fresh(); memOf('expand').set({ regions: { 1: { level: 1 } } }); const out = cp._decide(cp._view(st, cat, []), ctxFor({ retailBoard: board })); return out.actions.find((a) => /^retail:shelf:1:/.test(a.id))?.steps[0].msg.items ?? null; };
+    const st = ibChain(corp(), { store: true });
+    Object.values(st.groups).find((g) => g.region === 1 && g.building === B('Retail Store')).assortment = [];
+    assert.deepStrictEqual(shelfOf(st, FX.retail), [I('Bookshelf')], 'alone: what it makes');
+    const rival = F.clone(FX.retail); rival.ratings = { 1: { 999999: 10000 } };
+    assert.strictEqual(shelfOf(st, rival), null, 'rival, no Bookshelf stock: nothing to shelve');
+    st.stock[1] = { ...(st.stock[1] ?? {}), [I('Bookshelf')]: 50000 };
+    assert.deepStrictEqual(shelfOf(st, rival), [I('Bookshelf')], 'rival, hours of stock: shelved');
+  });
+  await F.t('feed (M-2): Iron Sheet short -> the offer still goes; at the ship step the Iron Frame group (it uses the Smelter\'s sheets) is paused; resumed right after the sheets ship; user-paused groups untouched', () => {
+    fresh();
+    const st = corp(), sheet = I('Iron Sheet');
+    st.stock[0][sheet] = 5;
+    let r = drive(cp, st, { n: 20, stopAt: (sent) => sent.some((m) => m.type === 'SetPaused') });
+    const ifg = Object.entries(st.groups).find(([, g]) => (g.region ?? 0) === 0 && g.recipe === Rc('Assemble Iron Frame'))[0];
+    assert.deepStrictEqual(r.sent.map((m) => m.type), ['BuyCharter', 'BuyLand', 'SetPaused'], 'the offer is not held by a feedable item; the run feeds it at its ship step: ' + r.wait);
+    assert.deepStrictEqual(r.sent[2], { type: 'SetPaused', group: +ifg, paused: true });
+    assert.ok(!r.sent.some((m) => m.group === 10), 'the Kiln (paused by hand) stays as it is');
+    st.stock[0][sheet] = 200;   // the Smelter caught up
+    r = drive(cp, st, { n: 40, stopAt: (sent) => sent.some((m) => m.type === 'SetPaused' && !m.paused) });
+    const ts = r.sent.map((m) => m.type + (m.type === 'TransferStock' ? ':' + m.item : '') + (m.type === 'SetPaused' ? ':' + m.paused : ''));
+    assert.ok(ts.indexOf('TransferStock:' + sheet) >= 0 && ts.indexOf('SetPaused:false') > ts.indexOf('TransferStock:' + sheet), ts.join(' '));
+    assert.ok(!st.groups[ifg].paused && !(memOf('expand').get().fed ?? []).length);
+  });
+  await F.t('adopt (lever 6): off sends nothing', () => {
+    fresh();
+    cp.cfg.expand = 'off';
+    const r = drive(cp, ibChain(corp()));
+    assert.strictEqual(r.sent.length, 0, JSON.stringify(r.sent));
+    cp.cfg.expand = 'auto';
   });
 
   F.done();

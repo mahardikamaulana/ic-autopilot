@@ -689,6 +689,8 @@
       } else {
         if (stage !== 'C' && stage !== 'D') return { wait: why + ': no free acre (stage ' + stage + ' builds on free land only, ' + v.freeAcres + ' free, buffer ' + cfg.bufferAcres + ')' };
         if (v.acresOwned + acres > Math.min(rule.lastAcre, ACRE_CAP)) return { closed: true, wait: why + ': no free acre and the land rule closes at #' + Math.min(rule.lastAcre, ACRE_CAP) };
+        const capC = acreCapCents(v), lastC = cp._acrePriceCents(v.landBought + acres - 1);
+        if (lastC > capC) return { closed: true, wait: why + ': acre #' + (v.acresOwned + acres) + ' ' + usd(lastC) + ' is dearer than a region acre (' + usd(capC) + ', cfg.heartlandLandCap)' };
       }
       for (let i = 0; i < acres; i++) landCents += cp._acrePriceCents(v.landBought + i);
     }

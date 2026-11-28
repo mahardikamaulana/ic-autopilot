@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IC Autopilot
 // @namespace    idlecorp-toolkit
-// @version      2.10.0
+// @version      2.10.1
 // @author       XPARAD0X
 // @description  Early-game Autopilot, CD Farm (Construction Data by building and demolishing buildings; Auto picks the cheapest source itself), Lab runner (keeps the Manufacturing Labs researching), Auto ship (an "Auto ship" button on every distributor bid), Auto utilities (an "Auto" switch that keeps the power and water subscriptions at what the groups need), Core plan, Keep online (keeps the socket alive while the tab is hidden), Module watch (alerts when a listed module matches a saved filter; never buys) and Auto modules (arranges the modules over the group sockets for the most value) for IdleCorp, each with a panel, menu or switch in the game UI. Everything runs live by default.
 // @homepageURL  https://github.com/mahardikamaulana/ic-autopilot
@@ -6726,7 +6726,7 @@ try {
     }
 
     // ---- a small pure view of the game state ---------------------------------------------------------------------------------
-    function view(st, raw, deals = []) {
+    function view(st, raw, deals = [], region = REGION) {   // region: the per-region retail pass (scripts/multi-region-plan.md lever 4); directors read Heartland
       const N = names(raw), C = N.C;
       // A group on a Lab process (st.recipes, wiki research.md) shows as on the catalog recipe of the same building and product, so every
       // director counts it as that recipe (plan D1 adoption); g.process keeps the real id.
@@ -6734,15 +6734,15 @@ try {
       const groups = Object.entries(st.groups ?? {}).map(([id, g]) => {
         const pr = g.recipe != null && !C.recipes[g.recipe] ? st.recipes?.[g.recipe] : null, b = pr ? baseOf(pr) : null;
         return { id: +id, ...g, ...(b ? { recipe: b.id, process: g.recipe } : {}) };
-      }).filter((g) => (g.region ?? REGION) === REGION);
-      const pool = st.building_pool?.[REGION] ?? {};
-      const stock = st.stock?.[REGION] ?? {}, items = st.items ?? {};
+      }).filter((g) => (g.region ?? 0) === region);
+      const pool = st.building_pool?.[region] ?? {};
+      const stock = st.stock?.[region] ?? {}, items = st.items ?? {};
       const bld = (b) => C.buildings[b] ?? { name: 'building ' + b, cost: 0, acres: 1, build_items: [] };
       const idB = (n) => N.b[n], idI = (n) => N.i[n], idR = (n) => N.r[n];
       const ownedId = (b) => groups.filter((g) => g.building === b).reduce((a, g) => a + g.count, 0) + (pool[b] ?? 0);
       const owned = (n) => (N.b[n] == null ? 0 : ownedId(N.b[n]));
       // Building prices count every region and the build / demolish queues (planner.queued): owned() is Heartland only.
-      const q = P.queued({ st, catalog: raw, region: REGION });
+      const q = P.queued({ st, catalog: raw, region });
       const ownedAll = (n) => {
         const b = N.b[n];
         if (b == null) return 0;
@@ -6751,7 +6751,7 @@ try {
         for (const p of Object.values(st.building_pool ?? {})) c += p?.[b] ?? 0;
         return c;
       };
-      const landBought = st.land_bought?.[REGION] ?? 0;
+      const landBought = st.land_bought?.[region] ?? 0;
       let acresUsed = q.acres;   // a queued build or demolition holds its acres
       for (const g of groups) acresUsed += bld(g.building).acres * g.count;
       for (const [b, n] of Object.entries(pool)) acresUsed += bld(+b).acres * n;
@@ -6762,9 +6762,9 @@ try {
       const running = (bn, rn) => groups.filter((g) => g.building === N.b[bn] && g.recipe === N.r[rn] && !g.paused && g.count > 0).reduce((a, g) => a + g.count, 0);
       const cottonGroup = groups.find((g) => g.building === N.b.Farm && g.recipe === N.r['Grow Cotton'] && !g.paused);
       const engineAcres = ['Lumber Camp', 'Farm', 'Sawmill', 'Workshop'].reduce((a, n) => a + owned(n) * (N.b[n] == null ? 0 : bld(N.b[n]).acres), 0);
-      const cottonBids = deals.filter((d) => d.side === 'Sell' && d.item === N.i.Cotton && (d.region ?? REGION) === REGION && d.amount > 0);
+      const cottonBids = deals.filter((d) => d.side === 'Sell' && d.item === N.i.Cotton && (d.region ?? 0) === region && d.amount > 0);
       return {
-        catalog: raw,
+        catalog: raw, region,
         N, C, st, groups, pool, bld, idB, idI, idR, owned, ownedAll, has, unlocked, running, cottonGroup,
         cottonBid: cottonBids.length > 0, dealsLoaded: deals.length > 0,
         cottonUnit: cottonBids.reduce((a, d) => Math.max(a, d.price / d.amount), 0) || null,   // cents per unit, best Heartland Cotton bid
@@ -7333,6 +7333,8 @@ try {
   if (!W.corePlan?.addDirector) throw new Error('Core plan did not load');
   const cp = W.corePlan, cfg = cp.cfg, usd = cp._usd;
   const REGION = 0, ACRE_CAP = 360;
+  // multi-region plan (opt-in cfg.heartlandLandCap): once a region is chartered, no Heartland acre dearer than the cheapest region acre
+  const acreCapCents = (v) => (cfg.heartlandLandCap && Object.values(v.st.charters ?? {}).some((x) => x > 0) ? cp._expand?.regionAcreCents?.(v) ?? Infinity : Infinity);
   const FURN = [['bookshelf', 'Bookshelf', 'Make Bookshelf'], ['table', 'Table', 'Make Table'], ['chair', 'Chair', 'Make Chair']];
   const MIX = { bookshelf: 0.4, table: 0.3, chair: 0.3 };     // plank shares when the board has no appetite (wiki 4.3)
   const FLOOR = { 'Lumber Camp': 3, Sawmill: 2, Workshop: 5 }; // floor rate the plan assumes (wiki 4.5)
@@ -7448,6 +7450,7 @@ try {
       if (v.acresOwned + bought + lack > cap) break;
       let c = W.idleCore.planner.price(bd.cost, v.ownedAll('Workshop'), n) + addBill;
       for (let i = 0; i < lack; i++) c += cp._acrePriceCents(v.landBought + bought + i);
+      if (lack && cp._acrePriceCents(v.landBought + bought + lack - 1) > acreCapCents(v)) break;
       if (cash < c) break;
       cash -= c; free += lack - bd.acres; bought += lack;
     }
@@ -8365,6 +8368,8 @@ try {
       } else {
         if (stage !== 'C' && stage !== 'D') return { wait: why + ': no free acre (stage ' + stage + ' builds on free land only, ' + v.freeAcres + ' free, buffer ' + cfg.bufferAcres + ')' };
         if (v.acresOwned + acres > Math.min(rule.lastAcre, ACRE_CAP)) return { closed: true, wait: why + ': no free acre and the land rule closes at #' + Math.min(rule.lastAcre, ACRE_CAP) };
+        const capC = acreCapCents(v), lastC = cp._acrePriceCents(v.landBought + acres - 1);
+        if (lastC > capC) return { closed: true, wait: why + ': acre #' + (v.acresOwned + acres) + ' ' + usd(lastC) + ' is dearer than a region acre (' + usd(capC) + ', cfg.heartlandLandCap)' };
       }
       for (let i = 0; i < acres; i++) landCents += cp._acrePriceCents(v.landBought + i);
     }
@@ -8558,8 +8563,8 @@ try {
   const RATES = { power: 1000, water: 400, bandwidth: 1500 };   // cents per unit per 10-min bill (same as autoUtil billsOf)
   const Q0 = 0.95;                     // quality factor at quality 0 (wiki retail.md, Price; engine BhehihUq)
   // Quality factor of the Heartland stock: 0.95 + 0.19 q / (q + 10), q = quality_points / units / 100 (wiki formulas.md); Q0 with none.
-  const qOf = (st, id) => { const u = st.stock?.[REGION]?.[id] ?? 0; return u > 0 ? (st.quality_points?.[REGION]?.[id] ?? 0) / u / 100 : 0; };
-  const qf = (st, id) => { const q = qOf(st, id); return Q0 + 0.19 * q / (q + 10); };
+  const qOf = (st, id, r = REGION) => { const u = st.stock?.[r]?.[id] ?? 0; return u > 0 ? (st.quality_points?.[r]?.[id] ?? 0) / u / 100 : 0; };
+  const qf = (st, id, r = REGION) => { const q = qOf(st, id, r); return Q0 + 0.19 * q / (q + 10); };
   const cfg = () => W.corePlan.cfg;
   const usd = (c) => '$' + (c / 100).toLocaleString('en-US', { maximumFractionDigits: 0 });
   const pct = (x) => (x * 100).toFixed(0) + '%';
@@ -8569,7 +8574,7 @@ try {
   // ---- the board ------------------------------------------------------------------------------------------------------------------
   // Asserts the shape seen on 2026-11-22 (shelves[region][itemId] = { appetite, held, standard, price }); never guesses past it.
   // Only appetite and price are required: held is just a note on the appetite row.
-  function checkBoard(board, ids) {
+  function checkBoard(board, ids, REGION = 0) {
     if (!board || typeof board !== 'object') return 'no board from engine.retailJson()';
     const rows = board.shelves?.[REGION] ?? board.shelves?.[String(REGION)];
     if (!board.shelves || typeof board.shelves !== 'object') return 'board has no "shelves"';
@@ -8584,7 +8589,7 @@ try {
   }
   // share = (1,000 + mine) / sum over store owners (1,000 + theirs) (wiki retail.md). ratings[region] = { corpId: rating } is assumed;
   // an empty or missing object means nobody else has a store. Anything else returns null (unknown shape, no guess).
-  function shareOf(board, mine, corpId) {
+  function shareOf(board, mine, corpId, REGION = 0) {
     const all = board.ratings;
     if (all == null || (typeof all === 'object' && !Object.keys(all).length)) return 1;
     const rows = all[REGION] ?? all[String(REGION)];
@@ -8594,7 +8599,7 @@ try {
     const others = Object.entries(rows).filter(([k]) => String(k) !== String(corpId)).reduce((a, [, r]) => a + 1000 + r, 0);
     return me / (me + others);
   }
-  function ratingOf(st) {
+  function ratingOf(st, REGION = 0) {
     const r = st.retail_ratings?.[REGION] ?? st.retail_ratings?.[String(REGION)];
     if (r == null) return 0;   // the engine deletes the key (or the whole map) when the rating reaches 0
     if (num(r)) return r;
@@ -8604,6 +8609,7 @@ try {
 
   // Shelf goods: every board row the Corporation can make (a recipe on an unlocked building), name -> recipe name; RECIPE when none.
   function goodsOf(v, board) {
+    const REGION = v.region ?? 0;
     const rows = board?.shelves?.[REGION] ?? board?.shelves?.[String(REGION)];
     const out = {};
     if (rows && typeof rows === 'object') for (const id of Object.keys(rows)) {
@@ -8653,23 +8659,23 @@ try {
 
   // ---- facts for this step ----------------------------------------------------------------------------------------------------------
   function facts(v, ctx) {
-    const c = cfg();
+    const c = cfg(), REGION = v.region ?? 0;   // a region view (lever 4) reads its own board row, rating and stock
     const storeB = v.idB(STORE);
     const ids = {}, miss = [], recipeOf = goodsOf(v, ctx.retailBoard);
     for (const [n, rn] of Object.entries(recipeOf)) { const i = v.idI(n), r = v.idR(rn); if (i == null || r == null) miss.push(i == null ? n : rn); else ids[n] = i; }
     if (storeB == null) miss.push(STORE);
     if (miss.length) return { err: 'name not in the catalog: ' + miss.join(', ') + ' (director off until the names match)' };
-    const badBoard = checkBoard(ctx.retailBoard, ids);
+    const badBoard = checkBoard(ctx.retailBoard, ids, REGION);
     const storeGroup = v.groups.find((g) => g.building === storeB && g.count > 0) ?? null;
     const emptyGroup = storeGroup ? null : v.groups.find((g) => g.building === storeB) ?? null;
-    const f = { storeB, ids, names: Object.keys(recipeOf), storeGroup, emptyGroup, pooled: v.pool[storeB] ?? 0, owned: v.owned(STORE), unlocked: v.unlocked(STORE), rating: ratingOf(v.st), badBoard };
+    const f = { storeB, ids, names: Object.keys(recipeOf), storeGroup, emptyGroup, pooled: v.pool[storeB] ?? 0, owned: v.owned(STORE), unlocked: v.unlocked(STORE), rating: ratingOf(v.st, REGION), badBoard };
     if (badBoard) return f;
     const rows = ctx.retailBoard.shelves[REGION] ?? ctx.retailBoard.shelves[String(REGION)];
-    f.share = shareOf(ctx.retailBoard, f.rating, v.st.ssi?.corp_id);
+    f.share = shareOf(ctx.retailBoard, f.rating, v.st.ssi?.corp_id, REGION);
     const plId = v.idI('Planks');
     f.goods = Object.keys(ids).map((n) => {
       const id = ids[n], rid = v.idR(recipeOf[n]), row = rows[id], base = v.C.items[id]?.base_value ?? 0, o = output(v, rid), rc = v.C.recipes[rid];
-      return { name: n, id, rid, appetite: row.appetite, held: row.held, boardPrice: row.price, base, unit: Math.floor(base * row.price / 10000 * qf(v.st, id)), q: qOf(v.st, id),
+      return { name: n, id, rid, appetite: row.appetite, held: row.held, boardPrice: row.price, base, unit: Math.floor(base * row.price / 10000 * qf(v.st, id, REGION)), q: qOf(v.st, id, REGION),
         stock: v.has(n), outTick: o.perTick, blockH: perBlockH(o), made: o.perTick > 0,
         // a paused or retuning group still counts: it comes back, and the shelf should not churn meanwhile
         assigned: v.groups.some((g) => g.recipe === rid && g.count > 0),
@@ -8681,7 +8687,7 @@ try {
     f.rival = !!storeGroup && f.share < 1 && c.rivalStockHours > 0;
     // Planks per hour the best four plank goods sell: the land rule sizes the engine to it (corePlan decide). Before a store sells, at the
     // share the target rating (cfg.retailRating) will give, not today's rating of 0.
-    const dShare = f.storeGroup ? f.share : shareOf(ctx.retailBoard, Math.max(f.rating ?? 0, c.retailRating ?? 0), v.st.ssi?.corp_id);
+    const dShare = f.storeGroup ? f.share : shareOf(ctx.retailBoard, Math.max(f.rating ?? 0, c.retailRating ?? 0), v.st.ssi?.corp_id, REGION);
     f.demandPlanksH = dShare == null ? null : pickOrder(f.goods.filter((g) => g.ppu > 0)).reduce((a, g) => a + demandH(g, dShare) * g.ppu, 0);
     // Before the store: the shelf is what is eligible now (shelfPick() adds the keep-on-shelf rule once the store exists).
     f.chosen = pickOrder(f.goods.filter(f.eligible));
@@ -9055,7 +9061,7 @@ try {
     if (v.money < need) return { wait: 'store ' + usd(cost) + ' + bill floor ' + usd(billFloor) + ' (' + mw + ' MW x $20 + 2 h of bills): need ' + usd(need - v.money) + ' more above the floor' };
     return { cost };
   }
-  function decide(v, ctx, out) {
+  function decideHeartland(v, ctx, out) {
     const f = ctx.retail;
     if (f?.goods && !f.badBoard && f.share != null) {
       try { f.alloc = W.corePlan._buildout?.alloc?.(v, ctx) ?? null; } catch (e) { console.error('[corePlan] retail alloc', e); f.alloc = null; }
@@ -9118,6 +9124,32 @@ try {
     return { wait: readout.decision, readout };
   }
 
+  // Lever 4 (scripts/multi-region-plan.md): the regions the expand director opened or adopted that have a store get the same shelf rule as
+  // Heartland (made, assigned or held goods, the shelf-drop delay, rival mode), from their own board row, stock and rating. One
+  // SetAssortment at a time, after Heartland's own action. The checkpoint, fail path and store count stay Heartland's (a region chain is
+  // far below its demand and one store's capacity: see the plan's dropped-lever table).
+  function regionShelf(v, ctx) {
+    const em = ctx.mem?.('expand')?.get?.() ?? {};   // the run's region too: retail decides before expand, the step the run ends
+    for (const r of new Set([...Object.keys(em.regions ?? {}).map(Number), em.run?.r])) {
+      if (!(r > 0)) continue;
+      const vr = W.corePlan._view(v.st, v.catalog, [], r), f = facts(vr, ctx);
+      if (f.err || f.badBoard || f.share == null || !f.storeGroup) continue;
+      shelfPick(f, ctx, ctx.mem('retail:' + r));
+      const want = f.chosen.map((g) => g.id), g = f.storeGroup;
+      if (!want.length || sameSet(g.assortment ?? [], want)) continue;
+      return { id: 'retail:shelf:' + r + ':' + want.join(','), text: 'region ' + r + ' shelves: ' + f.chosen.map((x) => x.name).join(', ') + (f.rival ? ' (rival mode)' : ''),
+        steps: [{ msg: { type: 'SetAssortment', group: g.id, items: want }, until: (x) => sameSet(x.st.groups?.[g.id]?.assortment ?? [], want) }] };
+    }
+    return null;
+  }
+  function decide(v, ctx, out) {
+    const h = decideHeartland(v, ctx, out);
+    if (h.action) return h;
+    let a = null;
+    try { a = regionShelf(v, ctx); } catch (e) { console.error('[corePlan] retail regionShelf', e); }
+    return a ? { action: a, readout: h.readout } : h;
+  }
+
   W.corePlan.addDirector({
     name: 'retail', order: 45,
     defaults: {
@@ -9147,10 +9179,12 @@ try {
 // ============================================================================
 // CORE PLAN DIRECTOR: Expansion (scripts/retail-optimizer-plan.md R-7, C1, C2; wiki regions-and-land.md "Opening a new region")
 // ============================================================================
-// Director "expand" (order 47, after retail). When Heartland is at its 360-acre cap and the retail allocator is held by Planks or land
+// Director "expand" (order 47, after retail). When Heartland is full and the retail allocator is held by Planks or land
 // (binding planks, or money / workshops with no free acre for a Workshop), it offers the region option that pays back best:
 //   - a new region: the cheapest charter not owned (Industrial Basin, Coastal Cities, Frontier), level 1 (60 acres);
 //   - in a region this director opened: more chain while a block fits its acres, else its next charter level (150 / 360 acres) (C2).
+// Heartland counts as full at 360 acres, or below it once its next acres for the same chain cost more than the region's charter + land + courier
+// (scripts/multi-region-plan.md M-5: a land rule or Planks that stop Heartland short of 360 no longer block expansion for good).
 // Payback = (charter + land + courier fees + buildings + store) / the region chain's $/h (window.idleCore.retailAlloc on the region's
 // board, Planks from its Sawmills) <= cfg.expandPaybackH, and cash after it >= the money floor + cfg.expandBillHours of bills.
 // Nothing is offered until Heartland holds the whole shipment and the store materials, less what other modules keep (the wait names what is short).
@@ -9163,13 +9197,16 @@ try {
 //   power (Auto utilities power on: ask it and wait for free MW, never a SetSubscription; off: SetSubscription) -> CreateGroup +
 //   SetRecipe Workshops first (their kits need Wood; waits cfg.expandEquipMin for equipped == count, then goes on and reports), Camps, Sawmills ->
 //   store materials (6 Iron Frame, 20 Concrete, 20 Glass per store; kept back in Heartland by the "coreExpand" reserve provider until shipped)
-//   -> ship -> BuyBuilding the store -> CreateGroup "Retail" -> SetAssortment (the region's made goods, best unit price first).
+//   -> ship -> BuyBuilding the store -> CreateGroup "Retail"; its shelves come from the retail director's region pass (cp-retail regionShelf).
 // A step the state never shows is not sent again blindly: the run stops with the reason in the readout (TransferStock gets 2 tries: a busy
 // courier drops it) and frees the store materials. corePlan._expand.reset() retries from the state; cancel() drops the run, keeps the region as
 // this director's (a later offer can finish it) and turns 'auto' into 'ask'. While a run is on, its region's acres are
 // held (idleCore.acreHolds, which planner.pickRegion honours: CD Farm's Auto region skips it).
-// C2: regions this director opened keep their shelves to what they make (SetAssortment when the set differs). cp-retail and cp-buildout read a
-// Heartland-only view (core-plan-1 view), so they never touch a region's groups; a region grows only through this director's upgrades.
+// C2: the shelves of the regions this director opened or adopted are set by cp-retail's region pass (multi-region plan lever 4: the same shelf
+// rule as Heartland on the region's own board). cp-buildout reads a Heartland-only view; a region grows only through this director's upgrades.
+// Adopt (scripts/multi-region-plan.md M-3, M-4): a region the corp owns but this director did not open, with Workshops on a Planks good,
+// becomes this director's: with a store it is registered at once (shelves, growth offers); without one it gets a store-only run (acres the
+// store lacks, store materials, store, Retail group, shelves), which starts in 'ask' without a Go while it costs under $1M.
 // @@MODULE cp-expand
 try {
 (() => {
@@ -9230,6 +9267,7 @@ try {
   const allocFor = (goods, ws, saws, ch, r) => core.retailAlloc({ goods, supply: { Planks: saws * ch.planksPerSaw }, workshops: { owned: ws, buildable: 0 },
     stores: { [r]: 1 }, cfg: { maxShelves: 4, moveGainPct: 0 } });
   const priceN = (v, k, ch, n) => { let c = 0; for (let i = 0; i < n; i++) c += P.price(v.bld(ch.b[k]).cost, v.ownedAll(v.bld(ch.b[k]).name), i); return c; };
+  const feeOf = (v, r, ...ships) => { const cu = core.courierCU?.(v.st) ?? 10000; return ships.reduce((a, s) => a + Object.entries(s).reduce((b, [i, n]) => b + Math.max(0, n * (v.C.items[i]?.cargo_weight ?? 1) - cu) * 5 * HOPS[r], 0), 0); };   // $0.05 per CU over the free run, per hop
   function billsOf(st) {
     let t = (st.isp ?? 0) * RATES.bandwidth;
     const pm = core.powerPriceMult?.() ?? 1;
@@ -9276,8 +9314,7 @@ try {
     const storeShip = {};
     for (const x of v.bld(ch.b.store).build_items ?? []) storeShip[x.item] = x.amount * add.stores;
     for (const k of Object.keys(ship)) if (!(ship[k] > 0)) delete ship[k];
-    const cu = core.courierCU?.(v.st) ?? 10000;
-    const fee = [ship, storeShip].reduce((a, s) => a + Object.entries(s).reduce((b, [i, n]) => b + Math.max(0, n * (v.C.items[i]?.cargo_weight ?? 1) - cu) * 5 * HOPS[r], 0), 0);   // $0.05 per CU over the free run, per hop
+    const fee = feeOf(v, r, ship, storeShip);
     const charter = rg.level >= level ? 0 : BASE[r] * MULT[level];
     const land = rg.landBought < capA ? P.landCost(P.firstAcre(r), rg.landBought, capA - rg.landBought) : 0;
     const blds = priceN(v, 'ws', ch, add.ws) + priceN(v, 'camps', ch, add.camps) + priceN(v, 'saws', ch, add.saws), store = priceN(v, 'store', ch, add.stores);
@@ -9285,23 +9322,106 @@ try {
     const mw = Math.ceil(total.ws * ch.draw('ws') + total.stores * ch.draw('store')), newMW = Math.max(0, mw - (v.st.subscriptions?.[r]?.power ?? 0));
     const line = NAMES[r] + (rg.level ? ' charter ' + rg.level + ' -> ' + level : '') + ': ' + [charter && 'charter ' + usd(charter), land && (capA - rg.landBought) + ' acres ' + usd(land), fee && 'courier ' + usd(fee), 'buildings ' + usd(blds), store && 'store ' + usd(store)].filter(Boolean).join(' + ')
       + ' = ' + usd(cost) + ' for +' + add.ws + ' Workshops, +' + add.camps + ' Camps, +' + add.saws + ' Sawmills' + (add.stores ? ', ' + add.stores + ' store' : '') + ': +' + usd(dph * 100) + '/h, payback ' + (dph > 0 ? (cost / 100 / dph).toFixed(1) + ' h' : 'never');
-    return { r, level, total, add, ws, ship, storeShip, cost, dph, payback: dph > 0 ? cost / 100 / dph : Infinity, mw, newMW, line };
+    const acres = add.ws * ch.acres('ws') + add.saws * ch.acres('saws') + add.camps * ch.acres('camps') + add.stores * ch.acres('store');
+    return { r, level, total, add, ws, ship, storeShip, cost, charter, land, fee, acres, dph, payback: dph > 0 ? cost / 100 / dph : Infinity, mw, newMW, line };
   }
   // What Heartland lacks for the offer's shipment and store materials: stock less what other modules keep (finite reserves, as shipStep).
+  // .items: what is missing per item (feedStep)
   function shortOf(v, ctx, o) {
-    const need = {};
+    const need = {}, out = [];
+    out.items = {};
     for (const s of [o.ship, o.storeShip]) for (const [i, n] of Object.entries(s)) need[i] = (need[i] ?? 0) + n;
-    return Object.entries(need).flatMap(([i, n]) => {
+    for (const [i, n] of Object.entries(need)) {
       const res = ctx.reserveItems?.[i], kept = Number.isFinite(res) ? Math.max(0, res - (keep?.[i] ?? 0)) : 0, have = v.st.stock?.[0]?.[i] ?? 0;
-      return have - kept >= n ? [] : [n + ' ' + (v.C.items[i]?.name ?? 'item ' + i) + ' (have ' + Math.floor(have) + (kept ? ', ' + kept + ' kept by other modules' : '') + ')'];
-    });
+      if (have - kept >= n) continue;
+      out.push(n + ' ' + (v.C.items[i]?.name ?? 'item ' + i) + ' (have ' + Math.floor(have) + (kept ? ', ' + kept + ' kept by other modules' : '') + ')');
+      out.items[i] = n - (have - kept);
+    }
+    return out;
   }
-  // Heartland full and the allocator held by Planks or land; then the best-paying option. { ok, why, offer }
-  // opened: regions this director opened (a region the user opened by hand is never grown or upgraded here).
+  // M-2 (scripts/multi-region-plan.md): an item the run or the offer lacks in Heartland that one Heartland group makes and another uses up
+  // (Iron Sheet into Iron Frames): the consumer is paused until the run has shipped that item, or for cfg.expandFeedH at most without a run.
+  // Never a group already paused (yours stay as they are), nor one whose own output is short too. cfg.expandFeed false: off.
+  // The group to pause for item i (null: nothing makes i, or nothing to pause). fed: groups already paused for a run.
+  function feedPick(v, short, i, fed = []) {
+    const R = (g) => v.C.recipes[g.recipe], live = v.groups.filter((g) => !g.paused && g.count > 0 && R(g));
+    if (!cfg.expandFeed || !live.some((g) => (R(g).outputs ?? []).some((x) => x.item === i))) return null;   // nothing makes it: a pause would not help
+    return live.find((g) => (R(g).inputs ?? []).some((x) => x.item === i) && !(R(g).outputs ?? []).some((x) => short[x.item] > 0) && !fed.some((f) => f.group === g.id)) ?? null;
+  }
+  // Only inside a run (after Go in 'ask'): an offer short of a feedable item is not held back (gate), the run's ship step feeds it.
+  function feedStep(v, ctx, short) {
+    if (!cfg.expandFeed || !short) return null;
+    const fed = mem(ctx).get().fed ?? [], R = (g) => v.C.recipes[g.recipe];
+    for (const i of Object.keys(short).map(Number)) {
+      const g = short[i] > 0 ? feedPick(v, short, i, fed) : null;
+      if (!g) continue;
+      const until = (x) => {
+        const ok = !!x.groups.find((y) => y.id === g.id)?.paused, h = mem(ctx);
+        if (ok && !(h.get().fed ?? []).some((f) => f.group === g.id)) h.set({ fed: [...(h.get().fed ?? []), { group: g.id, item: i, at: ctx.now ?? Date.now() }] });
+        return ok;
+      };
+      return { action: { id: 'expand:feed:' + g.id, text: 'expand: pause group ' + g.id + ' (' + (g.name || R(g).name) + ') until ' + Math.ceil(short[i]) + ' more ' + (v.C.items[i]?.name ?? 'item ' + i) + ' are in Heartland and shipped',
+        steps: [{ msg: { type: 'SetPaused', group: g.id, paused: true }, until }] } };
+    }
+    return null;
+  }
+  // The groups feedStep paused, resumed one per step once their item has shipped (or the run needs none of it), on 'off', or after
+  // cfg.expandFeedH without a run. A group someone else resumed, or that is gone, is just forgotten.
+  function feedResume(v, ctx, mm, now) {
+    const run = mm.run;
+    for (const f of mm.fed ?? []) {
+      const g = v.groups.find((x) => x.id === f.group), drop = () => { const h = mem(ctx); h.set({ fed: (h.get().fed ?? []).filter((x) => x.group !== f.group) }); };
+      if (!g?.paused) { drop(); continue; }
+      const done = run && (run.shipped?.[f.item] || run.storeShipped?.[f.item] || !((run.ship?.[f.item] ?? 0) + (run.storeShip?.[f.item] ?? 0)));
+      if (!(done || cfg.expand === 'off' || (!run && now - f.at > cfg.expandFeedH * 3600000))) continue;
+      return { action: { id: 'expand:unfeed:' + g.id, text: 'expand: resume group ' + g.id + ' (' + (v.C.items[f.item]?.name ?? 'item ' + f.item) + ' shipped or no longer needed)',
+        steps: [{ msg: { type: 'SetPaused', group: g.id, paused: false }, until: (x) => { const ok = !x.groups.find((y) => y.id === g.id)?.paused; if (ok) drop(); return ok; } }] } };
+    }
+    return null;
+  }
+  // Lever 6 (scripts/multi-region-plan.md M-3): a region the corp owns that this director did not open, with Workshops on a Planks good.
+  // A store already there: { has } (decide registers it). No store: a store-only offer (acres for the store if it lacks them, the store
+  // materials, the store; no charter, Workshop, Camp or Sawmill). null when the region makes no Planks good.
+  function adoptFor(v, ctx, r) {
+    const ch = chain(v), rg = region(v, r), goods = ch ? goodsFor(v, ctx, r, ch) : null;
+    const made = (goods ?? []).filter((g) => rg.groups.some((x) => x.recipe === g.rid && x.count > 0));
+    if (!made.length) return null;
+    const on = (k, rid) => rg.groups.filter((g) => g.building === ch.b[k] && g.recipe === rid).reduce((a, g) => a + g.count, 0);
+    const ws = rg.owned(ch.b.ws), saws = on('saws', ch.saw.id), dph = allocFor(goods, ws, saws, ch, r).dollarsPerHour;
+    if (rg.owned(ch.b.store)) return { r, level: rg.level, has: true, dph };
+    const lack = Math.max(0, ch.acres('store') - rg.acres.free), landTo = rg.landBought + lack;
+    if (landTo > CAP[rg.level]) return { why: NAMES[r] + ': no ' + ch.acres('store') + ' free acres for a store under charter ' + rg.level };
+    const storeShip = {};
+    for (const x of v.bld(ch.b.store).build_items ?? []) storeShip[x.item] = x.amount;
+    const fee = feeOf(v, r, storeShip), land = lack ? P.landCost(P.firstAcre(r), rg.landBought, lack) : 0, store = priceN(v, 'store', ch, 1), cost = fee + land + store;
+    const mw = Math.ceil(ws * ch.draw('ws') + ch.draw('store')), payback = dph > 0 ? cost / 100 / dph : Infinity;
+    const line = NAMES[r] + ' (not opened by Core plan): ' + ['store ' + usd(store), land && lack + ' acres ' + usd(land), fee && 'courier ' + usd(fee)].filter(Boolean).join(' + ') + ' = ' + usd(cost)
+      + ' to sell its ' + made.map((g) => g.name).join(', ') + ': +' + usd(dph * 100) + '/h, payback ' + (dph > 0 ? payback.toFixed(1) + ' h' : 'never');
+    return { r, level: rg.level, adopt: true, landTo, total: { ws, camps: on('camps', ch.wood.id), saws, stores: 1 }, ws: {}, ship: {}, storeShip, cost, dph, payback, mw, newMW: Math.max(0, mw - (v.st.subscriptions?.[r]?.power ?? 0)), line };
+  }
+  // An offer that pays back: Heartland holds what it ships, and cash covers it + the money floor + cfg.expandBillHours of bills.
+  function gate(v, ctx, o) {
+    if (o.payback > cfg.expandPaybackH) return { why: o.line + ' > ' + cfg.expandPaybackH + ' h', offer: o };
+    // nothing is bought before Heartland holds everything the run ships (a run stuck without its store materials wastes the charter)
+    const all = shortOf(v, ctx, o), short = all.filter((s, k) => !feedPick(v, all.items, +Object.keys(all.items)[k]));   // M-2: what feed can make does not hold the offer
+    short.items = all.items;
+    if (short.length) return { why: o.line + ': Heartland needs ' + short.join(', ') + ' (Glass / Concrete: the Kiln; Iron Frame: a Workshop on Assemble Iron Frame)', offer: o, short };
+    const bills = cfg.expandBillHours * 6 * (billsOf(v.st) + o.newMW * RATES.power * (core.powerPriceMult?.() ?? 1));
+    const need = o.cost + (ctx.floorCents ?? 0) + bills;
+    if (v.money < need) return { why: o.line + ': need ' + usd(need - v.money) + ' more (money floor + ' + cfg.expandBillHours + ' h of bills ' + usd(bills) + ')', offer: o };
+    return { ok: true, offer: o };
+  }
+  // A region to adopt first (lever 6); else Heartland held by Planks or land, and the best-paying region option. { ok, why, offer }
+  // opened: regions this director opened or adopted (only those are grown or upgraded here).
   function trigger(v, ctx, opened = {}) {
-    if (v.acresOwned < CAP[0]) return { why: 'Heartland has ' + v.acresOwned + ' of ' + CAP[0] + ' acres: buildout grows it first' };
+    for (let r = 1; r < NAMES.length; r++) {
+      if (opened[r] || !(v.st.charters?.[r] > 0)) continue;
+      const a = adoptFor(v, ctx, r), g = a?.adopt ? gate(v, ctx, a) : null;
+      if (g?.ok || g?.short) return g;   // short: it waits for the store materials; a store that does not pay (no Sawmills on Saw Planks) does not block the offers below
+    }
     let al = null;
     try { al = cp._buildout?.alloc?.(v, ctx) ?? null; } catch (e) { console.error('[corePlan] expand alloc', e); }
+    if (v.acresOwned < CAP[0] && !al) return { why: 'Heartland has ' + v.acresOwned + ' of ' + CAP[0] + ' acres: buildout grows it first' };
     if (!al) return { why: 'no retail allocator plan (needs the Heartland store and the board)' };
     const wsAcres = v.bld(v.idB(WS)).acres ?? 2, noLand = v.freeAcres - (cfg.bufferAcres ?? 0) < wsAcres;
     if (!(al.binding === 'planks' || (noLand && (al.binding === 'money' || al.binding === 'workshops')))) return { why: 'Heartland is held by ' + al.binding + ' (' + al.detail + '), not Planks or land' };
@@ -9317,14 +9437,13 @@ try {
     const ok = opts.filter((o) => o.r != null && o.dph > 0).sort((a, b) => a.payback - b.payback);
     const o = ok[0];
     if (!o) return { why: opts.map((x) => x.why ?? x.line).join('; ') || 'no region left to open or upgrade' };
-    if (o.payback > cfg.expandPaybackH) return { why: o.line + ' > ' + cfg.expandPaybackH + ' h', offer: o };
-    // nothing is bought before Heartland holds everything the run ships (a run stuck without its store materials wastes the charter)
-    const short = shortOf(v, ctx, o);
-    if (short.length) return { why: o.line + ': Heartland needs ' + short.join(', ') + ' (Glass / Concrete: the Kiln; Iron Frame: a Workshop on Assemble Iron Frame)', offer: o, short };
-    const bills = cfg.expandBillHours * 6 * (billsOf(v.st) + o.newMW * RATES.power * (core.powerPriceMult?.() ?? 1));
-    const need = o.cost + (ctx.floorCents ?? 0) + bills;
-    if (v.money < need) return { why: o.line + ': need ' + usd(need - v.money) + ' more (money floor + ' + cfg.expandBillHours + ' h of bills ' + usd(bills) + ')', offer: o };
-    return { ok: true, offer: o };
+    // Lever 1 (M-5): below Heartland's cap, a region only when Heartland's next acres for the same chain cost more than the region's charter,
+    // land and courier (past the cap they cannot be bought at all)
+    if (v.acresOwned < CAP[0]) {
+      const h = v.acresOwned + o.acres <= CAP[0] ? P.landCost(P.firstAcre(0), v.landBought, o.acres) : Infinity;
+      if (h <= o.charter + o.land + o.fee) return { why: 'Heartland has ' + v.acresOwned + ' of ' + CAP[0] + ' acres: its next ' + o.acres + ' cost ' + usd(h) + ', less than ' + o.line.split(':')[0] + "'s " + usd(o.charter + o.land + o.fee) + ' (charter, land, courier): buildout grows it first', offer: o };
+    }
+    return gate(v, ctx, o);
   }
 
   // ---- the run --------------------------------------------------------------------------------------------------------------------
@@ -9349,8 +9468,9 @@ try {
   const shipsTo = (st, r, i) => (st.shipments ?? []).filter((s) => s.region === r && s.item === +i && !s.returning && s.amount > 0);
   // Ship each item once (field: run.shipped / run.storeShipped), then wait for arrival. null when everything is there.
   function shipStep(v, ctx, run, rg, items, field, keepOwn) {
-    const r = run.r, tick = ctx.tick ?? 0;
-    for (const [i, a] of Object.entries(items)) {
+    const r = run.r, tick = ctx.tick ?? 0, have = (i) => v.st.stock?.[0]?.[i] ?? 0;
+    // scarcest first (Heartland stock / amount): an item its own recipes eat (Iron Sheet into Iron Frames) goes while it is there
+    for (const [i, a] of Object.entries(items).sort(([i, a], [j, b]) => have(i) / a - have(j) / b)) {
       if (run[field]?.[i]) continue;
       // sent before a reload (in transit) or already in the region: done
       if (shipsTo(v.st, r, i).some((s) => s.amount >= a) || (rg.stock[i] ?? 0) >= a) { const m = mem(ctx), cur = m.get().run; m.set({ run: { ...cur, [field]: { ...cur[field], [i]: a } } }); continue; }
@@ -9358,7 +9478,7 @@ try {
       if (cra > tick) return { wait: 'courier busy for ' + (cra - tick) + ' ticks' };
       const res = ctx.reserveItems?.[i], kept = Math.max(0, (Number.isFinite(res) ? res : 0) - (keepOwn ? keepOwn[i] ?? 0 : 0)), have = v.st.stock?.[0]?.[i] ?? 0;
       const name = v.C.items[i]?.name ?? 'item ' + i;
-      if (have - a < kept) return { wait: 'Heartland has ' + Math.floor(have) + ' ' + name + ', ' + a + ' to ship' + (kept ? ' + ' + kept + ' other modules keep' : '') + (field === 'storeShipped' ? ' (Glass / Concrete: the Kiln; Iron Frame: a Workshop on Assemble Iron Frame)' : '') };
+      if (have - a < kept) return { short: { [i]: a + kept - have }, wait: 'Heartland has ' + Math.floor(have) + ' ' + name + ', ' + a + ' to ship' + (kept ? ' + ' + kept + ' other modules keep' : '') + (field === 'storeShipped' ? ' (Glass / Concrete: the Kiln; Iron Frame: a Workshop on Assemble Iron Frame)' : '') };
       return act(ctx, run, 'ship:' + field + ':' + i, 'ship ' + a + ' ' + name, { type: 'TransferStock', from: 0, to: r, item: +i, amount: a, courier: true },
         (x) => shipsTo(x.st, r, i).some((s) => s.amount >= a), { tries: 2, done: (cur) => ({ [field]: { ...cur[field], [i]: a } }) });
     }
@@ -9394,17 +9514,6 @@ try {
     return act(ctx, run, 'group:' + b + ':' + name, 'group ' + k2 + ' ' + bn + ' as "' + name + '"', { type: 'CreateGroup', building: b, amount: k2, name, region: r },
       (x) => region(x, r).groups.some((y) => !ids.has(y.id) && y.building === b && y.name === name));
   }
-  // C2: a region's shelves are what it makes, then what it holds, best unit price first (at most 4); sent only when the set differs.
-  function shelfStep(v, ctx, r) {
-    const ch = chain(v), rg = region(v, r), sg = ch && rg.groups.find((g) => g.building === ch.b.store && g.count > 0);
-    const goods = sg ? goodsFor(v, ctx, r, ch) : null;
-    if (!goods) return null;
-    const made = (g) => rg.groups.some((x) => x.recipe === g.rid && x.count > 0);
-    const want = goods.filter((g) => made(g) || (rg.stock[g.id] ?? 0) > 0).sort((a, b) => made(b) - made(a) || b.unitCents - a.unitCents).slice(0, 4).map((g) => g.id);
-    if (!want.length || sameSet(sg.assortment ?? [], want)) return null;
-    return { action: { id: 'expand:shelf:' + r + ':' + want.join(','), text: 'expand ' + NAMES[r] + ': shelves ' + want.map((i) => v.C.items[i]?.name ?? i).join(', '),
-      steps: [{ msg: { type: 'SetAssortment', group: sg.id, items: want }, until: (x) => sameSet(x.st.groups?.[sg.id]?.assortment ?? [], want) }] } };
-  }
   // The next step of the run: { action } | { wait } | { abort } | { done }.
   function runStep(v, ctx, run) {
     const r = run.r, rg = region(v, r), ch = chain(v), now = ctx.now ?? Date.now();
@@ -9414,14 +9523,14 @@ try {
       const c = BASE[r] * MULT[run.level];
       return cash(c, 'charter') ?? act(ctx, run, 'charter:' + run.level, 'charter level ' + run.level + ' (' + usd(c) + ')', { type: 'BuyCharter', region: r }, (x) => (x.st.charters?.[r] ?? 0) >= run.level, { hold: true });
     }
-    const capA = CAP[run.level];
+    const capA = run.landTo ?? CAP[run.level];   // an adopted region's store run buys only the acres the store lacks
     if (rg.landBought < capA) {
       const n = capA - rg.landBought, c = P.landCost(P.firstAcre(r), rg.landBought, n);
       return cash(c, n + ' acres') ?? act(ctx, run, 'land:' + capA, 'buy ' + n + ' acres (' + usd(c) + ')', { type: 'BuyLand', amount: n, region: r }, (x) => (x.st.land_bought?.[r] ?? 0) >= capA, { hold: true });
     }
     const T = run.total;
     if (!['ws', 'camps', 'saws'].every((k) => rg.owned(ch.b[k]) >= T[k])) {
-      const s = shipStep(v, ctx, run, rg, run.ship, 'shipped', null);
+      const s = shipStep(v, ctx, run, rg, run.ship, 'shipped', keep);
       if (s) return s;
     }
     for (const k of ['ws', 'camps', 'saws']) {
@@ -9458,26 +9567,28 @@ try {
     if (sp) return sp;
     const gs = groupStep(v, ctx, run, rg, 'store', ch, null, T.stores, 'Retail');
     if (gs) return gs;
-    return shelfStep(v, ctx, r) ?? { done: true };
+    return { done: true };   // its shelves: the retail director's region pass (lever 4)
   }
 
-  // What the region holds while a run is on: its acres (CD Farm's Auto region skips it) and the store materials not shipped yet.
-  // A run stopped on an error keeps its acres held but frees the store materials (reset() holds them again).
+  // What the region holds while a run is on: its acres (CD Farm's Auto region skips it) and the shipment and store materials not shipped yet.
+  // A run stopped on an error keeps its acres held but frees the items (reset() holds them again).
   function publish(run) {
     holds = run ? { [run.r]: CAP[run.level] } : {};
-    keep = run?.storeShip && !run.err ? Object.fromEntries(Object.entries(run.storeShip).filter(([i]) => !run.storeShipped?.[i])) : null;
-    if (keep && !Object.keys(keep).length) keep = null;
+    // the shipment too (multi-region plan, phase 2): a run that starts while buildout still buys lost its Iron Sheet to Heartland kits
+    keep = null;
+    if (run && !run.err) for (const [s, f] of [['ship', 'shipped'], ['storeShip', 'storeShipped']]) for (const [i, n] of Object.entries(run[s] ?? {})) if (!run[f]?.[i]) (keep ??= {})[i] = (keep[i] ?? 0) + n;
     core.acreHolds = holds;
   }
   try { publish(JSON.parse(W.localStorage?.getItem('corePlan.v1.mem.expand') || '{}')?.run ?? null); } catch {}
   core.reserves?.register('coreExpand', { reserve: () => (keep ? { moneyFloor: 0, items: { ...keep }, nextTech: null, phase: null } : null), busy: () => false });
 
-  const startRun = (o, now) => ({ r: o.r, level: o.level, total: o.total, ws: o.ws, ship: o.ship, storeShip: o.storeShip, mw: o.mw, dph: o.dph, cost: o.cost, line: o.line, at: now, shipped: {}, storeShipped: {}, tries: {} });
+  const startRun = (o, now) => ({ r: o.r, level: o.level, landTo: o.landTo, adopt: o.adopt, total: o.total, ws: o.ws, ship: o.ship, storeShip: o.storeShip, mw: o.mw, dph: o.dph, cost: o.cost, line: o.line, at: now, shipped: {}, storeShipped: {}, tries: {} });
   function decide(v, ctx) {
     const m = mem(ctx);
     if (!m) return { wait: 'no director memory' };
     const mm = m.get(), now = ctx.now ?? Date.now(), mode = cfg.expand;
     const readout = { mode, regions: Object.entries(mm.regions ?? {}).map(([r, x]) => NAMES[r] + ' level ' + x.level + (x.cancelled ? ' (run cancelled: an offer can finish it)' : ', modelled +' + usd(x.dph * 100) + '/h')) };
+    if (mm.fed?.length) { readout.fed = mm.fed.map((f) => 'group ' + f.group + ' paused for ' + (v.C.items[f.item]?.name ?? f.item)); const fr = feedResume(v, ctx, mm, now); if (fr) return { ...fr, readout }; }
     if (mm.run) {
       readout.run = mm.run.line;
       if (mm.run.equipLate) readout.alert = mm.run.equipLate;
@@ -9492,16 +9603,23 @@ try {
         if (ctx.live) core.notify?.('CP', 'Expansion stopped', s.abort);
         return { wait: 'STOPPED: ' + s.abort, readout: { ...readout, alert: s.abort } };
       }
+      const fs = !s.done && s.short ? feedStep(v, ctx, s.short) : null;
+      if (fs) return { ...fs, readout };
       if (!s.done) return { ...s, readout: { ...readout, next: s.action?.text ?? s.wait } };
       const cur = mem(ctx).get().run;
       mem(ctx).set({ run: null, regions: { ...mm.regions, [cur.r]: { level: cur.level, at: now, dph: cur.dph } } });
       publish(null);
       readout.regions.push(NAMES[cur.r] + ' level ' + cur.level + ': done');
     }
-    for (const r of Object.keys(mm.regions ?? {})) { const a = shelfStep(v, ctx, +r); if (a) return { ...a, readout }; }
     if (!['off', 'ask', 'auto'].includes(mode)) return { wait: 'cfg.expand is "' + mode + '": off (use off, ask or auto)', readout };
     if (mode === 'off') { if (mm.go) m.set({ go: null }); return { wait: 'off (cfg.expand)', readout }; }
-    const t = trigger(v, ctx, mm.regions ?? {});
+    // M-3: a region with Workshops on a Planks good and a store, not opened here, is this director's from now on (shelves, growth offers)
+    for (let r = 1; r < NAMES.length; r++) {
+      if (mem(ctx).get().regions?.[r] || !(v.st.charters?.[r] > 0)) continue;   // fresh handles: m still holds the snapshot from before a run ended
+      const a = adoptFor(v, ctx, r);
+      if (a?.has) { const h = mem(ctx); h.set({ regions: { ...h.get().regions, [r]: { level: a.level, at: now, dph: a.dph, adopted: true } } }); readout.regions.push(NAMES[r] + ' level ' + a.level + ': adopted'); }
+    }
+    const t = trigger(v, ctx, mem(ctx).get().regions ?? {});
     readout.offer = t.offer?.line ?? null;
     // Go (mem.go, so a reload keeps it) is for the offer it was pressed on: same region and level, cost up by at most 2% (building prices
     // move as CD Farm buys and demolishes); anything else asks again.
@@ -9513,7 +9631,7 @@ try {
     const shown = { r: t.offer.r, level: t.offer.level, cost: Math.round(t.offer.cost) };
     const goOk = !!go && go.r === shown.r && go.level === shown.level && shown.cost <= go.cost * 1.02;
     if (go && !goOk) m.set({ go: null, toastKey: null, goMiss: 'the offer changed after Go (' + NAMES[go.r] + ' level ' + go.level + ' ' + usd(go.cost) + ' -> ' + t.offer.line + '): asking again' });
-    if (mode === 'ask' && !goOk) {
+    if (mode === 'ask' && !goOk && !(t.offer.adopt && t.offer.cost < 1e8)) {   // M-4: an adopted region's store under $1M needs no Go
       const mx = m.get(), old = mx.offer;
       if (!old || old.r !== shown.r || old.level !== shown.level || Math.abs(shown.cost / old.cost - 1) > 0.01) m.set({ offer: shown });
       const key = shown.r + ':' + shown.level;
@@ -9541,13 +9659,28 @@ try {
       expandPlanksH: 1,           // ... plus this many hours of the new Workshops' Planks
       expandEquipMin: 30,         // minutes to wait for new Workshop groups to be equipped before going on (and reporting it)
       expandToastMin: 30,         // minutes between repeats of the same offer toast
+      heartlandLandCap: false,    // opt-in: once a region is chartered, buildout buys no Heartland acre dearer than the cheapest region acre (regionAcreCents)
+      expandFeed: true,           // M-2: pause the Heartland group that uses up an item a region shipment lacks (Iron Sheet into Iron Frames) until it ships
+      expandFeedH: 6,             // ... at most this many hours while no run is on
     },
     context: (v, ctx) => publish(mem(ctx)?.get?.()?.run ?? null),
     decide,
     duties: () => [{ duty: 'second region: charter, land, shipment, chain, store (plan C1, C2)', owner: 'Core plan', done: true }],
   });
+  // Cheapest all-in cents per acre of the next region block: a region's next charter level (charter + land to its cap) per acre it adds,
+  // or a fresh region's level 1. Infinity with nothing left. cp-buildout's opt-in Heartland land cap reads it.
+  function regionAcreCents(v) {
+    let best = Infinity;
+    for (let r = 1; r < NAMES.length; r++) {
+      const lv = v.st.charters?.[r] ?? 0, lb = v.st.land_bought?.[r] ?? 0;
+      if (lv >= 3) continue;
+      const add = CAP[lv + 1] - lb;
+      if (add > 0) best = Math.min(best, (BASE[r] * MULT[lv + 1] + P.landCost(P.firstAcre(r), lb, add)) / add);
+    }
+    return best;
+  }
   cp._expand = {
-    offerFor, trigger, region, chain, goodsFor, runStep, shelfStep,
+    offerFor, regionAcreCents, trigger, region, chain, goodsFor, runStep,
     get holds() { return holds; }, get keep() { return keep; },
   };
   // go / reset / cancel act on the saved memory (the key Core plan's memOf uses)

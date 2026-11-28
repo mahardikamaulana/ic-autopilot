@@ -38,6 +38,7 @@ add('engine-power', ['bun', T('engine-power-test.js')], [BUILT, T('engine-power-
 // real engine wasm, one job per scenario (static 4 h, churn 8 h, reserve 10 h, board 9 h, pool 2 h); skips offline
 for (const [sc, est] of [['static', 10], ['churn', 18], ['reserve', 22], ['board', 20], ['pool', 5], ['rival', 10], ['adopt', 20], ['convert', 20]]) add('engine-retail:' + sc, ['bun', T('engine-retail-test.js'), sc], [BUILT, T('engine-retail-test.js'), T('engine.js'), T('cp-fixtures.js'), T('live-2026-11-28.json')], est);
 add('cp-expand', ['bun', T('cp-expand-test.js')], [BUILT, path.join('src', 'cp-expand.js'), T('cp-expand-test.js'), T('cp-fixtures.js'), T('live-board.json'), T('live-2026-11-28.json')], 4);
+for (const [sc, est] of [['golden', 40], ['phase1', 40], ['phase2', 120]]) add('engine-region:' + sc, ['bun', T('engine-region-test.js'), sc], [BUILT, path.join('src', 'cp-expand.js'), T('engine-region-test.js'), T('engine-region.js'), T('golden-heartland.json'), T('engine.js'), T('cp-fixtures.js'), T('live-2026-11-28.json'), T('live-stageB.json')], est);   // real engine wasm; skips offline
 add('engine-expand', ['bun', T('engine-expand-test.js')], [BUILT, path.join('src', 'cp-expand.js'), T('engine-expand-test.js'), T('engine.js'), T('cp-fixtures.js'), T('live-2026-11-28.json')], 15);   // real engine wasm; skips offline
 add('retail-alloc', ['bun', T('retail-alloc-test.js')], ['src/core-retail-alloc.js', T('retail-alloc-test.js')], 1);
 add('module-watch', ['bun', T('module-watch-test.js')], [BUILT, T('module-watch-test.js')], 1);

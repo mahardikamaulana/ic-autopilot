@@ -36,6 +36,8 @@ try {
   if (!W.corePlan?.addDirector) throw new Error('Core plan did not load');
   const cp = W.corePlan, cfg = cp.cfg, usd = cp._usd;
   const REGION = 0, ACRE_CAP = 360;
+  // multi-region plan (opt-in cfg.heartlandLandCap): once a region is chartered, no Heartland acre dearer than the cheapest region acre
+  const acreCapCents = (v) => (cfg.heartlandLandCap && Object.values(v.st.charters ?? {}).some((x) => x > 0) ? cp._expand?.regionAcreCents?.(v) ?? Infinity : Infinity);
   const FURN = [['bookshelf', 'Bookshelf', 'Make Bookshelf'], ['table', 'Table', 'Make Table'], ['chair', 'Chair', 'Make Chair']];
   const MIX = { bookshelf: 0.4, table: 0.3, chair: 0.3 };     // plank shares when the board has no appetite (wiki 4.3)
   const FLOOR = { 'Lumber Camp': 3, Sawmill: 2, Workshop: 5 }; // floor rate the plan assumes (wiki 4.5)
@@ -151,6 +153,7 @@ try {
       if (v.acresOwned + bought + lack > cap) break;
       let c = W.idleCore.planner.price(bd.cost, v.ownedAll('Workshop'), n) + addBill;
       for (let i = 0; i < lack; i++) c += cp._acrePriceCents(v.landBought + bought + i);
+      if (lack && cp._acrePriceCents(v.landBought + bought + lack - 1) > acreCapCents(v)) break;
       if (cash < c) break;
       cash -= c; free += lack - bd.acres; bought += lack;
     }

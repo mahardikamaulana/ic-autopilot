@@ -1,0 +1,85 @@
+{
+ "liveOff": [
+  "bo:split:3",
+  "tech:3",
+  "floor:26",
+  "bo:buy:Lumber Camp:125",
+  "bo:buy:Lumber Camp:126",
+  "bo:buy:Sawmill:113"
+ ],
+ "liveAsk": [
+  "bo:split:3",
+  "tech:3",
+  "floor:26",
+  "bo:buy:Lumber Camp:125",
+  "bo:buy:Lumber Camp:126",
+  "bo:buy:Sawmill:113"
+ ],
+ "goldAsk": [
+  "bo:split:3",
+  "bo:buy:Lumber Camp:125",
+  "bo:buy:Lumber Camp:126",
+  "bo:buy:Sawmill:113",
+  "bo:buy:Lumber Camp:127",
+  "bo:buy:Sawmill:114",
+  "bo:buy:Lumber Camp:128",
+  "bo:buy:Sawmill:115",
+  "bo:buy:Lumber Camp:129",
+  "bo:buy:Sawmill:116",
+  "bo:buy:Lumber Camp:130",
+  "bo:buy:Lumber Camp:131",
+  "bo:buy:Sawmill:117",
+  "bo:buy:Lumber Camp:132",
+  "bo:buy:Sawmill:118",
+  "bo:buy:Lumber Camp:133",
+  "bo:buy:Sawmill:119",
+  "bo:buy:Lumber Camp:134",
+  "bo:buy:Sawmill:120",
+  "bo:buy:Lumber Camp:135",
+  "bo:buy:Sawmill:121",
+  "bo:buy:Lumber Camp:136",
+  "bo:buy:Sawmill:122",
+  "bo:buy:Lumber Camp:137",
+  "bo:buy:Sawmill:123",
+  "bo:buy:Lumber Camp:138",
+  "bo:buy:Sawmill:124",
+  "bo:buy:Lumber Camp:139",
+  "bo:buy:Sawmill:125",
+  "bo:buy:Lumber Camp:140",
+  "bo:buy:Lumber Camp:141",
+  "bo:buy:Sawmill:126",
+  "bo:buy:Lumber Camp:142",
+  "bo:buy:Sawmill:127",
+  "bo:buy:Lumber Camp:143",
+  "bo:buy:Sawmill:128",
+  "bo:buy:Sawmill:129",
+  "tech:3",
+  "floor:26",
+  "bo:buy:Lumber Camp:144",
+  "bo:buy:Lumber Camp:145",
+  "bo:buy:Sawmill:130",
+  "bo:buy:Lumber Camp:146",
+  "bo:buy:Sawmill:131",
+  "bo:buy:Sawmill:132"
+ ],
+ "stageBOff": {
+  "actions": [
+   "floor:23"
+  ],
+  "waits": [
+   "unlock Assembly Plant: research slot busy",
+   "land: build-out goes first (next Sawmill)",
+   "retail: Retail Store not unlocked"
+  ]
+ },
+ "stageBAsk": {
+  "actions": [
+   "floor:23"
+  ],
+  "waits": [
+   "unlock Assembly Plant: research slot busy",
+   "land: build-out goes first (next Sawmill)",
+   "retail: Retail Store not unlocked"
+  ]
+ }
+}

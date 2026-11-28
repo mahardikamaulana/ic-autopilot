@@ -36,8 +36,8 @@ try {
   const RATES = { power: 1000, water: 400, bandwidth: 1500 };   // cents per unit per 10-min bill (same as autoUtil billsOf)
   const Q0 = 0.95;                     // quality factor at quality 0 (wiki retail.md, Price; engine BhehihUq)
   // Quality factor of the Heartland stock: 0.95 + 0.19 q / (q + 10), q = quality_points / units / 100 (wiki formulas.md); Q0 with none.
-  const qOf = (st, id) => { const u = st.stock?.[REGION]?.[id] ?? 0; return u > 0 ? (st.quality_points?.[REGION]?.[id] ?? 0) / u / 100 : 0; };
-  const qf = (st, id) => { const q = qOf(st, id); return Q0 + 0.19 * q / (q + 10); };
+  const qOf = (st, id, r = REGION) => { const u = st.stock?.[r]?.[id] ?? 0; return u > 0 ? (st.quality_points?.[r]?.[id] ?? 0) / u / 100 : 0; };
+  const qf = (st, id, r = REGION) => { const q = qOf(st, id, r); return Q0 + 0.19 * q / (q + 10); };
   const cfg = () => W.corePlan.cfg;
   const usd = (c) => '$' + (c / 100).toLocaleString('en-US', { maximumFractionDigits: 0 });
   const pct = (x) => (x * 100).toFixed(0) + '%';
@@ -47,7 +47,7 @@ try {
   // ---- the board ------------------------------------------------------------------------------------------------------------------
   // Asserts the shape seen on 2026-11-22 (shelves[region][itemId] = { appetite, held, standard, price }); never guesses past it.
   // Only appetite and price are required: held is just a note on the appetite row.
-  function checkBoard(board, ids) {
+  function checkBoard(board, ids, REGION = 0) {
     if (!board || typeof board !== 'object') return 'no board from engine.retailJson()';
     const rows = board.shelves?.[REGION] ?? board.shelves?.[String(REGION)];
     if (!board.shelves || typeof board.shelves !== 'object') return 'board has no "shelves"';
@@ -62,7 +62,7 @@ try {
   }
   // share = (1,000 + mine) / sum over store owners (1,000 + theirs) (wiki retail.md). ratings[region] = { corpId: rating } is assumed;
   // an empty or missing object means nobody else has a store. Anything else returns null (unknown shape, no guess).
-  function shareOf(board, mine, corpId) {
+  function shareOf(board, mine, corpId, REGION = 0) {
     const all = board.ratings;
     if (all == null || (typeof all === 'object' && !Object.keys(all).length)) return 1;
     const rows = all[REGION] ?? all[String(REGION)];
@@ -72,7 +72,7 @@ try {
     const others = Object.entries(rows).filter(([k]) => String(k) !== String(corpId)).reduce((a, [, r]) => a + 1000 + r, 0);
     return me / (me + others);
   }
-  function ratingOf(st) {
+  function ratingOf(st, REGION = 0) {
     const r = st.retail_ratings?.[REGION] ?? st.retail_ratings?.[String(REGION)];
     if (r == null) return 0;   // the engine deletes the key (or the whole map) when the rating reaches 0
     if (num(r)) return r;
@@ -82,6 +82,7 @@ try {
 
   // Shelf goods: every board row the Corporation can make (a recipe on an unlocked building), name -> recipe name; RECIPE when none.
   function goodsOf(v, board) {
+    const REGION = v.region ?? 0;
     const rows = board?.shelves?.[REGION] ?? board?.shelves?.[String(REGION)];
     const out = {};
     if (rows && typeof rows === 'object') for (const id of Object.keys(rows)) {
@@ -131,23 +132,23 @@ try {
 
   // ---- facts for this step ----------------------------------------------------------------------------------------------------------
   function facts(v, ctx) {
-    const c = cfg();
+    const c = cfg(), REGION = v.region ?? 0;   // a region view (lever 4) reads its own board row, rating and stock
     const storeB = v.idB(STORE);
     const ids = {}, miss = [], recipeOf = goodsOf(v, ctx.retailBoard);
     for (const [n, rn] of Object.entries(recipeOf)) { const i = v.idI(n), r = v.idR(rn); if (i == null || r == null) miss.push(i == null ? n : rn); else ids[n] = i; }
     if (storeB == null) miss.push(STORE);
     if (miss.length) return { err: 'name not in the catalog: ' + miss.join(', ') + ' (director off until the names match)' };
-    const badBoard = checkBoard(ctx.retailBoard, ids);
+    const badBoard = checkBoard(ctx.retailBoard, ids, REGION);
     const storeGroup = v.groups.find((g) => g.building === storeB && g.count > 0) ?? null;
     const emptyGroup = storeGroup ? null : v.groups.find((g) => g.building === storeB) ?? null;
-    const f = { storeB, ids, names: Object.keys(recipeOf), storeGroup, emptyGroup, pooled: v.pool[storeB] ?? 0, owned: v.owned(STORE), unlocked: v.unlocked(STORE), rating: ratingOf(v.st), badBoard };
+    const f = { storeB, ids, names: Object.keys(recipeOf), storeGroup, emptyGroup, pooled: v.pool[storeB] ?? 0, owned: v.owned(STORE), unlocked: v.unlocked(STORE), rating: ratingOf(v.st, REGION), badBoard };
     if (badBoard) return f;
     const rows = ctx.retailBoard.shelves[REGION] ?? ctx.retailBoard.shelves[String(REGION)];
-    f.share = shareOf(ctx.retailBoard, f.rating, v.st.ssi?.corp_id);
+    f.share = shareOf(ctx.retailBoard, f.rating, v.st.ssi?.corp_id, REGION);
     const plId = v.idI('Planks');
     f.goods = Object.keys(ids).map((n) => {
       const id = ids[n], rid = v.idR(recipeOf[n]), row = rows[id], base = v.C.items[id]?.base_value ?? 0, o = output(v, rid), rc = v.C.recipes[rid];
-      return { name: n, id, rid, appetite: row.appetite, held: row.held, boardPrice: row.price, base, unit: Math.floor(base * row.price / 10000 * qf(v.st, id)), q: qOf(v.st, id),
+      return { name: n, id, rid, appetite: row.appetite, held: row.held, boardPrice: row.price, base, unit: Math.floor(base * row.price / 10000 * qf(v.st, id, REGION)), q: qOf(v.st, id, REGION),
         stock: v.has(n), outTick: o.perTick, blockH: perBlockH(o), made: o.perTick > 0,
         // a paused or retuning group still counts: it comes back, and the shelf should not churn meanwhile
         assigned: v.groups.some((g) => g.recipe === rid && g.count > 0),
@@ -159,7 +160,7 @@ try {
     f.rival = !!storeGroup && f.share < 1 && c.rivalStockHours > 0;
     // Planks per hour the best four plank goods sell: the land rule sizes the engine to it (corePlan decide). Before a store sells, at the
     // share the target rating (cfg.retailRating) will give, not today's rating of 0.
-    const dShare = f.storeGroup ? f.share : shareOf(ctx.retailBoard, Math.max(f.rating ?? 0, c.retailRating ?? 0), v.st.ssi?.corp_id);
+    const dShare = f.storeGroup ? f.share : shareOf(ctx.retailBoard, Math.max(f.rating ?? 0, c.retailRating ?? 0), v.st.ssi?.corp_id, REGION);
     f.demandPlanksH = dShare == null ? null : pickOrder(f.goods.filter((g) => g.ppu > 0)).reduce((a, g) => a + demandH(g, dShare) * g.ppu, 0);
     // Before the store: the shelf is what is eligible now (shelfPick() adds the keep-on-shelf rule once the store exists).
     f.chosen = pickOrder(f.goods.filter(f.eligible));
@@ -533,7 +534,7 @@ try {
     if (v.money < need) return { wait: 'store ' + usd(cost) + ' + bill floor ' + usd(billFloor) + ' (' + mw + ' MW x $20 + 2 h of bills): need ' + usd(need - v.money) + ' more above the floor' };
     return { cost };
   }
-  function decide(v, ctx, out) {
+  function decideHeartland(v, ctx, out) {
     const f = ctx.retail;
     if (f?.goods && !f.badBoard && f.share != null) {
       try { f.alloc = W.corePlan._buildout?.alloc?.(v, ctx) ?? null; } catch (e) { console.error('[corePlan] retail alloc', e); f.alloc = null; }
@@ -594,6 +595,32 @@ try {
         steps: [{ msg: { type: 'BuyBuilding', building: storeB, amount: 1, region: REGION }, until: (x) => (x.pool[storeB] ?? 0) >= 1 || (x.groups.find((y) => y.id === g.id)?.count ?? 0) > c0 }, into] }, readout };
     }
     return { wait: readout.decision, readout };
+  }
+
+  // Lever 4 (scripts/multi-region-plan.md): the regions the expand director opened or adopted that have a store get the same shelf rule as
+  // Heartland (made, assigned or held goods, the shelf-drop delay, rival mode), from their own board row, stock and rating. One
+  // SetAssortment at a time, after Heartland's own action. The checkpoint, fail path and store count stay Heartland's (a region chain is
+  // far below its demand and one store's capacity: see the plan's dropped-lever table).
+  function regionShelf(v, ctx) {
+    const em = ctx.mem?.('expand')?.get?.() ?? {};   // the run's region too: retail decides before expand, the step the run ends
+    for (const r of new Set([...Object.keys(em.regions ?? {}).map(Number), em.run?.r])) {
+      if (!(r > 0)) continue;
+      const vr = W.corePlan._view(v.st, v.catalog, [], r), f = facts(vr, ctx);
+      if (f.err || f.badBoard || f.share == null || !f.storeGroup) continue;
+      shelfPick(f, ctx, ctx.mem('retail:' + r));
+      const want = f.chosen.map((g) => g.id), g = f.storeGroup;
+      if (!want.length || sameSet(g.assortment ?? [], want)) continue;
+      return { id: 'retail:shelf:' + r + ':' + want.join(','), text: 'region ' + r + ' shelves: ' + f.chosen.map((x) => x.name).join(', ') + (f.rival ? ' (rival mode)' : ''),
+        steps: [{ msg: { type: 'SetAssortment', group: g.id, items: want }, until: (x) => sameSet(x.st.groups?.[g.id]?.assortment ?? [], want) }] };
+    }
+    return null;
+  }
+  function decide(v, ctx, out) {
+    const h = decideHeartland(v, ctx, out);
+    if (h.action) return h;
+    let a = null;
+    try { a = regionShelf(v, ctx); } catch (e) { console.error('[corePlan] retail regionShelf', e); }
+    return a ? { action: a, readout: h.readout } : h;
   }
 
   W.corePlan.addDirector({

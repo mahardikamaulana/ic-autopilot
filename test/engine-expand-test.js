@@ -66,7 +66,7 @@ function loadExpand(mods) {
     while (ran < hours * H) {
       const ctx = F.ctxOf({ retailBoard: fx.retail, mem, now: T0 + ran * 500, tick, contracts: fx.contracts, mods: auto ? { autoUtil: au } : {} });
       const out = cp._decide(cp._view(snap, cat, []), ctx);
-      const a = out.actions.find((x) => x.director === 'expand');
+      const a = out.actions.find((x) => x.director === 'expand' || /^retail:shelf:\d+:/.test(x.id));   // a region's shelves: cp-retail's region pass
       const w = out.waits.find((x) => /^expand:/.test(x));
       if (w && r.waits[r.waits.length - 1] !== w.replace(/\d+/g, '#')) r.waits.push(w.replace(/\d+/g, '#'));
       if (a) {
@@ -105,7 +105,7 @@ function loadExpand(mods) {
     const groups = x.ids.filter((s) => / expand:group:/.test(s)).map((s) => s.split(':')[2]);
     const B = (n) => String(cat.buildings.find((b) => b.name === n).id);
     assert.strictEqual(groups[0], B('Workshop'), 'Workshops are grouped first' + x.log);
-    assert.ok(x.ids.some((s) => / expand:buy:store/.test(s)) && x.ids.some((s) => / expand:shelf:1:/.test(s)), x.log);
+    assert.ok(x.ids.some((s) => / expand:buy:store/.test(s)) && x.ids.some((s) => / retail:shelf:1:/.test(s)), x.log);
     assert.ok(!x.mem.expand.run, 'the run finished' + x.log);
     assert.ok(!(globalThis.idleCore.acreHolds?.[1] > 0), 'the acre hold is released once the run is done');
   });

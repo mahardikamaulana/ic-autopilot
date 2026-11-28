@@ -107,7 +107,7 @@ try {
     }
 
     // ---- a small pure view of the game state ---------------------------------------------------------------------------------
-    function view(st, raw, deals = []) {
+    function view(st, raw, deals = [], region = REGION) {   // region: the per-region retail pass (scripts/multi-region-plan.md lever 4); directors read Heartland
       const N = names(raw), C = N.C;
       // A group on a Lab process (st.recipes, wiki research.md) shows as on the catalog recipe of the same building and product, so every
       // director counts it as that recipe (plan D1 adoption); g.process keeps the real id.
@@ -115,15 +115,15 @@ try {
       const groups = Object.entries(st.groups ?? {}).map(([id, g]) => {
         const pr = g.recipe != null && !C.recipes[g.recipe] ? st.recipes?.[g.recipe] : null, b = pr ? baseOf(pr) : null;
         return { id: +id, ...g, ...(b ? { recipe: b.id, process: g.recipe } : {}) };
-      }).filter((g) => (g.region ?? REGION) === REGION);
-      const pool = st.building_pool?.[REGION] ?? {};
-      const stock = st.stock?.[REGION] ?? {}, items = st.items ?? {};
+      }).filter((g) => (g.region ?? 0) === region);
+      const pool = st.building_pool?.[region] ?? {};
+      const stock = st.stock?.[region] ?? {}, items = st.items ?? {};
       const bld = (b) => C.buildings[b] ?? { name: 'building ' + b, cost: 0, acres: 1, build_items: [] };
       const idB = (n) => N.b[n], idI = (n) => N.i[n], idR = (n) => N.r[n];
       const ownedId = (b) => groups.filter((g) => g.building === b).reduce((a, g) => a + g.count, 0) + (pool[b] ?? 0);
       const owned = (n) => (N.b[n] == null ? 0 : ownedId(N.b[n]));
       // Building prices count every region and the build / demolish queues (planner.queued): owned() is Heartland only.
-      const q = P.queued({ st, catalog: raw, region: REGION });
+      const q = P.queued({ st, catalog: raw, region });
       const ownedAll = (n) => {
         const b = N.b[n];
         if (b == null) return 0;
@@ -132,7 +132,7 @@ try {
         for (const p of Object.values(st.building_pool ?? {})) c += p?.[b] ?? 0;
         return c;
       };
-      const landBought = st.land_bought?.[REGION] ?? 0;
+      const landBought = st.land_bought?.[region] ?? 0;
       let acresUsed = q.acres;   // a queued build or demolition holds its acres
       for (const g of groups) acresUsed += bld(g.building).acres * g.count;
       for (const [b, n] of Object.entries(pool)) acresUsed += bld(+b).acres * n;
@@ -143,9 +143,9 @@ try {
       const running = (bn, rn) => groups.filter((g) => g.building === N.b[bn] && g.recipe === N.r[rn] && !g.paused && g.count > 0).reduce((a, g) => a + g.count, 0);
       const cottonGroup = groups.find((g) => g.building === N.b.Farm && g.recipe === N.r['Grow Cotton'] && !g.paused);
       const engineAcres = ['Lumber Camp', 'Farm', 'Sawmill', 'Workshop'].reduce((a, n) => a + owned(n) * (N.b[n] == null ? 0 : bld(N.b[n]).acres), 0);
-      const cottonBids = deals.filter((d) => d.side === 'Sell' && d.item === N.i.Cotton && (d.region ?? REGION) === REGION && d.amount > 0);
+      const cottonBids = deals.filter((d) => d.side === 'Sell' && d.item === N.i.Cotton && (d.region ?? 0) === region && d.amount > 0);
       return {
-        catalog: raw,
+        catalog: raw, region,
         N, C, st, groups, pool, bld, idB, idI, idR, owned, ownedAll, has, unlocked, running, cottonGroup,
         cottonBid: cottonBids.length > 0, dealsLoaded: deals.length > 0,
         cottonUnit: cottonBids.reduce((a, d) => Math.max(a, d.price / d.amount), 0) || null,   // cents per unit, best Heartland Cotton bid
