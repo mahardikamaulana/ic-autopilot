@@ -333,6 +333,7 @@ try {
       try { if (W.corePlan?.running) { W.corePlan.stop(); live.push('Core plan'); } } catch (e) { console.error(e); }
       try { if (W.labRunner?.running) { W.labRunner.stop(); live.push('Lab'); } } catch (e) { console.error(e); }
       try { if (W.autoSell?.running) { W.autoSell.stop(); live.push('Auto ship'); } } catch (e) { console.error(e); }
+      try { if (W.autoWithdraw?.running) { W.autoWithdraw.stop(); live.push('Auto withdraw'); } } catch (e) { console.error(e); }
       try { if (W.autoUtil?.running) { W.autoUtil.stop(); live.push('Auto utilities'); } } catch (e) { console.error(e); }
       try { if (W.autoModules?.running) { W.autoModules.stop(); live.push('Auto modules'); } } catch (e) { console.error(e); }
       ledgerApi.add('--', 'info', 'stop all (' + why + '): ' + (live.join(' + ') || 'nothing was running'));

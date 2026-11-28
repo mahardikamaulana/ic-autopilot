@@ -14,6 +14,7 @@ const coreSrc = full.slice(full.indexOf('// @@MODULE core'), full.indexOf('// @@
 const apSrc = full.slice(full.indexOf('// @@MODULE early-game'));
 const labSrc = full.slice(full.indexOf('// @@MODULE lab'), full.indexOf('// @@END lab'));
 const asSrc = full.slice(full.indexOf('// @@MODULE autosell'), full.indexOf('// @@END autosell'));
+const awSrc = full.slice(full.indexOf('// @@MODULE autowithdraw'), full.indexOf('// @@END autowithdraw'));
 const cdSrc = full.slice(full.indexOf('// @@END core-math'), full.indexOf('// @@MODULE lab'));   // CD Farm has no module markers: it sits between core-math and lab
 
 let failed = 0;
@@ -1943,6 +1944,25 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     assert.strictEqual(k.snapshot(st, C, [], [], 0).inbound[WOOD], undefined);
     // Ship-to-Exchange message (the sell side; no Autopilot path sells to players today).
     assert.deepStrictEqual(k.transferMsg(WOOD, 400, true, 150), { type: 'TransferStock', from: 0, to: 0, item: WOOD, amount: 400, courier: true, from_exchange: false, to_exchange: true, list_price: 150 });
+  });
+
+  await t('Auto withdraw: only free Exchange units (minus Auto-deliver dues and keep), one courier load, waits for the courier', () => {
+    fresh(); (0, eval)(coreSrc + '\n' + awSrc);
+    const aw = globalThis.autoWithdraw, d = aw._decide;
+    try {
+      const catalog = { items: [{ id: 7, name: 'Wood', cargo_weight: 1 }] };
+      const job = { region: 1, item: 7, keep: 0, retryAt: 0 };
+      const st = (units, extra = {}) => ({ exchange: { 1: { 7: { units } } }, courier_ready_at: 0, courier_levels: {}, ...extra });
+      const load = Math.floor(globalThis.idleCore.courierCU(st(0)));
+      assert.deepStrictEqual(d(job, { st: st(50), catalog, tick: 10, now: 0 }), { kind: 'send', n: 50 });
+      assert.strictEqual(d(job, { st: st(load + 500), catalog, tick: 10, now: 0 }).n, load);
+      assert.strictEqual(d(job, { st: st(50, { deliveries_due: [{ region: 1, item: 7, amount: 30 }] }), catalog, tick: 10, now: 0 }).n, 20);
+      assert.strictEqual(d({ ...job, keep: 45 }, { st: st(50), catalog, tick: 10, now: 0 }).n, 5);
+      assert.strictEqual(d({ ...job, keep: 50 }, { st: st(50), catalog, tick: 10, now: 0 }).kind, 'wait');
+      assert.strictEqual(d(job, { st: st(50, { courier_ready_at: 20 }), catalog, tick: 10, now: 0 }).kind, 'wait');
+      assert.strictEqual(d({ ...job, retryAt: 5000 }, { st: st(50), catalog, tick: 10, now: 1000 }).kind, 'wait');
+      assert.strictEqual(d(job, { st: { exchange: { 0: { 7: { units: 50 } } } }, catalog, tick: 10, now: 0 }).kind, 'wait'); // another region's Exchange
+    } finally { aw._unload(); globalThis.idleCore._unload(); globalThis.idleCore = undefined; }
   });
 
   console.log(failed ? '\n' + failed + ' failed' : '\nall passed');

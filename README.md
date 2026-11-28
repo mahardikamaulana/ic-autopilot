@@ -1,6 +1,6 @@
 # IC Autopilot
 
-Userscript for [idlecorp.net](https://idlecorp.net/): an early-game Autopilot, CD Farm, Lab runner, Auto ship (with estimated and actual profit) and Auto utilities (power and water subscriptions that follow the load), each with a panel, menu or switch in the game UI.
+Userscript for [idlecorp.net](https://idlecorp.net/): an early-game Autopilot, CD Farm, Lab runner, Auto ship (with estimated and actual profit), Auto withdraw and Auto utilities (power and water subscriptions that follow the load), each with a panel, menu or switch in the game UI.
 
 ## Install (and auto-update)
 
@@ -15,7 +15,7 @@ If you ran an older copy of this toolkit (including the separate `cd-farm` and `
 | Path | What |
 |---|---|
 | `ic-autopilot.user.js` | **Built file, committed.** This is what auto-update downloads. Never edit it by hand. |
-| `src/` | The sources: `header.js` (metadata, version), `core-*.js`, `cd-farm-*.js`, `lab-*.js`, `autosell-*.js`, `utilities.js`, `core-plan-*.js`, `cp-buildout-*.js`, `cp-cadence-*.js`, `autopilot-*.js` (a module split into numbered fragments continues the same closure) |
+| `src/` | The sources: `header.js` (metadata, version), `core-*.js`, `cd-farm-*.js`, `lab-*.js`, `autosell-*.js`, `autowithdraw.js`, `utilities.js`, `core-plan-*.js`, `cp-buildout-*.js`, `cp-cadence-*.js`, `autopilot-*.js` (a module split into numbered fragments continues the same closure) |
 | `build.js` | Joins `src/` into the userscript |
 | `test/` | Offline sim, headless tests, browser UI harness, saved game board used by them |
 
@@ -24,6 +24,10 @@ If you ran an older copy of this toolkit (including the separate `cd-farm` and `
 On the Utilities pages the **Load** tile (power) and the **Supply** tile (water) get an **Auto** switch. While it is on, the grid service / waterworks subscription follows what the groups need (their draw, minus what you generate or have stored, plus anything stalled groups wait for). It raises at once and lowers only after the load has stayed down for a while (default 10 minutes, and only in the minute before a bill), because the game charges the extra level up front on a raise and refunds nothing on a lower. It never spends cash it does not have, and while Autopilot runs it never lowers power below what Autopilot itself subscribes. Both switches are off by default and are saved in the browser.
 
 From the console: `autoUtil.set('power', true)`, `autoUtil.status()`, `autoUtil.conf.power.spare = 2` (extra MW above the need), `autoUtil.conf.holdMin = 15`.
+
+## Auto withdraw
+
+On the Inventory page every row of the Exchange table gets an **Auto** switch next to Withdraw. While it is on, each time the courier is free that item's goods at the region's Exchange are withdrawn to the same region's inventory (the same TransferStock the game's Withdraw dialog sends, one courier load per run). It takes only free units: what the game's own Auto-deliver still has to deliver is left to it, and goods listed for sale are in escrow, not in the Exchange stock. It shares the courier with Auto ship and runs until you switch it off. Jobs are saved in this browser. From the console: `autoWithdraw.start({ region: 0, item: 7, keep: 100 })`, `autoWithdraw.status()`, `autoWithdraw.stop()`.
 
 ## Module watch
 
