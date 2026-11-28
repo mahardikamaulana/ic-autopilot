@@ -102,7 +102,7 @@ function buildPanel() {
   const tog = (key) => refs.toggles[key].el;
 
   // ---- Status tab
-  refs.hero = K.hero('Early-game plan');
+  refs.hero = K.hero(planOf(cfg.plan).label);
   refs.rows = K.rowList();
   refs.state = K.stateLine();
   refs.cdNote = K.banner(() => W.cdFarm?.panel?.(true), 'Open CD Farm');
@@ -119,11 +119,13 @@ function buildPanel() {
   refs.billNow = mk('div', { class: 'idc-desc' });
   const offBtn = mk('button', { type: 'button', onclick: () => { const hrs = Number(refs.hours.input.value); if (hrs > 0) { offline(hrs); render(); } } }, 'Keep bills');
   refs.dryRunSwitch = K.toggleField('Dry run switch', 'Shows the Dry run / Live switch in the footer. Dry run works out every step and sends nothing.', { get: () => !!ui.dryRunSwitch, set: (v) => { ui.dryRunSwitch = v; saveUi(); if (!running && !active) cfg.dryRun = v; render(); }, def: false });
+  refs.planSeg = K.segField('Plan preset', core.plans.list().map((p) => ({ id: p.id, label: p.label })), { get: () => cfg.plan, set: (id) => setCfg('plan', id), def: DEFAULTS.plan, describe: (id) => planOf(id).desc });
   refs.keepOnline = K.toggleField('Keep online', 'The game sees this tab as visible, so its socket watchdog keeps it online while the tab is hidden.', { get: () => !!W.keepOnline?.on, set: (v) => { W.keepOnline?.set(v); render(); }, def: true });
   refs.settings = K.settingsTab({
     lockText: 'Stop the live run to change settings.',
     tail: [K.group('Connection', refs.keepOnline.el), K.group('Experimental', refs.dryRunSwitch.el)],
     groups: [
+      K.group('Plan', refs.planSeg.el),
       K.group('Build targets', mk('div', { class: 'idc-two' }, ...amount('workshops', 'sawmills', 'ironMines', 'coalMines', 'goldMines', 'ironFrameWorkshops'))),
       K.group('Land price limits', mk('div', { class: 'idc-two' }, ...amount('landPaybackHours', 'maxAcrePriceEarly', 'maxAcrePrice')),
         mk('div', { class: 'idc-desc' }, 'Camps, farms and Gold Mines get land while it and the building pay back from their own income within this time; with no bid for what they make, the walls (most per acre, early on and later) apply.')),
@@ -167,25 +169,28 @@ function cpOf(s) {
   c.handedOff &&= p === 'done' || p >= 4;   // the saved hand-off has no corp id: a new corp in this browser starts at Phase 1 again (4: a bill pause)
   return c.running || c.handedOff || p === 'done' ? c : null;
 }
-// Core plan has taken over (it runs, or the hand-off is done): the panel is Core plan's, with the early plan as one "done" row.
+// Core plan has taken over (it runs, or the hand-off is done): the panel shows the core game, with the early game as one "done" row.
 const coreView = (cp) => !!cp && (cp.running || cp.handedOff);
-const STAGES = [['A', 'start'], ['B', 'Assembly Plant unlock'], ['C', 'Retail Store unlock'], ['D', 'Retail Store built']];
-const END_NAMES = { E1: 'money engine runs', E2: 'only endgame unlocks left', E3: 'CD on the Farm cycle', E4: 'land done', E5: 'cash in hand' };
+// The plan preset's stages ([id, name]), end-condition names and phase count, for the hero, chip and checklist.
+const stages = () => planOf(cfg.plan).core.stages.map((x) => [x.id, x.name]);
+const lastStage = () => { const st = stages(); return st[st.length - 1][0]; };
+const endName = (id) => planOf(cfg.plan).core.end.find((e) => e.id === id)?.name;
+const phaseCount = () => { const ps = PLAN().phases; return ps[ps.length - 1].phase + 1; };
 // Progress of the whole plan, so the bar never drops back at the hand-off: the early plan is the first fifth, then a fifth per stage A-D
 // (in Stage D, the share of end conditions E1-E5 that hold).
 function cpProgress(cp) {
-  const i = STAGES.findIndex(([k]) => k === cp.stage);
+  const STAGES = stages(), i = STAGES.findIndex(([k]) => k === cp.stage);
   if (cp.stage === 'END') return 100;
   if (i < 0) return 100 / (STAGES.length + 1);   // starting: the early plan is done
   const ok = cp.end.filter((e) => / ok:/.test(e)).length;
-  return ((1 + i + (cp.stage === 'D' && cp.end.length ? ok / cp.end.length : 0)) / (STAGES.length + 1)) * 100;
+  return ((1 + i + (cp.stage === lastStage() && cp.end.length ? ok / cp.end.length : 0)) / (STAGES.length + 1)) * 100;
 }
 // Core plan's checklist: its stages, then the end conditions E1-E5 (the endgame gate; the log and corePlan.status() say why one is open).
 function cpChecklist(cp) {
-  const i = cp.stage === 'END' ? STAGES.length : STAGES.findIndex(([k]) => k === cp.stage);
+  const STAGES = stages(), i = cp.stage === 'END' ? STAGES.length : STAGES.findIndex(([k]) => k === cp.stage);
   return [
     ...STAGES.map(([k, what], j) => ['Stage ' + k + ' · ' + what, j < i ? '✓' : j === i ? 'now' : '·']),
-    ...cp.end.map((e) => { const m = /^(E\d) (ok|NO):/.exec(e); return m ? [m[1] + ' · ' + (END_NAMES[m[1]] ?? ''), m[2] === 'ok' ? '✓' : '·'] : [e, '']; }),
+    ...cp.end.map((e) => { const m = /^(E\d) (ok|NO):/.exec(e); return m ? [m[1] + ' · ' + (endName(m[1]) ?? ''), m[2] === 'ok' ? '✓' : '·'] : [e, '']; }),
   ];
 }
 const cpMode = (c) => (c.running ? (c.resumeIn ? 'resuming Live in ' + c.resumeIn + ' s' : c.dryRun ? 'dry run' : 'live') : 'stopped');
@@ -239,12 +244,14 @@ function renderPanel(s, ph, cp, t) {
     const cv = coreView(cp);
     const list = checklist(s);
     const marks = list.filter(([, v]) => /^(✓|·|researching|queued)/.test(v));
-    if (cv) refs.hero.set(cp.stage === 'END' ? 'Done' : cp.stage ? 'Stage ' + cp.stage : 'Starting', cp.stage === 'END' ? 'end conditions met' : cp.stage ? 'of D' : '', cpProgress(cp), 'Core plan');
-    else refs.hero.set(ph === 'done' ? 'Plan done' : `Phase ${ph}`, ph === 'done' ? '' : 'of 5',
-      ph === 'done' ? 100 : marks.length ? (marks.filter(([, v]) => v.startsWith('✓')).length / marks.length) * 100 : 0, 'Early-game plan');   // done is full: optional rows (Gold Mines) never tick
+    const plan = planOf(cfg.plan).label;
+    if (cv) refs.hero.set(cp.stage === 'END' ? 'Done' : cp.stage ? 'Stage ' + cp.stage : 'Starting', cp.stage === 'END' ? 'end conditions met' : cp.stage ? 'of ' + lastStage() + ' · core game' : 'core game', cpProgress(cp), plan);
+    // The early game is the whole plan's first fifth (cpProgress), so the bar never drops back at the hand-off; done is full: optional rows (Gold Mines) never tick
+    else refs.hero.set(ph === 'done' ? 'Early game done' : `Phase ${ph}`, ph === 'done' ? 'core game next' : 'of ' + phaseCount() + ' · early game',
+      (ph === 'done' ? 100 : marks.length ? (marks.filter(([, v]) => v.startsWith('✓')).length / marks.length) * 100 : 0) / (stages().length + 1), plan);
     refs.rows.set([
-      ...(cv ? [['Early-game plan', '✓ done']] : cp ? [['Core plan', (cp.stage ? 'stage ' + cp.stage + ' · ' : '') + cpMode(cp)]] : []),
-      ...(cv && cp.resumeIn ? [['Core plan', cpMode(cp)]] : []),
+      ...(cv ? [['Early game', '✓ done']] : cp ? [['Core game', (cp.stage ? 'stage ' + cp.stage + ' · ' : '') + cpMode(cp)]] : []),
+      ...(cv && cp.resumeIn ? [['Core game', cpMode(cp)]] : []),
       // Autopilot runs on after the hand-off only for its chores, until Auto power takes over the subscription
       ...(cv && running ? [['Autopilot chores', cfg.dryRun ? 'dry run, sends nothing' : s.autoPower ? 'selling, bill resume' : 'until Auto power is on']] : []),
       ['Money', cv ? usd(s.money) : `${usd(s.money)} · floor ${usd(moneyFloor(s))}`],
@@ -258,7 +265,9 @@ function renderPanel(s, ph, cp, t) {
       ...(rateScale < 1 ? [['Pace', `${Math.round(rateScale * 100)}% after an action the server did not apply`]] : []),
     ]);
     const skip = new Set(['Phase', 'Money', 'CD', 'Acres', 'Power', 'Courier']);
-    refs.check.set(cv ? cpChecklist(cp) : list.filter(([k]) => !skip.has(k)).map(([k, v]) => [k, String(v)]));
+    // The whole plan: the early game's rows then stages A-D still to come, or the early game done then Core plan's stages and end conditions
+    refs.check.set(cv ? [['Early game · Phases 1-' + phaseCount(), '✓'], ...cpChecklist(cp)]
+      : [...list.filter(([k]) => !skip.has(k)).map(([k, v]) => [k, String(v)]), ...stages().map(([k, what]) => ['Stage ' + k + ' · ' + what, '·'])]);
     const held = running && heldReason();
     let next;
     try { const d = decide(s); next = d.wait ? 'Waiting: ' + d.wait : 'Next: ' + d.reason; } catch (e) { next = 'error: ' + e.message; }
@@ -285,7 +294,7 @@ function renderPanel(s, ph, cp, t) {
 
   // Settings
   refs.settings.sync(running && !cfg.dryRun);
-  let changed = 0;
+  let changed = refs.planSeg.sync() ? 1 : 0;
   for (const f of Object.values(refs.fields)) if (f.sync()) changed++;
   for (const k of Object.keys(refs.toggles)) if (refs.toggles[k].sync()) changed++;
   P.setTabBadge('settings', changed ? changed + ' setting' + (changed > 1 ? 's' : '') + ' changed from the defaults' : '');
@@ -317,8 +326,8 @@ function render() {
   const t = tone(cp);
   const ph = s ? (cp?.handedOff ? 'done' : phaseOf(s)) : null;   // after the hand-off the early plan stays done, even if Iron Frames dip
   const dry = running || !cp?.running ? viewDry() : cp.dryRun, stage = cp?.running && cp.stage;
-  chrome?.setPill(!coreView(cp) && heldReason() ? 'Held' : dry ? 'Dry run' : ph === 'done' ? (stage ? 'Core ' + stage : 'Done') : `P${ph ?? '?'}`, t, !(running || cp?.running));
-  chrome?.setChip(ph == null ? 'Autopilot' : ph === 'done' ? (stage ? 'Core plan ' + stage : 'Plan done') : `Phase ${ph}`, t,
+  chrome?.setPill(!coreView(cp) && heldReason() ? 'Held' : dry ? 'Dry run' : ph === 'done' ? (stage ? 'Core ' + stage : 'P' + phaseCount() + ' done') : `P${ph ?? '?'}`, t, !(running || cp?.running));
+  chrome?.setChip(ph == null ? 'Autopilot' : ph === 'done' ? (stage ? 'Stage ' + stage : 'Early game done') : `Phase ${ph}`, t,
     `Autopilot · ${running ? (heldReason() ? 'paused' : cfg.dryRun ? 'dry run' : 'live') : 'stopped'}` + (cp ? ' · Core plan · ' + cpMode(cp) : ''));
   const open = !!P?.el.isConnected;
   chrome?.setOpen(open);
@@ -334,7 +343,7 @@ function panel(show = true, opts = {}) {
 
 function mountUi() {
   chrome = K.createChrome({
-    label: 'Autopilot', navTitle: 'Early-game autopilot', icon: ICON, navClass: 'egp-tab', chipClass: 'egp-chip',
+    label: 'Autopilot', navTitle: 'Autopilot: ' + planOf(cfg.plan).label, icon: ICON, navClass: 'egp-tab', chipClass: 'egp-chip',
     onToggle: () => K.togglePanel(P, ui, panel),
     navInsert: (nav, el) => nav.insertBefore(el, nav.querySelector('.cdf-tab')),   // above CD Farm's tab
     chipInsert: (tools, el) => tools.insertBefore(el, tools.querySelector('.cdf-chip') || tools.querySelector('.tip-anchor') || null),

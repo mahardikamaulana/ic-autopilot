@@ -42,12 +42,11 @@ try {
     const sleep = core.sleep;
 
     // ---- game facts ------------------------------------------------------------------------------
-    const REGION_NAMES = ['Heartland', 'Industrial Basin', 'Coastal Cities', 'Frontier'];
-    const regionName = (r) => REGION_NAMES[r] ?? 'Region ' + r;
+    const { regionName } = core;
     const MAX_FAILS = 5;
     const cfg = { cycleMs: 1000, confirmMs: 10000, jitterMs: 450, backoffMs: 5000, bidWaitMs: 24 * 3600 * 1000, switchFloorPct: 90 };   // timings (the tests shorten them); switchFloorPct: a moved job never takes a bid below this % of the bid you picked
     const usd = (c) => '$' + (c / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    const num = (n) => Math.round(n).toLocaleString('en-US');
+    const num = core.ui.num;
     const profitTxt = (c) => (c < 0 ? '−' : '') + usd(Math.abs(c));
 
     let catRef = null, itemMap = null;
@@ -90,7 +89,7 @@ try {
     //        keep, fullLoads, expiresAt (tick), fails, retryAt, status, tone, last (ms of the last send),
     //        from (the bid it moved from, or null), waitSince (ms since no bid qualified, 0 = not waiting for one) }
     const jobs = new Map();
-    const toInt = (v, min, max, dflt) => { const n = Math.floor(Number(v)); return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : dflt; };
+    const toInt = core.toInt;
     function clean(j) {
       if (!j || !Number.isFinite(+j.deal) || !Number.isFinite(+j.item)) return null;
       return {

@@ -28,13 +28,12 @@ try {
     let unloaded = false;
     const sleep = core.sleep;
 
-    const REGION_NAMES = ['Heartland', 'Industrial Basin', 'Coastal Cities', 'Frontier'];
-    const regionName = (r) => REGION_NAMES[r] ?? 'Region ' + r;
+    const { regionName } = core;
     const MAX_FAILS = 5;
     const cfg = { cycleMs: 1000, confirmMs: 10000, jitterMs: 450, backoffMs: 5000 };
-    const num = (n) => Math.round(n).toLocaleString('en-US');
+    const num = core.ui.num;
     const keyOf = (region, item) => region + ':' + item;
-    const toInt = (v, min, max, dflt) => { const n = Math.floor(Number(v)); return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : dflt; };
+    const toInt = core.toInt;
 
     const itemOf = (catalog, id) => (catalog?.items ?? []).find((i) => i.id === id);
     const nameOf = (r, id) => itemOf(r?.catalog, id)?.name ?? 'item ' + id;
@@ -48,12 +47,10 @@ try {
       if (!j || !Number.isFinite(+j.item)) return null;
       return { region: toInt(j.region, 0, 3, 0), item: +j.item, keep: toInt(j.keep, 0, 1e12, 0), moved: toInt(j.moved, 0, 1e15, 0), fails: 0, retryAt: 0, status: 'Starting', tone: '' };
     }
-    function save() { try { store?.setItem(KEY, JSON.stringify({ jobs: [...jobs.values()].map(({ region, item, keep, moved }) => ({ region, item, keep, moved })) })); } catch { } }
+    function save() { core.settings(KEY).save({ jobs: [...jobs.values()].map(({ region, item, keep, moved }) => ({ region, item, keep, moved })) }); }
     function restore() {
-      try {
-        const o = JSON.parse(store?.getItem(KEY) || 'null');
-        for (const j of Array.isArray(o?.jobs) ? o.jobs : []) { const c = clean(j); if (c && jobs.size < 100) jobs.set(keyOf(c.region, c.item), c); }
-      } catch { }
+      const o = core.settings(KEY).load();
+      for (const j of Array.isArray(o?.jobs) ? o.jobs : []) { const c = clean(j); if (c && jobs.size < 100) jobs.set(keyOf(c.region, c.item), c); }
     }
 
     function read(fresh = false) {

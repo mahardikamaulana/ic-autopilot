@@ -1895,6 +1895,36 @@ function labState({ labs = { 0: 1 }, make = ['Planks', 'Iron Sheet', 'Wooden Fra
     } finally { fresh(); delete globalThis.localStorage; }
   });
 
+  await t('plan presets: the shared condition library (core.plans.check) and the Xeraphire preset shape', () => {
+    loadBoth();
+    const P = globalThis.idleCore.plans;
+    const a = { unlocked: (b) => b === 'Mine', owned: (b) => ({ Kiln: 1, Mine: 0 })[b] ?? 0, running: () => 0, has: (i) => (i === 'Iron Frame' ? 20 : 0), acresUsed: 30, types: { mine: () => [true, 'custom'] } };
+    assert.deepStrictEqual(P.check({ type: 'unlocked', of: ['Mine', 'Kiln', 'Quarry'] }, a), [false, 'not unlocked: Kiln, Quarry']);
+    assert.deepStrictEqual(P.check({ type: 'unlocked', of: ['Mine'], okWhy: 'in' }, a), [true, 'in']);
+    assert.deepStrictEqual(P.check({ type: 'owned', of: ['Kiln', 'Mine'] }, a), [false, 'missing: Mine']);
+    assert.deepStrictEqual(P.check({ type: 'all', okWhy: 'frames {Iron Frame}', of: [{ type: 'stock', of: 'Iron Frame', min: 16 }, { type: 'acresUsed', min: 25 }] }, a), [true, 'frames 20']);
+    assert.deepStrictEqual(P.check({ type: 'stock', of: 'Iron Frame', min: 30 }, a), [false, 'Iron Frame stock 20 < 30']);
+    assert.deepStrictEqual(P.check({ type: 'mine' }, a), [true, 'custom'], 'an engine type');
+    assert.throws(() => P.check({ type: 'nope' }, a), /unknown type/);
+    const x = P.get('xeraphire');
+    assert.strictEqual(P.get('gone'), x, 'an unknown id is the first preset');
+    assert.deepStrictEqual(x.core.stages.map((st) => st.id), ['A', 'B', 'C', 'D']);
+    assert.deepStrictEqual(x.core.end.map((e) => e.id), ['E1', 'E2', 'E3', 'E4', 'E5']);
+    const c = P.copy({ n: 1, l: [2] });
+    assert.ok(c.l !== P.copy(c).l, 'copy copies arrays');
+  });
+
+  await t('plan preset: only known ids are taken; a stored unknown id falls back to Xeraphire Plan', () => {
+    const disk = { 'earlyGame.v2': JSON.stringify({ cfg: { plan: 'gone' } }) };
+    globalThis.localStorage = { getItem: (k) => disk[k] ?? null, setItem: (k, v) => { disk[k] = String(v); }, removeItem: (k) => { delete disk[k]; } };
+    try {
+      const { ap } = loadBoth();
+      assert.strictEqual(ap.cfg.plan, 'xeraphire', 'unknown stored preset falls back');
+      assert.deepStrictEqual(ap.tune({ plan: 'nope' }).skipped, ['plan']);
+      assert.deepStrictEqual(ap.tune({ plan: 'xeraphire' }).applied, ['plan']);
+    } finally { fresh(); delete globalThis.localStorage; }
+  });
+
   await t('floor library: furniture recipes get a Workshop design (x5 Bookshelf/Table/Chair, Rivet x3 for Bench/Desk; scored live 2026-11-22)', () => {
     const { ap } = loadBoth();
     const k = ap._core, C = k.normalize(board.catalog);

@@ -42,7 +42,6 @@ try {
     const core = W.idleCore;
     if (!core) throw new Error('the shared core did not load');
     const HAS_DOM = typeof document !== 'undefined' && !!document.body;
-    const store = (() => { try { return W.localStorage ?? null; } catch { return null; } })();
     const KEY = 'autoUtil.v1';
     const TAG = 'AU';
     if (W.autoUtil?._unload) W.autoUtil._unload();
@@ -64,8 +63,7 @@ try {
     const cfg = { cycleMs: 2000, confirmMs: 10000, backoffMs: 5000, lowerWindowTicks: 120, raiseHoldTicks: 60 };   // timings; the tests shorten them. raiseHoldTicks: a raise only stalled groups need waits for the bill this close to it
     // contractLeadMin: a bought contract this close to its end counts as gone
     const conf = { power: { on: false, spare: 0 }, water: { on: false, spare: 0 }, holdMin: 10, contractLeadMin: 30 };
-    const REGION_NAMES = ['Heartland', 'Industrial Basin', 'Coastal Cities', 'Frontier'];
-    const regionName = (r) => REGION_NAMES[r] ?? 'Region ' + r;
+    const { regionName } = core;
     const usd = (c) => '$' + (c / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     const toInt = (v, lo, hi, dflt) => { const n = Math.round(Number(v)); return Number.isFinite(n) && n >= lo && n <= hi ? n : dflt; };
 
@@ -85,8 +83,8 @@ try {
       if ('contractLeadMin' in o) { const n = toInt(o.contractLeadMin, 0, 1440, null); if (n == null) skipped.push('contractLeadMin'); else { conf.contractLeadMin = n; applied.push('contractLeadMin'); } }
       return { applied, skipped };
     }
-    function save() { try { store?.setItem(KEY, JSON.stringify(persistable())); } catch { } }
-    function restore() { try { apply(JSON.parse(store?.getItem(KEY) || 'null')); } catch { } }
+    function save() { core.settings(KEY).save(persistable()); }
+    function restore() { try { apply(core.settings(KEY).load()); } catch { } }
 
     // ---- reading the game ----------------------------------------------------------------------------------------------
     function read(fresh = false) {

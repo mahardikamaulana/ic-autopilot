@@ -9,6 +9,7 @@ const board = JSON.parse(fs.readFileSync(path.join(__dirname, 'live-board.json')
 const stageB = JSON.parse(fs.readFileSync(path.join(__dirname, 'live-stageB.json'), 'utf8'));   // live corp, Stage B, 2026-11-22
 // CP_FROM_SRC=1 reads src/*.js in build.js PARTS order instead of the built file (so several people can test without racing bun build.js).
 const full = () => {
+  if (process.env.IC_BUILD) return fs.readFileSync(process.env.IC_BUILD, 'utf8');   // test/drift.js: another build
   if (!process.env.CP_FROM_SRC) return fs.readFileSync(path.join(__dirname, '..', 'ic-autopilot.user.js'), 'utf8');
   const parts = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'build.js'), 'utf8').match(/const PARTS = (\[[^\]]*\])/)[1].replace(/'/g, '"'));
   return parts.map((p) => fs.readFileSync(path.join(__dirname, '..', 'src', p), 'utf8')).join('');

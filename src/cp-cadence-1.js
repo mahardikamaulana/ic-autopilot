@@ -23,13 +23,15 @@ try {
   const HOUR = 3600000, SIX = 6 * HOUR;
   const COURIER_CU = 10000;                      // one free courier load
   const usd = (c) => '$' + (c / 100).toLocaleString('en-US', { maximumFractionDigits: 0 });
-  const num = (n) => Math.round(n).toLocaleString('en-US');
+  const num = core.ui.num;
   const usd2 = (c) => '$' + (c / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });   // unit prices
+  // Plan data and settings: the plan preset's core part (src/core-plans.js).
+  const PC = core.plans.current().core, PD = PC.directors;
   // Engine inputs and the endgame prototypes: never sold, never in the slot (wiki 5.2, 6).
-  const NEVER = ['Wood', 'Planks', 'Iron Sheet', 'Concrete', 'Glass', 'Bookshelf', 'Table', 'Chair', 'Bench', 'Wooden Frame', 'Iron Frame', 'Copper Wire', 'Wired Frame'];
-  const UNLOCKS = ['Assembly Plant', 'Retail Store', 'Oil Rig'];
+  const NEVER = PD.cadence.tables.never;
+  const UNLOCKS = PC.unlocks;
   // Endgame stock (wiki 12): kept back from every sale and the surplus slot.
-  const TARGETS = [['Iron Frame', 80], ['Wired Frame', 12], ['Copper Wire', 200], ['Copper Ore', 2000]];
+  const TARGETS = PD.cadence.tables.targets;
 
   // ---- shared reads (pure) ----------------------------------------------------------------------------------------------------
   const tickOf = (v, ctx) => ctx.tick ?? v.mutTick ?? 0;

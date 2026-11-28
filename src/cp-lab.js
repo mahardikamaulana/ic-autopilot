@@ -18,9 +18,10 @@ try {
   const W = typeof window !== 'undefined' ? window : globalThis;
   if (!W.corePlan?.addDirector) throw new Error('Core plan did not load');
   const REGION = 0, ACRE_CAP = 360;
-  const FURNITURE = ['Make Bookshelf', 'Make Table', 'Make Chair', 'Make Bench'];
+  const PD = W.idleCore.plans.current().core.directors.lab, T = PD.tables;   // plan data and settings (src/core-plans.js)
+  const FURNITURE = T.furniture;
   // wiki 10 step 1: product name, focus (0 Process study, 2 Quality engineering), Tier I pinned.
-  const PRESET = [['Bookshelf', 2], ['Planks', 0], ['Table', 2], ['Chair', 2]];
+  const PRESET = T.preset;
   const PRESET_BACKOFF = 10 * 60000;   // after a failed preset, leave the Lab runner alone this long (so modules still get their turn)
   const LAB = 'lab';
 
@@ -29,14 +30,14 @@ try {
 
   // The list with ids by name; null when a name is missing (the preset is then off, with a readout).
   // With the retail allocator's plan (plan D1): Quality engineering on the planned good with the most $/h first, then a Planks process study,
-  // then the other planned goods by $/h; Quality engineering at Tier II when MD > cfg.mdRich and RD >= 5 (Tier II also costs 5 RD).
+  // then the other planned goods by $/h; Quality engineering at Tier II when MD > cfg.mdRich and RD >= T.tier2Rd (Tier II also costs that much RD).
   // Without a plan: the wiki 10 Tier I list.
   function presetList(v, ctx = {}) {
     let al = null;
     try { al = ctx.retail?.goods ? W.corePlan._buildout?.alloc?.(v, ctx) ?? null : null; } catch { al = null; }
     const ph = (g) => (al?.alloc?.[g.id] ?? 0) * g.unit * g.blockH;   // planned $/h (cents): Workshops x unit price x units per Workshop-hour
     const top = al ? ctx.retail.goods.filter((g) => ph(g) > 0).sort((a, b) => ph(b) - ph(a)) : [];
-    const rich = (v.st.items?.[v.idI('Manufacturing Data')] ?? 0) > W.corePlan.cfg.mdRich && (v.st.items?.[v.idI('Research Data')] ?? 0) >= 5;
+    const rich = (v.st.items?.[v.idI('Manufacturing Data')] ?? 0) > W.corePlan.cfg.mdRich && (v.st.items?.[v.idI('Research Data')] ?? 0) >= T.tier2Rd;
     const rows = top.length ? [[top[0].name, 2], ['Planks', 0], ...top.slice(1).map((g) => [g.name, 2])] : PRESET;
     const list = rows.map(([n, focus]) => ({ product: v.idI(n), focus, tier: top.length && focus === 2 && rich ? 2 : 1 }));
     return list.some((e) => e.product == null) ? null : Object.assign(list, { label: top.length ? 'allocator list' : 'Tier I list' });
@@ -101,7 +102,7 @@ try {
     return true;
   }
 
-  // Second Lab (wiki 10 "build one", plan D2), only while one is owned and cfg.labTarget asks for 2 (never more). Pure. Gates: the Iron Frames the
+  // Second Lab (wiki 10 "build one", plan D2), only while one is owned and cfg.labTarget asks for more, up to T.maxLabs. Pure. Gates: the Iron Frames the
   // unlocks still need (ifNeed) stay back; acres above the CD-farm buffer, else its own acres bought in the same action while the land rule is
   // open (as buildout Stage C-D: acresOwned + acres <= min(rule.lastAcre, 360)); cash for the money floor + land + the Lab + its bill floor.
   // No free acre and the rule closed: not wanted, so E5 is never held by a Lab that cannot be placed.
@@ -109,7 +110,7 @@ try {
     const lab = v.idB('Manufacturing Lab');
     if (lab == null) return { note: 'no Manufacturing Lab in the catalog' };
     const owned = v.owned('Manufacturing Lab');
-    if (owned !== 1 || cfg.labTarget < 2) return { note: owned + ' Manufacturing Lab' + (owned === 1 ? '' : 's') + ' (target ' + cfg.labTarget + ')' };
+    if (owned < 1 || owned >= Math.min(cfg.labTarget, T.maxLabs)) return { note: owned + ' Manufacturing Lab' + (owned === 1 ? '' : 's') + ' (target ' + cfg.labTarget + ')' };
     const usd = W.corePlan._usd, bd = v.bld(lab), floor = ctx.floorCents ?? 0;
     const free = v.freeAcres - cfg.bufferAcres, acres = Math.max(0, bd.acres - Math.max(0, free)), cap = Math.min(rule?.lastAcre ?? 0, ACRE_CAP);
     // Land for the Lab only in Stage C-D: in Stage A-B free land goes to engine blocks first (plan D-1).
@@ -169,9 +170,7 @@ try {
 
   W.corePlan.addDirector({
     name: LAB, order: 55,
-    defaults: { labPreset: true, labGroup: true, labTarget: 2,
-      mdRich: 1000000,        // Manufacturing Data above this (and RD >= 5): the preset's Quality engineering runs at Tier II (plan D1)
-      labAdopt: true },       // adopt a Lab process that is strictly better than a furniture group's recipe (plan D1)
+    defaults: W.idleCore.plans.copy(PD.defaults),
     // E5: the second Lab is an investment still to make while it is wanted and not bought.
     pendingInvest,
     context(v, ctx) {

@@ -102,29 +102,44 @@ try {
       },
     };
     const FALLBACK = { building: { ...B }, recipe: { ...R }, item: { MONEY, CD, LD, MD, RD, WOOD, PLANKS, COTTON, WFRAME, IFRAME } };
-    let TASK, NAMES, HOME_MADE, NEVER_SELL;
+    // The plan is a preset's `early` part (core.plans, src/core-plans.js), in the game's names; tables() turns them into ids through
+    // ID_NAMES (so the same ids and fallbacks as everywhere else here). An unknown name is a preset error.
+    const KEY_OF = Object.fromEntries(Object.entries(ID_NAMES).map(([kind, m]) => [kind, Object.fromEntries(Object.entries(m).map(([k, n]) => [n, k]))]));
+    const keyOf = (kind, name) => { const k = KEY_OF[kind][name]; if (!k) throw new Error(`plan preset: unknown ${kind} "${name}" (add it to ID_NAMES)`); return k; };
+    const bId = (n) => B[keyOf('building', n)];
+    const rId = (n) => (n == null ? null : R[keyOf('recipe', n)]);
+    const iId = (n) => ({ MONEY, CD, LD, MD, RD, WOOD, PLANKS, COTTON, WFRAME, IFRAME })[keyOf('item', n)];
+    let TASK, NAMES, HOME_MADE, NEVER_SELL, NEVER_BUY, TECHS, TARGETS, ASSIGN, SELL, BOOSTER, tablesFor = null;
     function tables() {
-      TASK = {
-        [B.CAMP]: R.FELL_WOOD, [B.FARM]: R.GROW_COTTON, [B.SAWMILL]: R.SAW_PLANKS,
-        [B.QUARRY]: R.LIMESTONE, [B.SMELTER]: R.IRON_SHEET,
-      };
-      NAMES = {
-        [R.FELL_WOOD]: 'Fell Wood', [R.GROW_COTTON]: 'Grow Cotton', [R.SAW_PLANKS]: 'Planks',
-        [R.FRAME_TIMBER]: 'Frame Timber', [R.RIVET]: 'Iron Frames', [R.MINE_IRON]: 'Iron', [R.MINE_COAL]: 'Coal',
-        [R.MINE_GOLD]: 'Gold', [R.LIMESTONE]: 'Limestone', [R.IRON_SHEET]: 'Iron Sheet',
-        [R.MIX_CONCRETE]: 'Concrete',
-      };
+      const p = PLAN();
+      TASK = {};
+      ASSIGN = {};   // building id → { task } | { pick: [recipe ids] } | { capped: recipe id }
+      for (const a of p.assign) {
+        const b = bId(a.b);
+        if (a.task) { TASK[b] = rId(a.task); ASSIGN[b] = { task: TASK[b] }; } else if (a.pick) ASSIGN[b] = { pick: a.pick.map(rId) }; else ASSIGN[b] = { capped: rId(a.capped) };
+      }
+      NAMES = Object.fromEntries(Object.entries(p.groupNames).map(([r, n]) => [rId(r), n]));
       // Items the plan makes itself: never bought for prototypes, never sold.
-      HOME_MADE = [WOOD, PLANKS, WFRAME, IFRAME];
+      HOME_MADE = p.homeMade.map(iId);
       // Never sold: what the plan builds with, and corp-wide data.
-      NEVER_SELL = [PLANKS, WFRAME, IFRAME, MONEY, CD, MD, RD, LD];
+      NEVER_SELL = p.neverSell.map(iId);
+      NEVER_BUY = p.neverBuy.map(iId);
+      TECHS = p.unlocks.map((u) => {
+        const b = bId(u.b);
+        return { b, phase: u.phase, ...(u.gate ? { gate: (s) => GATES[u.gate.type](s, b, u.gate) } : {}), ...(u.optional ? { optional: true } : {}), ...(u.when ? { when: u.when } : {}) };
+      });
+      TARGETS = p.targets.map((t) => ({ ...t, b: bId(t.b), r: rId(t.recipe) }));
+      const sl = p.sell;
+      SELL = { autoShip: { ...sl.autoShip, id: iId(sl.autoShip.item) }, always: sl.always.map(iId), small: sl.smallLoads.items.map(iId), smallUntil: sl.smallLoads.until.map(bId),
+        reserve: Object.fromEntries(Object.entries(sl.reserve).map(([n, k]) => [iId(n), k])) };
+      BOOSTER = { b: bId(p.booster.building), after: bId(p.booster.after) };
+      tablesFor = cfg.plan;   // last: a preset with a bad name throws above and is tried again on the next read
     }
-    tables();
     // Names not found in the catalog (their fallback number is used); checkGame reports them.
     const idMissing = [];
     let idsOf = null;   // the catalog the ids were last resolved from
     function resolveIds(c) {
-      if (idsOf === c) return;
+      if (idsOf === c && tablesFor === cfg.plan) return;
       idsOf = c;
       idMissing.length = 0;
       const find = (kind, list, key) => {
@@ -141,51 +156,20 @@ try {
       tables();
     }
 
+    // Saved settings, read first: the saved plan preset gives the plan's defaults.
+    let saved = {};
+    try { saved = JSON.parse(store?.getItem(KEY) || '{}'); } catch { }
+    const planOf = (id) => core.plans.get(id);
+    const PLAN = () => planOf(cfg.plan).early;   // the plan this module plays
+    // shortcut: a preset's defaults apply at load; picking another preset in Settings changes the plan's rules at once and its defaults after a reload.
+    const planDefaults = planOf(saved.cfg?.plan).early.defaults;
+
     const cfg = {
+      plan: core.plans.list()[0].id,   // plan preset (core.plans)
       dryRun: false,           // log actions instead of sending them
       autoResume: true,        // after a page reload, resume a run that was going
-      sawmills: 6,             // once the Workshop is unlocked (1 before, 3 from 50 buildings); at least 2 per Frame Timber Workshop
-      workshops: 2,            // on Frame Timber
-      ironFrameWorkshops: 1,   // Phase 5: on Rivet Iron Frame, once the Smelter runs
-      ironMines: 1, coalMines: 1, // at least; more as the Smelters' Iron Ore / Coal use needs at the current floor rates (4 / 2 at equal rates)
-      quarries: 1, smelters: 1, kilns: 1, labs: 1,
-      goldMines: Infinity,     // leftover frames → Gold Mines (+8 CD each; the CD source for Smelter and Phase 5). Infinity = auto: up to GOLD_AUTO while a plan unlock is open
-      dispatchOffice: true,    // Phase 5 optional unlock
-      workshopPlanks: 205,     // planks before unlocking the Workshop (100 prototype + 100 build + 5 kit)
-      landPaybackHours: 2,     // camps/farms/Gold Mines: land is also bought, above the walls below, while (acres + building) pay back from
-      // the building's own live income within this many hours (payback alone ignores the CD they bring: slower in the sim)
-      maxAcrePrice: 500,       // $: land wall for camps/farms once the Workshop unlock has started, used when that income isn't known (no bid)
-      maxAcrePriceEarly: 3000, // $: camps/farms before that (the plan pushes land until 155 CD), same fallback
-      maxAcrePriceCritical: 5000, // $: land for plan buildings (Sawmill, Workshop, Mines, Smelter) ...
-      landCashShare: 0.02,     // ... or up to this share of cash per acre, whichever is higher (money sitting still is wasted)
-      // CD booster (the plan's "build-and-demolish CD"): once the Workshop is unlocked, when a plan
-      // unlock waits only on CD and cash is idle, build cheap camps/farms and demolish them
-      // (+1 CD each, 50% base refunded). Starts with a 1-building probe; disabled for good if the
-      // CD isn't kept or the refund doesn't arrive (e.g. patched).
-      cdBooster: true,
-      boosterBatch: 10,       // buildings per build+demolish cycle (limited by free acres)
-      boosterFarmGapMs: 30000, // via CD Farm: wait this long after it stops before starting it again
-      boosterMinCash: 20000,   // $: only above this much cash
-      boosterKeepCash: 10000,  // $: never spend below this
-      boosterAcres: 5,         // acres kept free for it (bought once, reused)
-      woodReserve: 60,         // never sell below this (plus 10 min of what groups eat, kits and upcoming builds)
-      sellAll: true,           // auto-sell every item's full courier loads above its reserve (like auto-ship)
-      sellKeepMinutes: 30,     // keep this many minutes of what your groups eat of an item
-      neverSell: [],           // extra item ids never sold (Planks, Wooden/Iron Frames, data are never sold anyway)
-      smallLoadsUntil: 25,     // sell part loads until this many camps+farms exist
-      minSmallLoad: 20,
-      autoShipCotton: true,
-      buyKits: true,           // buy kit / prototype parts the corp can't make yet
-      maxBuyPrice: 3,          // × base value: most paid per unit for those parts
-      postBuyOrders: true,     // no seller at all → post a player buy order for the part ...
-      buyOrderMult: 1.5,       // ... at this many × the item's base value per unit (money is escrowed; one open order per item)
-      orderHoldHours: 24,      // never post another buy order for the same item within this time
-      saveForCritical: true,   // stop buying camps/farms while saving for a ready plan building
-      maxUnequippedCamps: 3,   // camps/farms waiting for their Wood kit before buying more
-      resumePaused: true,      // resume powered groups paused by an unpaid bill
-      floorUpgrades: true,     // switch tasks to the best-scoring known floorplan
-      floorBuyMult: 1.5,       // missing floorplan parts: fill player sell orders at up to this many × base value per unit,
-      // else post a buy order at this price (parts you don't make); 0 = never buy
+      ...planDefaults,         // the plan's targets and policy numbers
+      neverSell: [...planDefaults.neverSell],
       billHours: 1,            // cash floor = this many hours of power bills (min $100 once powered)
       maxActionsPerMin: 20,       // halved (down to a quarter) after an action the server doesn't apply
       intervalMs: 3000,
@@ -202,9 +186,9 @@ try {
     // dryRun and billHours are never remembered: every paste/reload starts as a dry run with 1 h of bills.
     const SESSION_ONLY = ['dryRun', 'billHours'];
     const persistable = () => Object.fromEntries(Object.entries(cfg).filter(([k]) => !SESSION_ONLY.includes(k)));
-    let saved = {};
-    try { saved = JSON.parse(store?.getItem(KEY) || '{}'); } catch { }
     for (const [k, v] of Object.entries(saved.cfg || {})) if (!SESSION_ONLY.includes(k) && k in cfg) cfg[k] = v === null ? Infinity : v; // JSON has no Infinity
+    cfg.plan = planOf(cfg.plan).id;   // a stored preset that no longer exists falls back to the first
+    tables();
     const userPaused = new Set(saved.userPaused || []);   // groups you paused: never resumed
     const billPaused = new Set(saved.billPaused || []);   // groups paused by an unpaid bill: resumed when cash allows
     const keptPaused = new Set(saved.keptPaused || []);   // earlyGame.keepPaused(id): never resumed, never cleared

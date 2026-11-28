@@ -14,15 +14,13 @@ try {
     const core = W.idleCore;
     if (!core) throw new Error('the shared core did not load');
     const HAS_DOM = typeof document !== 'undefined' && !!document.body;
-    const store = (() => { try { return W.localStorage ?? null; } catch { return null; } })();
-    const KEY = 'idc.keepOnline';
+    const saved = core.settings('idc.keepOnline');
     const TAG = 'KO';
     const GAP_LOG_MS = 30000;
     if (W.keepOnline?._unload) W.keepOnline._unload();
 
-    let saved = null;
-    try { saved = JSON.parse(store?.getItem(KEY) || 'null'); } catch { }
-    let on = typeof saved?.on === 'boolean' ? saved.on : true;
+    const s0 = saved.load();
+    let on = typeof s0?.on === 'boolean' ? s0.on : true;
 
     // Socket watch: the longest stretch without a new text frame, and how often the game replaced its socket.
     const watch = { count: -1, changedAt: Date.now(), longestGapMs: 0, ws: null, reconnects: 0, logged: false };
@@ -53,7 +51,7 @@ try {
 
     function set(v) {
       on = !!v;
-      try { store?.setItem(KEY, JSON.stringify({ on })); } catch { }
+      saved.save({ on });
       applySpoof(on);
       core.ledger.add(TAG, 'info', 'keep online ' + (on ? 'on: the game sees the tab as visible' : 'off: the tab reports its real visibility'));
       return on;

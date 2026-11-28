@@ -6,6 +6,11 @@
 // and wording; it does not build these controls itself. Nothing here touches the DOM until a builder is called.
 
 const fmt = (x) => Number(x).toLocaleString('en-US', { maximumFractionDigits: 2 });
+const num = (n) => Math.round(n).toLocaleString('en-US');
+// Region display names by region id (0 Heartland .. 3 Frontier) and the clamped whole-number setting parser the modules share.
+const REGION_NAMES = ['Heartland', 'Industrial Basin', 'Coastal Cities', 'Frontier'];
+const regionName = (r) => REGION_NAMES[r] ?? 'Region ' + r;
+const toInt = (v, min, max, dflt) => { const n = Math.floor(Number(v)); return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : dflt; };
 const short = (x) => (x >= 1e6 ? `${+(x / 1e6).toFixed(2)}M` : x >= 1e3 ? `${+(x / 1e3).toFixed(1)}k` : String(Math.round(x)));
 // "100k", "1.5m", "$100,000" -> whole number, or null when it is not an amount.
 function parseAmount(s) {
@@ -211,7 +216,7 @@ function resetSettings(name, { snapshot, reset, restore }) {
 
 const ui = {
   ensureStyle, ICONS, group, field, inputBox, createPanel, createChrome, createLogView, togglePanel, onDom,
-  fmt, short, parseAmount, setOn, setMsg, setTone,
+  fmt, num, short, parseAmount, setOn, setMsg, setTone,
   hero, rowList, stateLine, banner, disclosure,
   amountField, toggleField, segField, quickPicks, runModeSeg,
   settingsTab, planLine, footer, logTab, syncLog, resetSettings,

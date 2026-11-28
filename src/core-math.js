@@ -101,7 +101,10 @@ try {
   }
 
   // The engine target and land rule as data. state: acres, acrePrice, camps, sawmills, workshops, fixedAcres, fixedExtra (acres of the Retail Store / Assembly Plant not built yet, default 8), cyclesPerHour, cdBufferAcres.
+  // opts (a plan preset's land rule): wallCd (CD to the wall, default WALL_CD), batchType (the CD farm's building, default 'farm'), limitDivisor
+  // (an acre pays back within T_wall / this, default 3); plus cyclesPerHour, planksCap, cdPerHour.
   function landRule(state, catalog, opts = {}) {
+    const wallCd = opts.wallCd ?? WALL_CD, batchType = opts.batchType ?? 'farm', div = opts.limitDivisor ?? 3;
     const m = engineModel(catalog);
     const st = state;
     const cycles = opts.cyclesPerHour ?? st.cyclesPerHour ?? 600;
@@ -110,11 +113,11 @@ try {
     let E = Math.min(150, Ecap), rule = null;
     for (let it = 0; it < 40; it++) {
       const planks = m.planksFor(E), income = planks * m.perPlank;
-      const b = bestBatch('farm', 0, income, cycles), tWall = WALL_CD / (opts.cdPerHour > 0 ? opts.cdPerHour : b.cdH);
+      const b = bestBatch(batchType, 0, income, cycles), tWall = wallCd / (opts.cdPerHour > 0 ? opts.cdPerHour : b.cdH);
       let price = st.acrePrice, last = st.acres;
       const rev = planks * m.perPlank / (E - 4);   // marginal furniture acre: reserve Workshops (Frame Timber, Rivet) excluded
       for (let a = st.acres; a < 360; a++) {
-        if ((price + BLD_ACRE) / rev <= tWall / 3) last = a + 1; else break;
+        if ((price + BLD_ACRE) / rev <= tWall / div) last = a + 1; else break;
         price = Math.floor(price * 100 * 41 / 40) / 100;
       }
       rule = { planks, income, b, tWall, last };
@@ -134,7 +137,7 @@ try {
     return {
       fixedAcres: fixed, bufferAcres: buffer,
       income: rule.income, batch: rule.b.k, perCd: rule.b.perCd, cdPerHour: rule.b.cdH,
-      tWall: rule.tWall, limitHours: rule.tWall / 3, tWallFrom: opts.cdPerHour > 0 ? 'measured' : 'model',
+      tWall: rule.tWall, limitHours: rule.tWall / div, tWallFrom: opts.cdPerHour > 0 ? 'measured' : 'model',
       lastAcre: rule.last, acresToBuy: Math.max(0, rule.last - st.acres), landCost,
       targetAcres: acreN, engineAcres: E, planksH: planks, camps, sawmills: saws,
       workshops: { bookshelf: ws[0], table: ws[1], chair: ws[2], frameTimber: 1, rivet: 1, total: wsTotal },

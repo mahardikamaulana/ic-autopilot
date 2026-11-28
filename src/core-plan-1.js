@@ -34,28 +34,20 @@ try {
     const P = core.planner, M = core.coreMath;
     const REGION = 0, MONEY = 0, CD = 24, STARTER_ACRES = 25, FIRST_ACRE = 5000, ACRE_CAP = 360;   // FIRST_ACRE in cents
 
+    // The plan is the preset's `core` part (core.plans, src/core-plans.js): stages, start/end conditions, unlocks, land, director order and
+    // the plan's settings. shortcut: read once at load; another preset in the Autopilot panel applies to Core plan after a reload.
+    const PLAN = core.plans.current().core;
     const DEFAULTS = {
       dryRun: false,
       intervalMs: 5000, confirmMs: 8000, maxFails: 3, cmdsPerMin: 20,
-      landPaybackAB: 20,            // Stage A-B: buy an acre + Cotton Farm while payback <= this many hours (wiki 4.6)
-      cottonFarmHourly: 790,        // dollars per hour one Cotton Farm earns (wiki 4.6); fallback when no live Cotton bid prices it
-      landPaybackFraction: 1 / 3,   // Stage C-D: payback <= T_wall x this
-      cashReserve: 0,               // cents kept on top of the other modules' money floors
-      ifReserve: 44,                // upper cap on the Iron Frames kept back for the prototypes and first builds (ifNeed counts what is still needed)
-      bufferAcres: 2,               // acres kept free for the CD farm: one building being built + one waiting for demolition (my-plan.js cdBufferAcres)
-      cyclesPerHour: 600,           // the CD rate the land rule assumes until a measured one exists
-      handoff: true,                // at Plan done: engine items to Autopilot's neverSell, its CD booster off
-      handoffStopAutopilot: true,   // ... then stop Autopilot once (Core plan resumes bill-paused groups); a user restart is left alone
-      unlocks: true, land: true,    // the two directors that send
+      ...core.plans.copy(PLAN.defaults),   // the plan's rules (land payback, reserves, hand-off, the unlock and land steps)
       liveResume: true,             // after a reload Live resumes (60 s countdown); off = it comes back as a dry run
       resumeSeconds: 60,
     };
     const SESSION_ONLY = ['dryRun'];
     const cfg = { ...DEFAULTS };
-    const ENGINE_ITEMS = ['Wood', 'Planks', 'Iron Sheet', 'Concrete', 'Glass', 'Bookshelf', 'Table', 'Chair', 'Bench', 'Wooden Frame', 'Iron Frame',
-      'Iron Ore', 'Coal', 'Limestone', 'Sand', 'Copper Ore', 'Copper Wire', 'Wired Frame'];   // cp-cadence NEVER plus the ores the kits use
-    const UNLOCKS = ['Assembly Plant', 'Retail Store', 'Oil Rig'];   // in this order (wiki 9)
-    const S2_NEEDS = ['Mine', 'Quarry', 'Sawmill', 'Smelter', 'Workshop', 'Kiln', 'Manufacturing Lab'];   // Factory and Paper Mill are not on the plan's path
+    const ENGINE_ITEMS = PLAN.engineItems;
+    const UNLOCKS = PLAN.unlocks;   // in this order
     const REFINERY_CD = 500000;   // fallback when the tech tree lacks it (wiki data/tech-tree.md, 2026-11-24 patch); ladder and endgame share it
 
     // ---- ids by name (the client catalog array is not indexed by id) ------------------------------------------------------

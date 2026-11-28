@@ -17,7 +17,6 @@ try {
     const core = W.idleCore;
     if (!core) throw new Error('the shared core did not load');
     const HAS_DOM = typeof document !== 'undefined' && !!document.body;
-    const store = (() => { try { return W.localStorage ?? null; } catch { return null; } })();
     const KEY = 'idc.moduleWatch', TAG = 'MW', BOARD = 'ModuleListings';
     const ROTATE_MS = 20000, TICK_MS = 2000, MAX_WATCHES = 8, SEEN_MAX = 1000;
     if (W.moduleWatch?._unload) W.moduleWatch._unload();
@@ -92,8 +91,7 @@ try {
     // ---- saved watches ---------------------------------------------------------------------------------------------------
     let watches = [], nextId = 1, seen = [], seenSet = new Set();
     function restore() {
-      let o = null;
-      try { o = JSON.parse(store?.getItem(KEY) || 'null'); } catch { }
+      const o = core.settings(KEY).load();
       watches = [];
       for (const w of Array.isArray(o?.watches) ? o.watches : []) {
         const p = parse(w?.q);
@@ -105,7 +103,7 @@ try {
       seenSet = new Set(seen);
     }
     function save() {
-      try { store?.setItem(KEY, JSON.stringify({ watches: watches.map(({ id, q, on }) => ({ id, q, on })), nextId, seen })); } catch { }
+      core.settings(KEY).save({ watches: watches.map(({ id, q, on }) => ({ id, q, on })), nextId, seen });
     }
     function markSeen(key) {
       seen.push(key); seenSet.add(key);

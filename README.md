@@ -1,6 +1,6 @@
 # IC Autopilot
 
-Userscript for [idlecorp.net](https://idlecorp.net/): an early-game Autopilot, CD Farm, Lab runner, Auto ship (with estimated and actual profit), Auto withdraw and Auto utilities (power and water subscriptions that follow the load), each with a panel, menu or switch in the game UI.
+Userscript for [idlecorp.net](https://idlecorp.net/): an Autopilot that plays a plan preset (today one, **Xeraphire Plan**: the early game, then the core game up to the endgame gate, picked under Settings > Plan), CD Farm, Lab runner, Auto ship (with estimated and actual profit), Auto withdraw and Auto utilities (power and water subscriptions that follow the load), each with a panel, menu or switch in the game UI.
 
 ## Install (and auto-update)
 
@@ -15,7 +15,7 @@ If you ran an older copy of this toolkit (including the separate `cd-farm` and `
 | Path | What |
 |---|---|
 | `ic-autopilot.user.js` | **Built file, committed.** This is what auto-update downloads. Never edit it by hand. |
-| `src/` | The sources: `header.js` (metadata, version), `core-*.js`, `cd-farm-*.js`, `lab-*.js`, `autosell-*.js`, `autowithdraw.js`, `utilities.js`, `core-plan-*.js`, `cp-buildout-*.js`, `cp-cadence-*.js`, `autopilot-*.js` (a module split into numbered fragments continues the same closure) |
+| `src/` | The sources: `header.js` (metadata, version), `core-*.js` (with `core-plans.js`: the plan presets and the shared condition library), `cd-farm-*.js`, `lab-*.js`, `autosell-*.js`, `autowithdraw.js`, `utilities.js`, `core-plan-*.js`, `cp-buildout-*.js`, `cp-cadence-*.js`, `autopilot-*.js` (a module split into numbered fragments continues the same closure) |
 | `build.js` | Joins `src/` into the userscript |
 | `test/` | Offline sim, headless tests, browser UI harness, saved game board used by them |
 
@@ -47,7 +47,12 @@ bun build.js --check             # fails if the built file is out of date
 bun test/toolkit-test.js         # headless checks (core, Lab, Auto ship, Auto utilities, Autopilot guards)
 bun test/early-game-sim.js all 44   # offline early-game simulation, every scenario
 bun test/ui-harness.js check     # browser checks (Playwright + local Chrome; set PLAYWRIGHT_PATH / CHROME_PATH if needed)
+IC_BASE=<old ic-autopilot.user.js> bun test/drift.js   # diffs every decision of two builds (sims, Core plan runs, defaults): a refactor that should change nothing
 ```
+
+## Plan presets
+
+A plan is data, in `src/core-plans.js`: what to unlock, build, assign and sell, in what order, with which numbers and conditions. Autopilot plays a preset's `early` part (unlock order, phases, plan-done condition, target rows, assignment, its ordered rule list, sell and booster settings, defaults). Core plan plays its `core` part (start conditions, stages, end conditions, unlocks, land rule, director order, director settings and tables). Both evaluate conditions with one library (`core.plans.check`). A new plan is one more entry in `PLAN_LIST`; it shows up under Settings > Plan. Today there is one, **Xeraphire Plan**. A preset change applies fully after a reload.
 
 The tests and the sim read the built file, so build first.
 

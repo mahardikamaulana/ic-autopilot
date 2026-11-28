@@ -1,41 +1,61 @@
 // continues the core-plan closure from core-plan-1.js (same try / IIFE)
   // ---- start and end conditions, stage ----------------------------------------------------------------------------------------
   const cond = (id, ok, why) => ({ id, ok, why });
-  function startConditions(v, ctx) {
-    const miss2 = S2_NEEDS.filter((n) => !v.unlocked(n));
-    const s2 = cond('S2', !miss2.length, miss2.length ? 'not unlocked: ' + miss2.join(', ') : 'all unlocked');
-    const need3 = [['Smelter', 'Roll Iron Sheet'], ['Workshop', 'Assemble Iron Frame'], ['Workshop', 'Assemble Wooden Frame']].filter(([b, r]) => !v.running(b, r));
-    const ifs = v.has('Iron Frame');
-    const s3 = cond('S3', !need3.length && ifs >= 16, need3.length ? 'not running: ' + need3.map(([b, r]) => b + ' on ' + r).join(', ') : ifs < 16 ? 'Iron Frame stock ' + ifs + ' < 16' : 'running, Iron Frames ' + ifs);
-    const lab = v.owned('Manufacturing Lab'), kiln = v.owned('Kiln'), mine = v.owned('Mine'), quarry = v.owned('Quarry');
-    const s4 = cond('S4', lab >= 1 && kiln >= 1 && mine >= 1 && quarry >= 1, lab >= 1 && kiln >= 1 && mine >= 1 && quarry >= 1 ? 'built' : 'missing: ' + [['Manufacturing Lab', lab], ['Kiln', kiln], ['Mine', mine], ['Quarry', quarry]].filter(([, n]) => n < 1).map(([n]) => n).join(', '));
-    const s1 = cond('S1', ctx.planDone === true || (s2.ok && s3.ok && s4.ok), ctx.planDone === true ? 'Autopilot: Plan done' : (s2.ok && s3.ok && s4.ok) ? 'S2-S4 hold' : 'Autopilot has not finished the Early-Game Plan, and S2-S4 do not all hold');
-    // Autopilot's Plan done stands for S2-S4: a corp that finished the early plan its own way still starts Stage A.
-    // Plan done implies a running Rivet group (Core plan never builds one); without it S3 still fails, or the prototype's Iron Frames never come.
-    const rivet = v.running('Workshop', 'Assemble Iron Frame');
-    if (ctx.planDone === true) for (const c of [s2, s3, s4]) if (!c.ok && (c !== s3 || rivet)) { c.ok = true; c.why = 'Autopilot: Plan done (' + c.why + ')'; }
-    const s5 = cond('S5', !v.unlocked('Assembly Plant'), v.unlocked('Assembly Plant') ? 'Assembly Plant is already unlocked (join at stage B or later)' : 'not unlocked yet');
-    const c10 = ctx.cashDelta10;
-    const s6 = cond('S6', c10 == null ? null : c10 > 0, c10 == null ? 'not enough cash samples yet (needs 10 min)' : 'money ' + (c10 > 0 ? 'rose ' : 'fell ') + usd(Math.abs(c10)) + ' over 10 min');
-    const s7 = !v.dealsLoaded ? cond('S7', null, 'market board not loaded (open the Market page once)')
-      : cond('S7', v.cottonBid, v.cottonBid ? 'Cotton bid in Heartland' : 'no Cotton bid in Heartland');
-    return [s1, s2, s3, s4, s5, s6, s7];
+  // The plan's conditions (core.plans specs) against a view: the shared types plus Core plan's own (CP_TYPES), which read ctx, the land rule
+  // and the start conditions.
+  function planView(v, ctx, rule = null, S = null) {
+    return {
+      unlocked: (n) => v.unlocked(n), owned: (n) => v.owned(n), running: (b, r) => v.running(b, r), has: (n) => v.has(n),
+      researching: (n) => { const b = v.idB(n); return b != null && (v.research?.building === b || (v.st.research_queue ?? []).some((q) => q?.building === b)); },
+      get acresUsed() { return v.acresUsed; },
+      types: CP_TYPES, v, ctx, rule, S,
+    };
   }
-  function stageOf(v, S) {
-    if (v.owned('Retail Store') >= 1) return 'D';
-    if (v.unlocked('Assembly Plant')) return 'C';
-    const ap = v.idB('Assembly Plant');
-    if (ap != null && (v.research?.building === ap || (v.st.research_queue ?? []).some((q) => q?.building === ap))) return 'B';
+  const CP_TYPES = {
+    // S6: money rose over 10 min; unknown (null) with too few cash samples
+    cashRising: (c, { ctx }) => { const c10 = ctx.cashDelta10; return [c10 == null ? null : c10 > 0, c10 == null ? 'not enough cash samples yet (needs 10 min)' : 'money ' + (c10 > 0 ? 'rose ' : 'fell ') + usd(Math.abs(c10)) + ' over 10 min']; },
+    // S7: a Cotton bid in Heartland; unknown (null) while the market board is not loaded
+    cottonBid: (c, { v }) => (!v.dealsLoaded ? [null, 'market board not loaded (open the Market page once)'] : [v.cottonBid, v.cottonBid ? 'Cotton bid in Heartland' : 'no Cotton bid in Heartland']),
+    // Stage A: every start condition but `ignore` is not false (`strict` ones exactly true), and `gate` holds.
     // S6 unknown (too few cash samples) does not block; S7 unknown (Market never opened) does: a Cotton bid must be seen.
-    const ok = S.filter((c) => c.id !== 'S5').every((c) => (c.id === 'S7' ? c.ok === true : c.ok !== false));
-    return ok && S[0].ok ? 'A' : null;
+    startOk: (c, { S }) => { const ok = S.filter((x) => !c.ignore.includes(x.id)).every((x) => (c.strict.includes(x.id) ? x.ok === true : x.ok !== false)); return [ok && S.find((x) => x.id === c.gate).ok, '']; },
+    // E1: a Retail Store sells hoursText in a row with the checkpoint rows passing
+    retailSelling: (c, { v, ctx }) => { const retail = v.owned('Retail Store') >= 1; return [retail && ctx.retailE1 === true, !retail ? 'Retail Store not built' : ctx.retailE1 === true ? 'selling ' + c.hoursText + ' in a row with the checkpoint rows passing' : ctx.retailOk === true ? 'checkpoint passed, not yet ' + c.hoursText + ' in a row' : ctx.retailOk === false ? 'retail checkpoint failed' : 'retail checkpoint not decided yet']; },
+    cdFarmCycle: (c, { v, ctx }) => e3Of(v, ctx, c),
+    // E4: the land rule is closed and its acres built (C4: T_wall from the measured CD rate when CD Farm has one, else the model)
+    landDone: (c, { v, rule }) => {
+      if (!rule) return [false, 'land rule unavailable'];
+      const tw = ' (T_wall ' + rule.tWall.toFixed(1) + ' h from the ' + rule.tWallFrom + ' CD rate)';
+      return [v.acresOwned >= rule.lastAcre && v.freeAcres <= cfg.bufferAcres, (v.acresOwned < rule.lastAcre ? v.acresOwned + ' acres, rule closes at #' + rule.lastAcre : v.freeAcres > cfg.bufferAcres ? v.freeAcres + ' free acres, buffer ' + cfg.bufferAcres : 'rule closed, acres built') + tw];
+    },
+    cashInHand: (c, { v, ctx, rule }) => (rule ? e5Of(v, rule, ctx, c) : [false, 'land rule unavailable']),
+  };
+  // Start conditions (the preset's start list). A covers entry (S1) is worked out after the others: it holds at Plan done or when they hold,
+  // and at Plan done they count as held too ("Autopilot: Plan done (...)"), except a keep entry whose recipe is not running.
+  // Autopilot's Plan done stands for S2-S4: a corp that finished the early plan its own way still starts Stage A.
+  function startConditions(v, ctx) {
+    const a = planView(v, ctx);
+    const S = PLAN.start.map((c) => (c.covers ? null : cond(c.id, ...core.plans.check(c, a))));
+    PLAN.start.forEach((c, i) => {
+      if (!c.covers) return;
+      const cov = S.filter((x) => x && c.covers.includes(x.id)), all = cov.every((x) => x.ok), done = ctx.planDone === true;
+      S[i] = cond(c.id, done || all, done ? c.doneWhy : all ? c.okWhy : c.noWhy);
+      if (done) for (const x of cov) if (!x.ok && (!c.keep?.[x.id] || v.running(...c.keep[x.id]))) { x.ok = true; x.why = c.doneWhy + ' (' + x.why + ')'; }
+    });
+    return S;
+  }
+  // The stage: the last of the preset's stages whose condition holds; null when none does.
+  function stageOf(v, S, ctx) {
+    const a = planView(v, ctx, null, S), st = PLAN.stages;
+    for (let i = st.length - 1; i >= 0; i--) if (core.plans.check(st[i].when, a)[0]) return st[i].id;
+    return null;
   }
   function landInput(v, ctx) {
     const o = (n) => v.owned(n);
     return { acres: v.acresOwned, acrePrice: v.nextAcreCents / 100, camps: o('Lumber Camp'), farms: o('Farm'), sawmills: o('Sawmill'), workshops: o('Workshop'),
       docks: 0, pastures: 0, fixedAcres: v.fixedAcres,
       // v.fixedAcres already holds a built Retail Store (3 acres) and Assembly Plant (5): only the unbuilt ones are extra
-      fixedExtra: (v.owned('Retail Store') ? 0 : 3) + (v.owned('Assembly Plant') ? 0 : 5), cyclesPerHour: ctx.cyclesPerHour ?? cfg.cyclesPerHour, cdBufferAcres: cfg.bufferAcres };
+      fixedExtra: PLAN.landRule.later.reduce((n, [b, a]) => n + (v.owned(b) ? 0 : a), 0), cyclesPerHour: ctx.cyclesPerHour ?? cfg.cyclesPerHour, cdBufferAcres: cfg.bufferAcres };
   }
   // Iron Frames (or `item`) the three unlocks still need (wiki 9): the prototype until its research starts, the first build until the building
   // stands. `except` is the building being bought now: its own first build is not kept back from itself.
@@ -56,57 +76,50 @@
   // E3 (plan C3): 0 Farms, Wooden Frames < 20, CD Farm on Auto with its batch within 1 of core-math bestBatch('farm', 0) at the measured
   // income and cycles (what the ladder tunes it to), and a Farm-only plan. Retail fail path: the Farms stay on Cotton (wiki 4.7), so Auto on,
   // frames at most the keep line + 20 (one free courier load) and the same batch check for the plan CD Farm runs.
-  function e3Of(v, ctx) {
+  function e3Of(v, ctx, c) {
     const fail = !!ctx.retailFailPath, pre = fail ? 'fail path: ' : '';
-    const no = (why) => cond('E3', false, pre + why);
+    const no = (why) => [false, pre + why];
+    const B = c.building, FR = c.frames, below = c.framesBelow, slack = c.failSlack;
     const lad = ctx.ladder ?? {}, fc = ctx.mods?.cdFarm?.cfg;
     const held = (n) => lad.held?.[v.idB(n)] ?? 0;   // units a CD Farm run holds mid-cycle are its own, not owned ones
-    const farms = v.owned('Farm') - held('Farm'), wf = v.has('Wooden Frame');
-    if (!fail && farms > 0) return no(farms + ' Farms owned');
-    if (!fail && wf >= 20) return no('Wooden Frame stock ' + wf + ' >= 20');
+    const farms = v.owned(B) - held(B), wf = v.has(FR);
+    if (!fail && farms > 0) return no(farms + ' ' + B + 's owned');
+    if (!fail && wf >= below) return no(FR + ' stock ' + wf + ' >= ' + below);
     let keep = null;
     if (fail) {
       try { keep = W.corePlan._buildout?.wfKeep?.(v, ctx) ?? null; } catch {}
-      if (keep == null) return no('Wooden Frame keep line unknown (build-out director not loaded)');
-      if (wf > keep + 20) return no('Wooden Frame stock ' + wf + ' > keep line ' + keep + ' + 20');
+      if (keep == null) return no(FR + ' keep line unknown (build-out director not loaded)');
+      if (wf > keep + slack) return no(FR + ' stock ' + wf + ' > keep line ' + keep + ' + ' + slack);
     }
     if (!fc) return no('CD Farm is not loaded');
     if (fc.building !== 'auto') return no('CD Farm Building is ' + fc.building + ', not Auto');
     if (fail && !fc.autoStart) return no('CD Farm Auto is off');
     const units = lad.plan?.units ?? [];
     if (!units.length) return no('CD Farm plan not measured yet');
-    if (!fail && !units.every((u) => u.b === v.idB('Farm'))) return no('CD Farm plan is ' + units.map((u) => u.n + ' ' + u.name).join(' + ') + ', not Farm-only');
+    if (!fail && !units.every((u) => u.b === v.idB(B))) return no('CD Farm plan is ' + units.map((u) => u.n + ' ' + u.name).join(' + ') + ', not ' + B + '-only');
     const income = lad.income > 0 ? lad.income / 100 : null, cycles = lad.rates?.cyclesh15 > 0 ? lad.rates.cyclesh15 : null;   // CD Farm measures cents/h
     if (!income || !cycles) return no('batch not measured yet (no ' + [!income && 'income', !cycles && 'cycles per hour'].filter(Boolean).join(' or ') + ')');
-    const best = M.bestBatch('farm', 0, income, cycles).k;
-    if (!(Math.abs(fc.batch - best) <= 1)) return no('CD Farm batch ' + fc.batch + ', measured best ' + best + ' (within 1)');
-    return cond('E3', true, pre + (fail ? 'Auto on, frames ' + wf + ' <= keep line ' + keep + ' + 20, ' + units.map((u) => u.n + ' ' + u.name).join(' + ') + ' plan' : '0 Farms, frames ' + wf + ', Farm-only plan') + ', batch ' + fc.batch + ' (measured best ' + best + ')');
+    const best = M.bestBatch(c.batchType, 0, income, cycles).k;
+    if (!(Math.abs(fc.batch - best) <= c.batchWithin)) return no('CD Farm batch ' + fc.batch + ', measured best ' + best + ' (within ' + c.batchWithin + ')');
+    return [true, pre + (fail ? 'Auto on, frames ' + wf + ' <= keep line ' + keep + ' + ' + slack + ', ' + units.map((u) => u.n + ' ' + u.name).join(' + ') + ' plan' : '0 ' + B + 's, frames ' + wf + ', ' + B + '-only plan') + ', batch ' + fc.batch + ' (measured best ' + best + ')'];
   }
   // E5 (plan C5): money >= 3 h of net income (cash trend over 60 min + CD Farm's spend in it), and nothing left to buy that pays back inside
   // T_wall/3: the land rule's acres and blocks plus what directors report (ctx.pendingInvest). Net income <= 0 does not pass.
-  function e5Of(v, rule, ctx) {
-    const inc = ctx.netIncomeH;   // cents per hour
-    if (inc == null) return cond('E5', false, 'income not measured yet (needs 60 min of cash samples)');
-    if (!(inc > 0)) return cond('E5', false, 'net income ' + usd(inc) + '/h is not positive');
-    if (v.money < inc * 3) return cond('E5', false, 'money ' + usd(v.money) + ' < 3 h of net income ' + usd(inc * 3));
+  function e5Of(v, rule, ctx, c) {
+    const inc = ctx.netIncomeH, h = c.hours;   // cents per hour
+    if (inc == null) return [false, 'income not measured yet (needs 60 min of cash samples)'];
+    if (!(inc > 0)) return [false, 'net income ' + usd(inc) + '/h is not positive'];
+    if (v.money < inc * h) return [false, 'money ' + usd(v.money) + ' < ' + h + ' h of net income ' + usd(inc * h)];
     const left = rule.acresToBuy ? [rule.acresToBuy + ' acres'] : [];
     for (const [k, n] of [['camps', 'Camps'], ['sawmills', 'Sawmills'], ['workshops', 'Workshops']]) if (rule.need[k]) left.push(rule.need[k] + ' ' + n);
     for (const p of ctx.pendingInvest ?? []) if (!(p.paybackH > rule.limitHours)) left.push(p.what);
-    if (left.length) return cond('E5', false, 'still to buy: ' + left.join(', '));
-    return cond('E5', true, 'money ' + usd(v.money) + ' >= 3 h of net income ' + usd(inc * 3) + ', nothing left to buy');
+    if (left.length) return [false, 'still to buy: ' + left.join(', ')];
+    return [true, 'money ' + usd(v.money) + ' >= ' + h + ' h of net income ' + usd(inc * h) + ', nothing left to buy'];
   }
+  // End conditions (the preset's end list), in order.
   function endConditions(v, rule, ctx) {
-    const retail = v.owned('Retail Store') >= 1;
-    const e1 = cond('E1', retail && ctx.retailE1 === true, !retail ? 'Retail Store not built' : ctx.retailE1 === true ? 'selling 6 h in a row with the checkpoint rows passing' : ctx.retailOk === true ? 'checkpoint passed, not yet 6 h in a row' : ctx.retailOk === false ? 'retail checkpoint failed' : 'retail checkpoint not decided yet');
-    const miss = UNLOCKS.filter((n) => !v.unlocked(n));
-    const e2 = cond('E2', !miss.length, miss.length ? 'not unlocked: ' + miss.join(', ') : 'Assembly Plant, Retail Store and Oil Rig unlocked');
-    const e3 = e3Of(v, ctx);
-    // C4: T_wall from the measured CD rate when CD Farm has one, else the model (the readout says which)
-    const tw = rule ? ' (T_wall ' + rule.tWall.toFixed(1) + ' h from the ' + rule.tWallFrom + ' CD rate)' : '';
-    const e4 = rule ? cond('E4', v.acresOwned >= rule.lastAcre && v.freeAcres <= cfg.bufferAcres, (v.acresOwned < rule.lastAcre ? v.acresOwned + ' acres, rule closes at #' + rule.lastAcre : v.freeAcres > cfg.bufferAcres ? v.freeAcres + ' free acres, buffer ' + cfg.bufferAcres : 'rule closed, acres built') + tw)
-      : cond('E4', false, 'land rule unavailable');
-    const e5 = rule ? e5Of(v, rule, ctx) : cond('E5', false, 'land rule unavailable');
-    return [e1, e2, e3, e4, e5];
+    const a = planView(v, ctx, rule);
+    return PLAN.end.map((c) => cond(c.id, ...core.plans.check(c, a)));
   }
 
   // ---- directors ------------------------------------------------------------------------------------------------------------------------
@@ -125,7 +138,7 @@
   function unlockAction(v, ctx, nx) {
     if (!nx) return { wait: 'all three unlocks are in' };
     const why = 'unlock ' + nx.name;
-    if (nx.name === 'Oil Rig' && ctx.retailOk !== true) return { wait: why + ': waits for the retail checkpoint' + (ctx.retailOk === false ? (ctx.retailFail ? ' (failed: a new run measures the capped output)' : ' (failed with no unsold stock, so no cap: a new run checks again)') : '') };   // only on a pass, of either run (plan D-2)
+    if (PLAN.unlockGates?.[nx.name] === 'retailCheckpoint' && ctx.retailOk !== true) return { wait: why + ': waits for the retail checkpoint' + (ctx.retailOk === false ? (ctx.retailFail ? ' (failed: a new run measures the capped output)' : ' (failed with no unsold stock, so no cap: a new run checks again)') : '') };   // only on a pass, of either run (plan D-2)
     if (ctx.apNextTech) return { wait: why + ': Autopilot still owns "' + ctx.apNextTech.name + '"' };
     if (!nx.prereqsMet) return { wait: why + ': ' + nx.note };
     if (v.research) return { wait: why + ': research slot busy' };
@@ -146,7 +159,7 @@
   // Stage A-B land: an acre plus a Cotton Farm while (acre + Farm) / hourly income <= cfg.landPaybackAB; one purchase per call.
   // block: why another use of the cash goes first (B1, B2).
   function landAction(v, stage, floorCents, block) {
-    if (stage !== 'A' && stage !== 'B') return { wait: 'land: stage ' + stage + ' land is bought by the buildout director with its blocks' };
+    if (!PLAN.land.stages.includes(stage)) return { wait: 'land: stage ' + stage + ' land is bought by the buildout director with its blocks' };
     if (block) return { wait: 'land: ' + block };
     if (!v.cottonGroup) return { wait: 'land: no running Cotton Farm group to add to' };
     if (v.acresOwned >= ACRE_CAP) return { wait: 'land: Heartland cap (' + ACRE_CAP + ' acres)' };
@@ -207,8 +220,10 @@
     if (!d?.name || typeof d.decide !== 'function') throw new Error('addDirector: name and decide() are required');
     const i = directors.findIndex((x) => x.name === d.name);
     if (i >= 0) directors.splice(i, 1);
-    directors.push(d); directors.sort((a, b) => (a.order ?? 50) - (b.order ?? 50));
-    for (const [k, val] of Object.entries({ ['dir_' + d.name]: true, ...(d.defaults ?? {}) })) { if (!(k in DEFAULTS)) { DEFAULTS[k] = val; cfg[k] = val; } }
+    // The preset orders its directors and says which start off; a director it does not name runs at its own order (default 50), on.
+    const ord = (x) => PLAN.directors?.[x.name]?.order ?? x.order ?? 50;
+    directors.push(d); directors.sort((a, b) => ord(a) - ord(b));
+    for (const [k, val] of Object.entries({ ['dir_' + d.name]: PLAN.directors?.[d.name]?.on ?? true, ...(d.defaults ?? {}) })) { if (!(k in DEFAULTS)) { DEFAULTS[k] = val; cfg[k] = val; } }
     restore();
     return () => { const j = directors.indexOf(d); if (j >= 0) directors.splice(j, 1); };
   }
@@ -216,7 +231,7 @@
   // The whole decision, from a view: stage, S/E conditions, the land rule, what to send next (first action) and what it is waiting for.
   function decide(v, ctx = {}) {
     const S = startConditions(v, ctx);
-    const stage = stageOf(v, S);
+    const stage = stageOf(v, S, ctx);
     for (const dir of directors) { try { dir.context?.(v, ctx, stage); } catch (e) { console.error('[corePlan] ' + dir.name + '.context', e); } }
     // After the directors' context: a failed retail checkpoint (ctx.retailFail) caps the planks at the furniture blocks sales carry (plan A2).
     let rule = null;
@@ -225,7 +240,7 @@
       const caps = [ctx.retail?.demandPlanksH > 0 ? ctx.retail.demandPlanksH : null, ctx.retailFail && typeof ctx.retailCap === 'number' ? ctx.retailCap / M.engineModel(v.C).wsPerPlank : null].filter((x) => typeof x === 'number');
       const planksCap = caps.length ? Math.min(...caps) : undefined;
       // C4: the measured CD rate sets T_wall once CD Farm has measured 30 min (landCdRate); the model before
-      rule = M.landRule(landInput(v, ctx), v.C, { cyclesPerHour: ctx.cyclesPerHour ?? cfg.cyclesPerHour, planksCap, cdPerHour: landCdRate(ctx) ?? undefined });
+      rule = M.landRule(landInput(v, ctx), v.C, { wallCd: PLAN.landRule.wallCd, batchType: PLAN.landRule.batchType, limitDivisor: PLAN.landRule.limitDivisor, cyclesPerHour: ctx.cyclesPerHour ?? cfg.cyclesPerHour, planksCap, cdPerHour: landCdRate(ctx) ?? undefined });
     } catch (e) { console.error(e); }
     ctx.pendingInvest = [];
     for (const dir of directors) {
@@ -237,7 +252,7 @@
     if (out.finished) out.stage = 'END';
     if (!stage) { out.waits.push('stage: start conditions do not hold (' + S.filter((c) => c.ok === false).map((c) => c.id + ': ' + c.why).join('; ') + ')'); return decideDirectors(v, ctx, out, true); }
     out.nextUnlock = nextUnlock(v);
-    out._ifId = v.idI('Iron Frame'); out._ifNeed = ifNeed(v); out._wfId = v.idI('Wooden Frame'); out._plId = v.idI('Planks');
+    out._ifId = v.idI('Iron Frame'); out._ifNeed = ifNeed(v); out._wfId = v.idI('Wooden Frame'); out._keepIds = PLAN.reserve.items.map((n) => v.idI(n));
     out._failPath = !!ctx.retailFailPath;
     try { out._wfKeep = W.corePlan._buildout?.wfKeep?.(v, ctx) ?? null; } catch { out._wfKeep = null; }   // null: the reserve keeps every frame
     const ho = ctx.planDone === true ? handoffAction(v, ctx) : null;
@@ -247,9 +262,9 @@
     if (cfg.unlocks) { if (u.action) out.actions.push(u.action); else out.waits.push(u.wait); }
     let block = null;
     // B2 (wiki 11.1): Stage A, the next unlock waits on CD alone (it would start with the CD in hand): no cash into Cotton Farms
-    if (stage === 'A' && !u.action && out.nextUnlock && unlockAction({ ...v, cd: Infinity }, ctx, out.nextUnlock).action) block = 'CD is the bottleneck: cash goes to the CD farm';
+    if (stage === PLAN.land.cdBlock && !u.action && out.nextUnlock && unlockAction({ ...v, cd: Infinity }, ctx, out.nextUnlock).action) block = 'CD is the bottleneck: cash goes to the CD farm';
     // B1 (plan D-1): Stage B, a block buildout can buy now, or is saving cash for, goes before an acre + Cotton Farm
-    if (stage === 'B' && cfg.dir_buildout !== false && W.corePlan._buildout?.nextBuildStep) {
+    if (stage === PLAN.land.buildoutBlock && cfg.dir_buildout !== false && W.corePlan._buildout?.nextBuildStep) {
       try { const nb = W.corePlan._buildout.nextBuildStep(v, ctx, rule, stage); if (nb?.pick) block = 'build-out goes first (' + nb.why + ')'; else if (nb?.saving) block = 'build-out is saving for ' + nb.saving; } catch (e) { console.error('[corePlan] buildout.nextBuildStep', e); }
     }
     if (cfg.land) { const l = landAction(v, stage, ctx.floorCents ?? 0, block); if (l.action) out.actions.push(l.action); else out.waits.push(l.wait); }

@@ -30,6 +30,7 @@ function setup({ storedOn } = {}) {
   if (storedOn !== undefined) disk['idc.keepOnline'] = JSON.stringify({ on: storedOn });
   globalThis.localStorage = { getItem: (k) => disk[k] ?? null, setItem: (k, v) => { disk[k] = String(v); }, removeItem: (k) => { delete disk[k]; } };
   globalThis.idleCore = {
+    settings: (k) => ({ load: () => JSON.parse(disk[k] ?? 'null'), save: (v) => { disk[k] = JSON.stringify(v); } }),
     sock: { textMsgs: 0, ws: null },
     every: () => () => { },
     link: () => ({ state: 'open' }),

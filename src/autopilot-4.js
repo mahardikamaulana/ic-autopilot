@@ -288,6 +288,7 @@
       const f = FIELDS[k];
       const ok = k in cfg && !SESSION_ONLY.includes(k) && typeof v === typeof cfg[k] && Array.isArray(v) === Array.isArray(cfg[k])
         && (typeof v !== 'number' || Number.isNaN(v) === false)
+        && (k !== 'plan' || core.plans.has(v))
         && !(f && ((f.min != null && v < f.min) || (f.max != null && v > f.max)));
       if (ok) { cfg[k] = v; applied.push(k); } else skipped.push(k);
     }
@@ -376,14 +377,7 @@
       ['Power', powerText(s)],
       ['Lumber Camps / Farms', `${s.owned(B.CAMP)} / ${s.owned(B.FARM)}`],
       ...techPlan().map((t) => [`P${t.phase} unlock ${bname(s, t.b)}`, techState(t.b)]),
-      row('Sawmills', s.owned(B.SAWMILL), sawTarget(s)),
-      row('Workshops (Frame Timber)', s.running(B.WORKSHOP, R.FRAME_TIMBER), cfg.workshops),
-      row('Iron Mines', s.running(B.MINE, R.MINE_IRON), mineTarget(s, R.MINE_IRON)),
-      row('Coal Mines', s.running(B.MINE, R.MINE_COAL), mineTarget(s, R.MINE_COAL)),
-      row('Limestone Quarries', s.owned(B.QUARRY), cfg.quarries),
-      row('Smelters', s.owned(B.SMELTER), cfg.smelters),
-      row('Gold Mines', s.running(B.MINE, R.MINE_GOLD), goldTarget(s)),
-      row('Workshops (Iron Frames)', s.running(B.WORKSHOP, R.RIVET), cfg.ironFrameWorkshops),
+      ...PLAN().checklist.map((c) => row(c.label, c.have[0] === 'owned' ? s.owned(bId(c.have[1])) : s.running(bId(c.have[1]), rId(c.have[2])), recipeTarget(s, rId(c.target)))),
       ['Planks / Wooden / Iron Frames', `${Math.floor(s.has(PLANKS))} / ${Math.floor(s.has(WFRAME))} / ${Math.floor(s.has(IFRAME))}`],
       ['Unequipped (no kit)', s.groups.filter((g) => g.count > (g.equipped ?? 0)).map((g) => `${g.name} ${g.count - (g.equipped ?? 0)}`).join(', ') || '—'],
       ['Courier', s.courierFree ? 'free' : `busy, ${courierEta(s)}${Object.keys(s.standing).length ? ' (auto-ship running)' : ''}`],

@@ -19,7 +19,7 @@ async function controllerTick() {
 
 // ---- control -----------------------------------------------------------
 
-const fmt = (x) => Number(x).toLocaleString('en-US', { maximumFractionDigits: 2 });
+const fmt = core.ui.fmt;
 const perCd = () => { const netCd = stats.built - (stats.rushCd ?? 0); return netCd > 0 ? (netSpend() / netCd).toFixed(2) : '-'; };
 
 async function start(opts = {}) {

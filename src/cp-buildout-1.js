@@ -38,43 +38,17 @@ try {
   const REGION = 0, ACRE_CAP = 360;
   // multi-region plan (opt-in cfg.heartlandLandCap): once a region is chartered, no Heartland acre dearer than the cheapest region acre
   const acreCapCents = (v) => (cfg.heartlandLandCap && Object.values(v.st.charters ?? {}).some((x) => x > 0) ? cp._expand?.regionAcreCents?.(v) ?? Infinity : Infinity);
-  const FURN = [['bookshelf', 'Bookshelf', 'Make Bookshelf'], ['table', 'Table', 'Make Table'], ['chair', 'Chair', 'Make Chair']];
-  const MIX = { bookshelf: 0.4, table: 0.3, chair: 0.3 };     // plank shares when the board has no appetite (wiki 4.3)
-  const FLOOR = { 'Lumber Camp': 3, Sawmill: 2, Workshop: 5 }; // floor rate the plan assumes (wiki 4.5)
-  const ENGINE = ['Lumber Camp', 'Sawmill', 'Workshop'];
+  // Plan data and settings: the plan preset's directors.buildout (src/core-plans.js).
+  const PD = W.idleCore.plans.current().core.directors.buildout, T = PD.tables;
+  const FURN = T.furniture;
+  const MIX = T.mix;                   // plank shares when the board has no appetite (wiki 4.3)
+  const FLOOR = T.floor;               // floor rate the plan assumes (wiki 4.5)
+  const ENGINE = T.engine;
   const HOUR = 3600000;
-  const BENCH_FLOOR = 3, BENCH_HOURS = 48;                    // Make Bench on the Rivet x3 floor; Concrete kept for this many hours of Bench use (plan D4)
-  const BLOCK_SHARE = 1200, BLOCK_HOURLY = 1444;               // dollars: a block's buildings per acre, and what an engine acre earns an hour (plan D-1; blockHourly scales it to the board)
-
-  const DEFAULTS = {
-    keepFrameTimber: 1,          // Workshops kept on Frame Timber (wiki 4.8 step 1)
-    needFurnitureFloor: true,    // furniture Workshops wait until the recipe has a saved floor (wiki 4.8 pre-condition)
-    applyFurnitureFloor: true,   // ...and Core plan applies the Workshop v1 floor itself (EditLayout); Autopilot keeps recipes already running while it sends live
-    floorRetryMin: 10,           // after an EditLayout the server did not apply, floors wait this long (one bad floor cannot run into maxFails)
-    conversionWaves: 4,          // Farm conversion waves (wiki 4.8 step 5)
-    waveGapHours: 3,
-    waveSlackAcres: 4,           // a wave waits while more than buffer + this many acres are still empty
-    waveCashAhead: 3,            // a wave waits until cash covers this many of the buildings that replace its Farms
-    woodRunsPerSawmill: 2,       // R8: Wood stock >= Sawmills x this x Wood per run before more Sawmills
-    glassGate: 100,              // Kiln: Glass before the store research ends (wiki 4.8 step 6)
-    concreteGate: 400,           // Kiln: Concrete by the gate
-    ftKeepHours: 2,              // Wooden Frame keep line: this many hours of Rivet use (plan D-3); Frame Timber pauses at it, resumes below half
-    ftBlockedMin: 30,            // Frame Timber above keepFrameTimber pauses when the switch to furniture stays blocked this long (plan A2)
-    ftKeepMax: 19,               // ... capped here, so stock settles under 20 and E3 can hold (a Rivet Workshop takes 6 per wave start)
-    rebalanceHours: 6,           // a furniture recipe's gap to the board's split must hold this long before a Workshop moves (plan D3)
-    benchWorkshops: 1,           // Bench Workshops in Stage D after a checkpoint pass (wiki 4.7 step 2)
-    moveGainPct: 3,              // the retail allocator moves furniture Workshops only for a gain above this (plan B1; rebalance also holds rebalanceHours)
-    stockBurnHours: 24,          // Planks above plankReserve are planned to run down over this many hours with extra Workshops (plan R-4)
-    stepBackHours: 4,            // ... stopped when the projected stock would reach plankReserve within this many hours (plan B2)
-    stockBand: 10,               // ... and started again only once the stock is this % above plankReserve (hysteresis)
-    plankReserve: 1000,          // Planks always kept, on top of other modules' reserves, the next Workshop builds and Frame Timber's keep-line need
-    planHoldMin: 30,             // a step back, a park or a pool placement the plan asks for must hold this long first (no churn on a wobbling budget)
-    boardSmoothHours: 2,         // the allocator plans from board prices and appetite smoothed over about this many hours (EMA)
-    plankEmaHours: 2,            // the Planks model's error is measured from the stock, smoothed over about this many hours (EMA)
-    convertPaybackH: 6,          // land conversion (plan R-6): a group whose output nothing uses becomes Camps + Sawmills only if this pays back within this many hours
-    convertConfirmed: false,     // ... the first conversion waits for your Confirm (toast); after that conversions run on their own
-    convertProtect: [],          // ... group ids or names never converted
-  };
+  const BENCH_FLOOR = T.bench.floor, BENCH_HOURS = T.bench.hours;     // Make Bench on the Rivet x3 floor; Concrete kept for this many hours of Bench use (plan D4)
+  const BLOCK_SHARE = T.block.share, BLOCK_HOURLY = T.block.hourly;   // dollars: a block's buildings per acre, and what an engine acre earns an hour (plan D-1; blockHourly scales it to the board)
+  const MAX_SHELVES = W.idleCore.plans.current().core.maxShelves;
+  const DEFAULTS = W.idleCore.plans.copy(PD.defaults);
 
   // ---- small pure helpers ------------------------------------------------------------------------------------------------------
   const runsH = (r, rate) => (r ? rate * 3600 / (r.ticks / 2) : 0);           // runs per hour per building (2 ticks a second)
@@ -239,16 +213,16 @@ try {
       const wsOwned = FURN.reduce((a, [k]) => a + e.furnRun[k], 0) + spare + e.ownPool(e.id.ws), stores = { [REGION]: v.owned('Retail Store') };
       al = ra({ goods, supply: { Planks: supply }, stock: { Planks: burn ? from : 0 }, reserve: { Planks: reserve },
         workshops: { owned: wsOwned, buildable: buildableWs(v, ctx, e, rule) },
-        stores, cfg: { stockBurnHours: cfg.stockBurnHours, moveGainPct: cfg.moveGainPct, maxShelves: 4, curSlack: burn ? { Planks: maxUse } : {} } });
+        stores, cfg: { stockBurnHours: cfg.stockBurnHours, moveGainPct: cfg.moveGainPct, maxShelves: MAX_SHELVES, curSlack: burn ? { Planks: maxUse } : {} } });
       // B4: Planks/h the Workshops it counts (owned, pooled, spare Frame Timber; none still to buy) eat with Planks unlimited: the chain
       // target. With the best $ per Workshop-hour (cents) and that good's Planks per Workshop-hour: the chain's $ per acre-hour (convertStep).
-      const free = ra({ goods, supply: { Planks: (wsOwned + 1) * maxUse * 10 }, workshops: { owned: wsOwned, buildable: 0 }, stores, cfg: { maxShelves: 4, moveGainPct: cfg.moveGainPct } });   // the current mix kept as the allocator keeps it
+      const free = ra({ goods, supply: { Planks: (wsOwned + 1) * maxUse * 10 }, workshops: { owned: wsOwned, buildable: 0 }, stores, cfg: { maxShelves: MAX_SHELVES, moveGainPct: cfg.moveGainPct } });   // the current mix kept as the allocator keeps it
       const best = goods.filter((g) => g.floorOk && g.unitsPerWorkshopHour > 0).sort((a, b) => b.unitCents * b.unitsPerWorkshopHour - a.unitCents * a.unitsPerWorkshopHour)[0];
       Object.assign(al, { byKey: Object.fromEntries(FURN.map(([k, n]) => [k, al.alloc[v.idI(n)] ?? 0])), extra: (al.budget.Planks ?? 0) - supply, burn, reserve, net,
         planksWant: goods.reduce((a, g) => a + (free.alloc[g.id] ?? 0) * g.unitsPerWorkshopHour * g.planksPerUnit, 0),
         bestWs: best ? { name: best.name, cents: best.unitCents * best.unitsPerWorkshopHour, planksH: best.unitsPerWorkshopHour * best.planksPerUnit } : null,
         // $/h the LP plans on what the Sawmills make and the stock budget, plus dPlanks/h (Workshops it counts): the marginal value of more Planks
-        valueAt: (dPlanks) => ra({ goods: goods.map((g) => ({ ...g, current: 0 })), supply: { Planks: (al.budget.Planks ?? supply) + dPlanks }, workshops: { owned: wsOwned, buildable: 0 }, stores, cfg: { maxShelves: 4, moveGainPct: 0 } }).lpDollarsPerHour });
+        valueAt: (dPlanks) => ra({ goods: goods.map((g) => ({ ...g, current: 0 })), supply: { Planks: (al.budget.Planks ?? supply) + dPlanks }, workshops: { owned: wsOwned, buildable: 0 }, stores, cfg: { maxShelves: MAX_SHELVES, moveGainPct: 0 } }).lpDollarsPerHour });
     }
     ctx._boAlloc = { v, al };
     return al;
@@ -262,8 +236,7 @@ try {
     const N = v.N, C = v.C, st = v.st;
     const id = { camp: v.idB('Lumber Camp'), saw: v.idB('Sawmill'), ws: v.idB('Workshop'), farm: v.idB('Farm'), kiln: v.idB('Kiln') };
     const rec = (n) => recipeOf(C, n);
-    const R = { wood: rec('Fell Wood'), planks: rec('Saw Planks'), ft: rec('Assemble Wooden Frame'), rivet: rec('Assemble Iron Frame'), cotton: rec('Grow Cotton'),
-      glass: rec('Blow Glass'), concrete: rec('Mix Concrete'), bookshelf: rec('Make Bookshelf'), table: rec('Make Table'), chair: rec('Make Chair') };
+    const R = Object.fromEntries([...Object.entries(T.recipes), ...FURN.map(([k, , r]) => [k, r])].map(([k, n]) => [k, rec(n)]));
     const missing = [...Object.entries(id).filter(([, x]) => x == null).map(([k]) => 'building ' + k), ...Object.entries(R).filter(([, x]) => !x).map(([k]) => 'recipe ' + k)];
     if (missing.length) return { missing };
     const units = ctx.boFarmUnits ?? {};
@@ -297,7 +270,7 @@ try {
     const woodDemand = perG(groupsOf(id.saw, R.planks), (r) => amt(r.inputs, woodId) * runsH(r, ratePlan(r, 'Sawmill')));
     const kitOf = (b, r) => [...(v.bld(b).build_items ?? []), ...((r && layout(r)?.bom) ?? v.bld(b).default_kit ?? [])];
     // Make Bench is optional (no Bench in the catalog: no Bench Workshop); it runs on the Rivet x3 floor, not v1's x5.
-    R.bench = rec('Make Bench');
+    R.bench = rec(T.bench.recipe);
     const benchNow = R.bench ? sum(wsGroups.filter((g) => g.recipe === R.bench.id)) : 0;
     const benchRuns = R.bench ? runsH(R.bench, Math.max(rateNow(R.bench), BENCH_FLOOR)) : 0;
     const benchConcreteH = (n) => n * benchRuns * (R.bench ? amt(R.bench.inputs, v.idI('Concrete')) : 0);

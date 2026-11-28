@@ -69,7 +69,7 @@
   const setTick = (v, ctx) => { if (ctx.tick == null) { let t = 0; try { t = core?.nowTick?.() ?? 0; } catch {} ctx.tick = Math.max(t, v.mutTick ?? 0); } };
   cp.addDirector({
     name: 'resume', order: 10, always: true,   // always: a bill pause can make cash fall (S6) and drop the stage
-    defaults: { resumeGraceMin: 2 },   // minutes after a SetPaused Core plan sent in which a pause of that group is the director's
+    defaults: core.plans.copy(PD.resume.defaults),
     context(v, ctx) { ctx.apKept = keptPaused(); if (ctx.mem) resumeObserve(v, ctx.mem('resume'), ctx); },
     decide: resumeDecide,
     duties: () => [{ duty: 'resume groups paused by an unpaid bill (waits while Autopilot runs with resumePaused on)', owner: 'Core plan', done: true }],
@@ -81,7 +81,7 @@
   });
   cp.addDirector({
     name: 'slot', order: 70,
-    defaults: { dir_slot: true, slotLotMin: 150000, slotMinMinutes: 60, slotRearmMinutes: 15 },
+    defaults: core.plans.copy(PD.slot.defaults),
     context(v, ctx) {
       setTick(v, ctx);
       // Forget fills that are gone from the server.
@@ -94,7 +94,7 @@
   });
   cp.addDirector({
     name: 'sell', order: 75,
-    defaults: { dir_sell: true, sellKeepHours: 48, sellKitBuilds: 3, sellSaturatedHours: 24, sellCooldownMinutes: 60 },
+    defaults: core.plans.copy(PD.sell.defaults),
     context(v, ctx) {
       setTick(v, ctx);
       let read = false;
@@ -114,7 +114,7 @@
   });
   cp.addDirector({
     name: 'cadence', order: 80,
-    defaults: { dir_cadence: true, shelfHours: 1, kitWaveBuilds: 3 },
+    defaults: core.plans.copy(PD.cadence.defaults),
     context(v, ctx) {
       setTick(v, ctx); memRef = ctx.mem;
       ctx.worldEvents ??= core?.sock?.worldEvents ?? null;

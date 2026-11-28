@@ -22,14 +22,11 @@ try {
   const TARGETS = cp._cadence?.TARGETS;          // the endgame stock (wiki 12), shared with the sell keep line
   if (!TARGETS) throw new Error('cp-cadence did not load');
   const REGION = 0, ACRE_CAP = 360;
-  const MINES_PER_SMELTER = 5, SMELTERS = 1;     // Smelt x3 eats 600 Ore/h, a Mine on the x3 merge makes 144 (plan D6)
+  const ET = W.idleCore.plans.current().core.directors.endgame.tables;   // plan data (src/core-plans.js)
+  const MINES_PER_SMELTER = ET.minesPerSmelter, SMELTERS = ET.smelters;     // Smelt x3 eats 600 Ore/h, a Mine on the x3 merge makes 144 (plan D6)
   // Each production group with every target downstream of it: it pauses only when all of them hold.
-  const CHAIN = [
-    { b: 'Assembly Plant', r: 'Assemble Wired Frame', feeds: ['Wired Frame'] },
-    { b: 'Smelter', r: 'Draw Copper Wire', feeds: ['Copper Wire', 'Wired Frame'] },
-    { b: 'Mine', r: 'Mine Copper Ore', feeds: ['Copper Ore', 'Copper Wire', 'Wired Frame'] },
-  ];
-  const num = (n) => Math.round(n).toLocaleString('en-US');
+  const CHAIN = ET.chain;
+  const num = W.idleCore.ui.num;
   const stockOf = (v, i) => v.st.stock?.[REGION]?.[i] ?? v.st.items?.[i] ?? 0;
   const itemName = (v, i) => v.C.items[i]?.name ?? 'item ' + i;
   const groupsOn = (v, b, r) => v.groups.filter((g) => g.building === b && g.recipe === r && g.count > 0);
@@ -164,7 +161,7 @@ try {
 
   cp.addDirector({
     name: 'endgame', order: 90, always: true,   // always: the resume half of the stock gates runs with no stage too
-    defaults: { dir_endgame: false },
+    // starts off: the plan preset's directors.endgame.on is false (cfg.dir_endgame)
     context: egContext,
     decide: endgameDecide,
     whenOff: (v, ctx) => gateStep(v, ctx, 'off'),   // turned off: the groups its gate paused come back

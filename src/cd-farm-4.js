@@ -125,7 +125,7 @@
     return parts.join(' ');
   }
 
-  const REGIONS = [{ id: 'auto', label: 'Auto' }, { id: 0, label: 'Heartland' }, { id: 1, label: 'Industrial Basin' }, { id: 2, label: 'Coastal Cities' }, { id: 3, label: 'Frontier' }];
+  const REGIONS = [{ id: 'auto', label: 'Auto' }, ...core.REGION_NAMES.map((label, id) => ({ id, label }))];
   function autoRows() {
     const ev = lastEval, c = ev?.c, m = core.measure.snapshot();
     const rows = [['Mode', `Auto · ${cap(cfg.pace)}${cfg.autoStart ? '' : ' · off'}`]];

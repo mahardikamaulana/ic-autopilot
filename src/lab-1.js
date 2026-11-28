@@ -49,8 +49,7 @@ try {
       { name: 'III', base: 50, md: 100000, rd: 0, cat: 1 },
     ];
     const FOCUS = ['Process study', 'Module fabrication', 'Quality engineering'];   // StartResearch.context
-    const REGION_NAMES = ['Heartland', 'Industrial Basin', 'Coastal Cities', 'Frontier'];
-    const regionName = (r) => REGION_NAMES[r] ?? 'Region ' + r;
+    const { regionName } = core;
     const LIST_MAX = 50;
     const MAX_FAILS = 5;                     // sends (or errors) in a row before the run stops itself
 
@@ -110,7 +109,7 @@ try {
     }
 
     // ---- the Lab, as the game state shows it ---------------------------------------------------
-    const fmt = (x) => Number(x).toLocaleString('en-US', { maximumFractionDigits: 2 });
+    const fmt = core.ui.fmt;
     const asMap = (x) => (Array.isArray(x) ? new Map(x.map((o) => [o.id, o])) : new Map(Object.entries(x ?? {}).map(([k, o]) => [+k, o])));
     const ixCache = new WeakMap();
     // Catalog lookups, built once per catalog object. products = what the Lab's picker lists: base value above 0,

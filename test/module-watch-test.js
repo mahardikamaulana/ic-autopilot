@@ -21,6 +21,7 @@ function setup({ corp = 1, tick = 1000, pathname = '/', disk = {}, sockOpen = tr
   globalThis.location = { pathname };
   globalThis.localStorage = { getItem: (k) => disk[k] ?? null, setItem: (k, v) => { disk[k] = String(v); }, removeItem: (k) => { delete disk[k]; } };
   globalThis.idleCore = {
+    settings: (k) => ({ load: () => JSON.parse(disk[k] ?? 'null'), save: (v) => { disk[k] = JSON.stringify(v); } }),
     h: () => ({}),
     sock,
     walk: () => ({ st: { ssi: { corp_id: corp } } }),

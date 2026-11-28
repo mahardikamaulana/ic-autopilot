@@ -35,7 +35,8 @@ try {
   const W = typeof window !== 'undefined' ? window : globalThis;
   if (!W.corePlan?.addDirector) throw new Error('Core plan did not load');
   const cp = W.corePlan, cfg = cp.cfg, usd = cp._usd, core = W.idleCore, P = core.planner;
-  const NAMES = ['Heartland', 'Industrial Basin', 'Coastal Cities', 'Frontier'];
+  const PC = W.idleCore.plans.current().core, MAX_SHELVES = PC.maxShelves;   // plan data (src/core-plans.js), bound at load like the other directors
+  const NAMES = core.REGION_NAMES;
   const BASE = [0, 100000000, 300000000, 900000000], MULT = [0, 1, 3, 32], CAP = [360, 60, 150, 360], HOPS = [1, 2, 3, 4];   // cents; charter level -> acre cap; hops from Heartland
   const WS = 'Workshop', CAMP = 'Lumber Camp', SAW = 'Sawmill', STORE = 'Retail Store';
   const TICKS_H = 7200, Q0 = 0.95, RATES = { power: 1000, water: 400, bandwidth: 1500 };   // cents per unit per 10-min bill (as cp-retail billsOf)
@@ -87,7 +88,7 @@ try {
     });
   }
   const allocFor = (goods, ws, saws, ch, r) => core.retailAlloc({ goods, supply: { Planks: saws * ch.planksPerSaw }, workshops: { owned: ws, buildable: 0 },
-    stores: { [r]: 1 }, cfg: { maxShelves: 4, moveGainPct: 0 } });
+    stores: { [r]: 1 }, cfg: { maxShelves: MAX_SHELVES, moveGainPct: 0 } });
   const priceN = (v, k, ch, n) => { let c = 0; for (let i = 0; i < n; i++) c += P.price(v.bld(ch.b[k]).cost, v.ownedAll(v.bld(ch.b[k]).name), i); return c; };
   const feeOf = (v, r, ...ships) => { const cu = core.courierCU?.(v.st) ?? 10000; return ships.reduce((a, s) => a + Object.entries(s).reduce((b, [i, n]) => b + Math.max(0, n * (v.C.items[i]?.cargo_weight ?? 1) - cu) * 5 * HOPS[r], 0), 0); };   // $0.05 per CU over the free run, per hop
   function billsOf(st) {
@@ -473,18 +474,7 @@ try {
 
   cp.addDirector({
     name: 'expand', order: 47,
-    defaults: {
-      expand: 'ask',              // 'off' | 'ask' (a toast with a Go button) | 'auto' (plan R-7)
-      expandPaybackH: 24,         // open or upgrade a region only when it pays back within this many hours
-      expandBillHours: 3,         // ... and cash after it covers the money floor + this many hours of bills
-      expandMarginPct: 25,        // shipment margin on build items + kits
-      expandPlanksH: 1,           // ... plus this many hours of the new Workshops' Planks
-      expandEquipMin: 30,         // minutes to wait for new Workshop groups to be equipped before going on (and reporting it)
-      expandToastMin: 30,         // minutes between repeats of the same offer toast
-      heartlandLandCap: false,    // opt-in: once a region is chartered, buildout buys no Heartland acre dearer than the cheapest region acre (regionAcreCents)
-      expandFeed: true,           // M-2: pause the Heartland group that uses up an item a region shipment lacks (Iron Sheet into Iron Frames) until it ships
-      expandFeedH: 6,             // ... at most this many hours while no run is on
-    },
+    defaults: W.idleCore.plans.copy(PC.directors.expand.defaults),
     context: (v, ctx) => publish(mem(ctx)?.get?.()?.run ?? null),
     decide,
     duties: () => [{ duty: 'second region: charter, land, shipment, chain, store (plan C1, C2)', owner: 'Core plan', done: true }],

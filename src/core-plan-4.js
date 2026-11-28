@@ -91,9 +91,9 @@ core.reserves.register('corePlan', {
     // burns them on Mines / Quarries (wiki 11.4, the $294-per-CD mistake).
     const items = {};
     // Retail fail path (plan A2): Wooden Frames only down to their keep line and Planks free, so CD Farm cycles the frames above it.
-    if (last.stage === 'D' || last.stage === 'END') {
+    if (PLAN.reserve.stages.includes(last.stage)) {
       if (last._failPath) { if (last._wfId != null) items[last._wfId] = last._wfKeep ?? Infinity; }
-      else for (const id of [last._wfId, last._plId]) if (id != null) items[id] = Infinity;
+      else for (const id of last._keepIds ?? []) if (id != null) items[id] = Infinity;
     }
     else if (ifId != null) { const k = Math.min(cfg.ifReserve, last._ifNeed ?? Infinity); if (k > 0) items[ifId] = k; }
     return { moneyFloor: 0, items, nextTech: v ? { b: v.b, name: v.name, cd: v.cd, prereqsMet: v.prereqsMet, note: v.note } : null, phase: null };

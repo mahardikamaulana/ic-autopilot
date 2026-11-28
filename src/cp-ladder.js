@@ -18,6 +18,8 @@ try {
   if (!W.corePlan?.addDirector) throw new Error('Core plan did not load');
   const M = W.idleCore?.coreMath;
   if (!M) throw new Error('core-math did not load');
+  const LT = W.idleCore.plans.current().core.directors.ladder;   // plan data and settings (src/core-plans.js)
+  const STORE = LT.tables.bankFor, [RIG, REFINERY] = LT.tables.after;
   const NAME = 'ladder', WALL_CD = 5000 + W.corePlan._refineryCd;   // Oil Rig 5,000 + Refinery 500,000 (2026-11-24 catalog)
   const fmt = (n) => Math.round(n).toLocaleString('en-US');
   const cfgOf = () => W.corePlan.cfg;
@@ -56,20 +58,20 @@ try {
   function phaseOf(v, stage, ctx) {
     if (stage === 'A') return { key: 'A', arm: true };
     if (stage === 'B') {
-      if (gone(v, 'Retail Store')) return { key: 'B-done', need: false, why: 'Retail Store already unlocked or researching' };
-      return { key: 'B', need: needOf(v, 'Retail Store', 'banked while the Assembly Plant researches'), arm: true };
+      if (gone(v, STORE)) return { key: 'B-done', need: false, why: STORE + ' already unlocked or researching' };
+      return { key: 'B', need: needOf(v, STORE, 'banked while the Assembly Plant researches'), arm: true };
     }
     if (stage === 'C') {
       // stageOf says C as soon as the Assembly Plant is in; the wiki's C (pause) starts with the Retail research.
-      if (gone(v, 'Retail Store')) return { key: 'C', need: false, pause: true, why: 'stage C: no CD cycling until the store passes the checkpoint (11.3)' };
-      const n = needOf(v, 'Retail Store', 'not banked in stage B');
+      if (gone(v, STORE)) return { key: 'C', need: false, pause: true, why: 'stage C: no CD cycling until the store passes the checkpoint (11.3)' };
+      const n = needOf(v, STORE, 'not banked in stage B');
       if (n.missing || v.cd < n.cd) return { key: 'C-bank', need: n, arm: true, why: 'stage C: Retail Store research not started, ' + fmt(v.cd) + ' / ' + fmt(n.cd ?? 0) + ' CD' };
       return { key: 'C', need: false, pause: true, why: 'stage C: Retail Store CD is in hand, no CD cycling (11.3)' };
     }
     if (stage === 'D' || stage === 'END') {
       if (ctx.retailOk !== true) return { key: 'D-wait', need: false, pause: true, why: 'stage D: the store has not passed the retail checkpoint' + (ctx.retailOk === false ? (ctx.retailFail ? ' (it failed: a new run measures the capped output)' : ' (it failed with no unsold stock, so no cap: a new run checks again)') : ' yet') };
-      if (!gone(v, 'Oil Rig')) return { key: 'D', need: needOf(v, 'Oil Rig'), arm: true, ladder: true };
-      if (!gone(v, 'Refinery')) return { key: 'D', need: needOf(v, 'Refinery', v.unlocked('Oil Rig') ? '' : 'Oil Rig research running'), arm: true, ladder: true };
+      if (!gone(v, RIG)) return { key: 'D', need: needOf(v, RIG), arm: true, ladder: true };
+      if (!gone(v, REFINERY)) return { key: 'D', need: needOf(v, REFINERY, v.unlocked(RIG) ? '' : RIG + ' research running'), arm: true, ladder: true };
       return { key: 'D-done', need: false, why: 'Refinery research started: no CD need left' };
     }
     return null;
@@ -110,7 +112,7 @@ try {
     const lad = ctx.ladder ?? {};
     const cycles = lad.rates?.cyclesh15 > 0 ? lad.rates.cyclesh15 : ctx.cyclesPerHour ?? c.cyclesPerHour;   // measured CD Farm cycles first: E3 checks the batch against them
     const incomeH = lad.income > 0 ? lad.income / 100 : out.rule?.income ?? null;   // CD Farm measures cents/h; core-math works in dollars
-    const batch = incomeH > 0 && cycles > 0 ? M.bestBatch('farm', 0, incomeH, cycles).k : null;
+    const batch = incomeH > 0 && cycles > 0 ? M.bestBatch(LT.tables.batchType, 0, incomeH, cycles).k : null;
     const spare = c.ladderSpareAcres;
 
     // Stage D ladder gates (11.4); while one fails there is no CD need, so Auto cannot farm on dear types meanwhile.
@@ -208,11 +210,7 @@ try {
 
   W.corePlan.addDirector({
     name: NAME, order: 60,
-    defaults: {
-      ladderPace: 'balanced',   // CD Farm pace before the Stage D ladder (balanced: bigger batches while the time saved pays)
-      ladderPaceD: 'fast',      // CD Farm pace on the Stage D ladder (plan step 1: CD is worth full income there)
-      ladderSpareAcres: 0,      // CD Farm reserveAcres: the land rule already keeps cfg.bufferAcres free for the batch itself
-    },
+    defaults: W.idleCore.plans.copy(LT.defaults),
     context, decide,
     duties: () => [{ duty: 'CD farm per stage: need, Auto tuning, Stage C pause, Stage D Farm ladder gates', owner: 'Core plan', done: true }],
   });

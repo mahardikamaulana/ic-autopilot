@@ -38,7 +38,6 @@ try {
     const mw = W.moduleWatch;
     if (!mw?.kinds) throw new Error('module watch did not load');
     const HAS_DOM = typeof document !== 'undefined' && !!document.body;
-    const store = (() => { try { return W.localStorage ?? null; } catch { return null; } })();
     const KEY = 'autoModules.v1', TAG = 'AM';
     if (W.autoModules?._unload) W.autoModules._unload();
     const { modId, usedCells, freeModules } = core.modules;
@@ -289,7 +288,7 @@ try {
       if (want && !loopTimer) loopTimer = core.every(cfg.cycleMs, step);
       else if (!want && loopTimer) { loopTimer(); loopTimer = null; }
     }
-    function save() { try { store?.setItem(KEY, JSON.stringify(conf)); } catch { } }
+    function save() { core.settings(KEY).save(conf); }
     function set(on) {
       on = !!on;
       if (conf.on === on) return on;
@@ -349,7 +348,7 @@ try {
     }
 
     // ---- load -----------------------------------------------------------------------------------------------------------------
-    try { const o = JSON.parse(store?.getItem(KEY) || 'null'); if (typeof o?.on === 'boolean') conf.on = o.on; } catch { }
+    { const o = core.settings(KEY).load(); if (typeof o?.on === 'boolean') conf.on = o.on; }
     W.autoModules = {
       set, stop: () => set(false), status, cfg, conf, drawsPct,
       get running() { return conf.on || midMove(); },

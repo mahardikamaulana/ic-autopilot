@@ -1,4 +1,4 @@
-// Builds ic-autopilot.user.js from src/*.js (header, core, pacer, planner, core-retail-alloc, core-math, cd-farm, lab, autosell, autowithdraw, utilities, keep-online, module-watch, auto-modules, core-plan, cp-*, autopilot, in that order).
+// Builds ic-autopilot.user.js from src/*.js (header, core (with core-plans: the plan presets), pacer, planner, core-retail-alloc, core-math, cd-farm, lab, autosell, autowithdraw, utilities, keep-online, module-watch, auto-modules, core-plan, cp-*, autopilot, in that order).
 //
 //   bun build.js                          # write the userscript
 //   bun build.js --check                  # exit 1 if the userscript differs from what the sources build
@@ -19,7 +19,11 @@ const crypto = require('crypto');
 const SRC = path.join(__dirname, 'src');
 const OUT = path.join(__dirname, 'ic-autopilot.user.js');
 const STAMP = path.join(SRC, '.built-sha');          // local only (git-ignored): the hash of the last build, to spot hand edits
-const PARTS = ['header.js', 'core-1.js', 'core-2.js', 'core-form.js', 'core-3.js', 'pacer.js', 'planner.js', 'core-retail-alloc.js', 'core-math.js', 'cd-farm-1.js', 'cd-farm-2.js', 'cd-farm-3.js', 'cd-farm-4.js', 'cd-farm-5.js', 'lab-1.js', 'lab-2.js', 'lab-3.js', 'lab-4.js', 'autosell-1.js', 'autosell-2.js', 'autosell-3.js', 'autowithdraw.js', 'utilities.js', 'keep-online.js', 'module-watch.js', 'auto-modules.js', 'core-plan-1.js', 'core-plan-2.js', 'core-plan-3.js', 'core-plan-4.js', 'cp-buildout-1.js', 'cp-buildout-2.js', 'cp-buildout-3.js', 'cp-retail.js', 'cp-expand.js', 'cp-lab.js', 'cp-ladder.js', 'cp-cadence-1.js', 'cp-cadence-2.js', 'cp-cadence-3.js', 'cp-endgame.js', 'autopilot-1.js', 'autopilot-2.js', 'autopilot-3.js', 'autopilot-4.js', 'autopilot-5.js', 'autopilot-6.js'];
+const PARTS = ['header.js', 'core-1.js', 'core-2.js', 'core-form.js', 'core-plans.js', 'core-3.js', 'pacer.js', 'planner.js', 'core-retail-alloc.js', 'core-math.js', 'cd-farm-1.js', 'cd-farm-2.js', 'cd-farm-3.js', 'cd-farm-4.js', 'cd-farm-5.js', 'lab-1.js', 'lab-2.js', 'lab-3.js', 'lab-4.js', 'autosell-1.js', 'autosell-2.js', 'autosell-3.js', 'autowithdraw.js', 'utilities.js', 'keep-online.js', 'module-watch.js', 'auto-modules.js', 'core-plan-1.js', 'core-plan-2.js', 'core-plan-3.js', 'core-plan-4.js', 'cp-buildout-1.js', 'cp-buildout-2.js', 'cp-buildout-3.js', 'cp-retail.js', 'cp-expand.js', 'cp-lab.js', 'cp-ladder.js', 'cp-cadence-1.js', 'cp-cadence-2.js', 'cp-cadence-3.js', 'cp-endgame.js', 'autopilot-1.js', 'autopilot-2.js', 'autopilot-3.js', 'autopilot-4.js', 'autopilot-5.js', 'autopilot-6.js'];
+
+// A new src/*.js that is not in PARTS would silently be left out of the build.
+const unlisted = fs.readdirSync(SRC).filter((f) => f.endsWith('.js') && !PARTS.includes(f));
+if (unlisted.length) { console.error('src files missing from PARTS in build.js: ' + unlisted.join(', ')); process.exit(1); }
 
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 const args = process.argv.slice(2);

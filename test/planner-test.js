@@ -10,7 +10,7 @@ const slice = (files, name) => {
   const s = [].concat(files).map((file) => fs.readFileSync(path.join(__dirname, '..', 'src', file), 'utf8')).join('\n');
   return s.slice(s.indexOf('// @@MODULE ' + name), s.indexOf('// @@END ' + name));
 };
-(0, eval)(slice(['core-1.js', 'core-2.js', 'core-form.js', 'core-3.js'], 'core') + '\n' + slice('planner.js', 'planner'));
+(0, eval)(slice(['core-1.js', 'core-2.js', 'core-form.js', 'core-plans.js', 'core-3.js'], 'core') + '\n' + slice('planner.js', 'planner'));
 const P = globalThis.idleCore.planner;
 
 let failed = 0;

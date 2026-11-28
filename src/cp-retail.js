@@ -31,8 +31,9 @@ try {
   const P = W.idleCore?.planner;
   const REGION = 0, TPS = 2, TICKS_H = 3600 * TPS;
   // fallback shelf goods when the board names none the Corporation can make
-  const RECIPE = { Bookshelf: 'Make Bookshelf', Table: 'Make Table', Chair: 'Make Chair', Bench: 'Make Bench' };
-  const STORE = 'Retail Store', GROUP_NAME = 'Retail', WORKSHOP = 'Workshop', FT = 'Assemble Wooden Frame', FT_GROUP = 'Frame Timber';
+  const PD = W.idleCore.plans.current().core.directors.retail, T = PD.tables, MAX_SHELVES = W.idleCore.plans.current().core.maxShelves;   // plan data and settings (src/core-plans.js)
+  const RECIPE = T.goods;
+  const STORE = T.store, GROUP_NAME = T.groupName, WORKSHOP = 'Workshop', FT = T.ftRecipe, FT_GROUP = T.ftGroup;
   const RATES = { power: 1000, water: 400, bandwidth: 1500 };   // cents per unit per 10-min bill (same as autoUtil billsOf)
   const Q0 = 0.95;                     // quality factor at quality 0 (wiki retail.md, Price; engine BhehihUq)
   // Quality factor of the Heartland stock: 0.95 + 0.19 q / (q + 10), q = quality_points / units / 100 (wiki formulas.md); Q0 with none.
@@ -177,7 +178,7 @@ try {
   }
   // qFirst (rival mode): goods with quality > 0 first, they score +2 a sale instead of +1
   const qRank = (a, b) => (b.q >= 0.01) - (a.q >= 0.01);
-  const pickOrder = (gs, qFirst = false) => [...gs].sort((a, b) => (qFirst && qRank(a, b)) || b.appetite * b.unit - a.appetite * a.unit).slice(0, 4);
+  const pickOrder = (gs, qFirst = false) => [...gs].sort((a, b) => (qFirst && qRank(a, b)) || b.appetite * b.unit - a.appetite * a.unit).slice(0, MAX_SHELVES);
   // Rival mode (plan R-8, D2): the rating is scored per shelf each tick: +1 for a shelf that sold (+2 at quality >= 0.01), -2 for a shelf
   // with a customer due but no stock or no power (wiki retail.md). So a good goes on the shelf only with cfg.rivalStockHours of stock at
   // its drain (demand at today's share less output; any stock when output keeps up), and leaves once it is empty with output short of
@@ -514,7 +515,7 @@ try {
     const shelf = f.storeGroup?.assortment ?? [];
     const byUnit = (a, b) => (f.rival && qRank(a, b)) || b.unit - a.unit;
     return [...new Set([...f.goods.filter(planned), ...(f.keep ?? f.goods.filter(f.eligible))])].filter((g) => !f.rival || rivalOk(f, g, shelf))
-      .sort((a, b) => (f.rival && qRank(a, b)) || planned(b) - planned(a) || byUnit(a, b)).slice(0, 4).sort(byUnit);
+      .sort((a, b) => (f.rival && qRank(a, b)) || planned(b) - planned(a) || byUnit(a, b)).slice(0, MAX_SHELVES).sort(byUnit);
   }
   // One more store (wiki 4.7, plan B5): its build items (Iron Frames for the prototypes kept back until Stage D; this build's own are not),
   // its acres, and cash for the money floor + its price + the bill floor (plan 8.1). { wait } or { cost }.
@@ -625,23 +626,7 @@ try {
 
   W.corePlan.addDirector({
     name: 'retail', order: 45,
-    defaults: {
-      stockHoursPerShelf: 1,       // hours of modelled sales in stock per shelf good before the store is built (wiki 4.7)
-      retailSampleMin: 10,         // minutes between checkpoint samples
-      retailCheckHours: 2,         // decide the checkpoint after this many hours
-      retailMaxHours: 4,           // give up (fail) when a row still has no data by then
-      retailAppetiteTol: 15,       // % appetite may fall while the store sells (a rise passes)
-      capStockHours: 2,            // a furniture cap needs this many hours of a shelved good's stock growing while sales fall short of output
-      failTtlHours: 12,            // a failed checkpoint is re-run after this many hours
-      retailSamplePassPct: 70,     // % of the modelled sales that must sell
-      retailRating: 9000,          // rating the store must reach ...
-      retailRatingMin: 90,         // ... within this many minutes of the build (75 at +1 per tick, plus slack)
-      retailE1Hours: 6,            // E1: hours in a row with the rows passing
-      retailShelfDropMin: 60,      // minutes a shelved good may be unmade and out of stock before it leaves the shelf
-      retailGoneMin: 10,           // minutes with no store owned before the checkpoint starts over
-      retailRunsPerWave: 5,        // runs per wave per Workshop when no group runs a recipe yet (wiki 2.1)
-      rivalStockHours: 2,          // rival on the board (plan R-8): a good goes on the shelf only with this many hours of stock at its drain (0: off)
-    },
+    defaults: W.idleCore.plans.copy(PD.defaults),
     context, decide,
     duties: () => [{ duty: 'Retail Store, shelves and the retail checkpoint (wiki 4.7)', owner: 'Core plan', done: true }],
   });

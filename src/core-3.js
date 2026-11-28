@@ -177,12 +177,18 @@ function freeModules(st) {
 const titleTimer = HAS_DOM ? setInterval(applyTitle, 2000) : 0;
 addEventListener?.('pagehide', flushLedger);
 
+// settings(key): one module's saved settings in localStorage. load() is null when missing or unreadable; save() never throws.
+const settings = (key) => ({
+  load: () => { try { return JSON.parse(store?.getItem(key) || 'null'); } catch { return null; } },
+  save: (v) => { try { store?.setItem(key, JSON.stringify(v)); } catch { } },
+});
+
 W.idleCore = {
   version: 1,
   walk, sleep, every, sleepWake, waitConfirm, tune, markSend, lastRtt, nowTick, seeTick, sock, orderBook, sendBoardFilter, onFrame, link, realHidden,
   h, makeDraggable, toast, ledger: ledgerApi, ui,
   setBadge, notify, askNotify, notifyPerm, stopAll, reserves, floorDesigns, courierCU, powerPriceMult, powerEvent, bought, powerMeasure,
-  exportConfig, importConfig, exportFile, importFile, missingFields, modules: { modId, usedCells, freeModules },
+  exportConfig, importConfig, exportFile, importFile, missingFields, modules: { modId, usedCells, freeModules }, plans, REGION_NAMES, regionName, toInt, settings,
   _unload() {
     orderBook.release();
     frameSubs.clear();

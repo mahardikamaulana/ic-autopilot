@@ -23,7 +23,8 @@ const floorState = JSON.parse(fs.readFileSync(path.join(__dirname, 'floor-state.
 board.catalog.machines = floorState.machines;
 board.catalog.belts = floorState.belts;
 // The merged userscript holds the shared core, CD Farm, then Autopilot; the sim runs the core and the Autopilot module.
-const full = fs.readFileSync(path.join(__dirname, '..', 'ic-autopilot.user.js'), 'utf8');
+const full = fs.readFileSync(process.env.IC_BUILD || path.join(__dirname, '..', 'ic-autopilot.user.js'), 'utf8');   // IC_BUILD: test/drift.js runs another build
+const trace = [];   // IC_TRACE=<file>: every decision, for test/drift.js
 const coreSrc = full.slice(full.indexOf('// @@MODULE core'), full.indexOf('// @@END core'));
 const src = coreSrc + '\n' + full.slice(full.indexOf('// @@MODULE early-game'));
 
@@ -336,14 +337,19 @@ function run(scenario, HOURS, quiet) {
   { const bad = core.checkGame(core.snapshot(st, C, deals, orders, 0)); if (bad.length) err('checkGame: ' + bad.join('; ')); }
   let stallAlerts = 0, wasStalled = false;
   const end = HOURS * 7200;
+  let stateAt = 0;
   while (tick < end) {
     if (farmStopNext) { globalThis.cdFarm.running = false; farmStopNext = false; }
+    // test/drift.js: IC_STATES=<dir> saves the state every 2 sim-hours; IC_CORESTUB=1 stands in a Core plan that owns the corp once the plan is done
+    if (process.env.IC_STATES && tick >= stateAt) fs.writeFileSync(path.join(process.env.IC_STATES, 'st-' + String(tick).padStart(7, '0') + '.json'), JSON.stringify(st)), stateAt += 14400;
+    if (process.env.IC_CORESTUB && !globalThis.corePlan && core.phaseOf(core.snapshot(st, C, deals, orders, tick)) === 'done') globalThis.corePlan = { busy: true, plan: () => ({ stage: 'A' }), status: () => ({}), start() { } };
     if (tick >= offlineUntil) {
       core.observe(core.snapshot(st, C, deals, orders, tick));
       for (let i = 0; i < 10; i++) {
         const seen = chaos && rand() < 0.3 ? tick + 30 : tick;   // chaos: tick estimate runs 15 s early
         const snap = core.snapshot(st, C, deals, orders, seen);
         const a = core.decide(snap);
+        if (process.env.IC_TRACE) trace.push(scenario + ' ' + tick + ' P' + core.phaseOf(snap) + (core.planDone(snap) ? ' done ' : ' ') + (a.wait ? 'wait ' + a.wait : (a.key ?? '') + ' | ' + a.reason + ' | ' + JSON.stringify(a.steps.map((x) => x.msg))));
         core.watchStall(snap, !a.wait && !/^(fill|autoship):/.test(a.key ?? ''));
         if (core.stalledNow() && !wasStalled) stallAlerts++;
         wasStalled = !!core.stalledNow();
@@ -417,6 +423,7 @@ function run(scenario, HOURS, quiet) {
   return result;
 }
 
+process.on('exit', () => { if (process.env.IC_TRACE) fs.writeFileSync(process.env.IC_TRACE, trace.join('\n') + '\n'); });
 const scenario = process.argv[2] || 'rich';
 const hours = Number(process.argv[3] || (scenario === 'live' ? 16 : 30));
 if (scenario === 'all') {
